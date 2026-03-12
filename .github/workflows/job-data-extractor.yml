@@ -1,9 +1,10 @@
 name: Job data extractor
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 7 * * *"   # every day at 07:00 UTC
 
 jobs:
   extract:
