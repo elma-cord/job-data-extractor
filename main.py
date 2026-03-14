@@ -611,7 +611,12 @@ def clean_job_description(text: str) -> str:
     return text[:20000]
 
 
-def classify_tp_and_relevance(title: str, description: str, location: str, remote_prefs: str) -> Tuple[str, str, str]:
+def classify_tp_and_relevance_fallback(
+    title: str,
+    description: str,
+    location: str,
+    remote_prefs: str
+) -> Tuple[str, str, str]:
     combined = f"{title}\n{description}".lower()
 
     tp_keywords = [
@@ -678,102 +683,81 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
     return json.loads(text)
 
 
-def ai_extract_job_fields(
-    job_url: str,
-    raw_title: str,
-    visible_text: str,
-    structured_description: str,
-    allowed_locations: List[str],
-    allowed_salaries: List[int],
-    fallback_job_title: str,
-    fallback_location: str,
-    fallback_remote_preferences: str,
-    fallback_remote_days: str,
-    fallback_salary_min: str,
-    fallback_salary_max: str,
-    fallback_salary_currency: str,
-    fallback_visa_sponsorship: str,
-    fallback_job_type: str,
-    fallback_job_description: str,
+def ai_classify_relevance_and_category(
+    job_title: str,
+    job_description: str,
+    fallback_role_relevance: str,
+    fallback_job_category: str,
+    fallback_reason: str,
 ) -> Dict[str, str]:
     if not client:
         return {
-            "job_title": fallback_job_title,
-            "role_relevance": "",
-            "role_relevance_reason": "OPENAI_API_KEY missing",
-            "job_category": "",
-            "job_location": fallback_location,
-            "remote_preferences": fallback_remote_preferences,
-            "remote_days": fallback_remote_days,
-            "salary_min": fallback_salary_min,
-            "salary_max": fallback_salary_max,
-            "salary_currency": fallback_salary_currency,
-            "visa_sponsorship": fallback_visa_sponsorship,
-            "job_type": fallback_job_type,
-            "job_description": fallback_job_description,
+            "role_relevance": fallback_role_relevance,
+            "job_category": fallback_job_category,
+            "role_relevance_reason": f"OPENAI_API_KEY missing | {fallback_reason}".strip(" |"),
         }
 
-    location_list_text = "\n".join(allowed_locations[:3000])
-    salary_list_text = ", ".join(str(x) for x in allowed_salaries[:3000])
-
     prompt = f"""
-You are extracting structured job data from a scraped job page.
+You will receive two inputs: job title and description. Perform the following tasks carefully and output the results as JSON.
 
 Return ONLY valid JSON with exactly these keys:
-job_title
 role_relevance
-role_relevance_reason
 job_category
-job_location
-remote_preferences
-remote_days
-salary_min
-salary_max
-salary_currency
-visa_sponsorship
-job_type
-job_description
+role_relevance_reason
 
-Hard rules:
-1. role_relevance must be exactly "Relevant" or "Not relevant".
-2. job_category must be exactly "T&P", "non-T&P", or "".
-3. job_location must be exactly one value from the allowed locations list when possible.
-4. If location cannot be matched confidently, use "Unknown" or "".
-5. remote_preferences must use only these values: onsite, hybrid, remote
-6. If multiple remote preferences apply, output them comma-separated in this exact order: onsite, hybrid, remote
-7. remote_days must be a single number or ""
-8. salary_min and salary_max must be the closest values from the allowed salary list
-9. If only one salary is given, use the same value for both min and max
-10. salary_currency must be something like GBP, USD, EUR, or ""
-11. visa_sponsorship must be "yes", "no", or ""
-12. job_type must be exactly one of: Permanent, FTC, Part Time, Freelance/Contract, or ""
-13. clean job_title by removing company names, locations, contract types, separators, and extra text
-14. job_description must contain the role description only, excluding company intro, benefits, perks, equal opportunities, apply now, and similar boilerplate
-15. do not invent missing facts
-16. use the page content as source of truth
+Field rules:
+- role_relevance must be exactly "Relevant" or "Not relevant"
+- job_category must be exactly "T&P" or "non-T&P"
+- role_relevance_reason must be concise
 
-Role relevance guidance:
-- "Relevant" only if the role is clearly relevant to tech/product hiring logic
-- "Not relevant" if it is clearly outside that scope
-- role_relevance_reason should be short and specific
+Use this logic exactly:
 
-Allowed locations:
-{location_list_text}
+1. Role Relevance - Decide if the role is Relevant or Not relevant according to these criteria:
 
-Allowed salaries:
-{salary_list_text}
+Relevant roles match any in this list or close synonyms/specializations:
 
-Job URL:
-{job_url}
+Account Director, Account Executive, AI Engineer, Automation Engineer, Back End, BI Developer, Big Data Engineer, Brand Marketing, Business Analyst, Business Development Manager, Business Operations, CDO, CFO, Chief of Staff, CIO, CLO, Cloud Engineer, CMO, Computer Vision Engineer, Content Marketing, COO, Copywriting, CPO, CRM Developer, CRM Manager, CRO, CSM / Account Manager, CSO, CTO, Customer Operations, Customer Service Rep, Customer Support, Data Architect, Data Engineer, Data Scientist, Data / Insight Analyst, Database Engineer, Deep Learning Engineer, Demand / Lead Generation, Developer in Test, DevOps Engineer, Digital Marketing, Embedded Developer, Engineering Manager, Events & Community, Executive Assistant, Finance / Accounting, Founder, FP&A, Front End, Full Stack, Games Designer, Games Developer, Generalist Marketing, Graphic Designer, Graphics Developer, Growth Marketing, Head of Customer, Head of Data, Head of Design, Head of Engineering, Head of Finance, Head of HR, Head of Infrastructure, Head of Marketing, Head of Operations, Head of Product, Head of QA, Head of Sales, Human Resources, Implementation Manager, Integration Developer, Legal, Machine Learning Engineer, Marketing Analyst, Mobile Developer, Network Engineer, Operations, Partnerships, Penetration Tester, People Ops, Performance Marketing, PR / Communications, Product Manager, Product Marketing, Product Owner, Project Manager, QA Automation Tester, QA Manual Tester, Quality Assurance, Quantitative Developer, Renewals Manager, Research Engineer, RevOps, Risk & Compliance, Sales Engineer, Sales Operations, Scrum Master, SDR / BDR, Security, Security Engineer, SEO Marketing, Site Reliability Engineer, Social Media Marketing, Solutions Engineer, Support Engineer, System Administrator, System Engineer, Talent Acquisition, Technical Architect, Technical Director, Technical Writer, Testing Manager, UI Designer, UI/UX Designer, UX Designer, UX Researcher, Videography, VP of Engineering.
 
-Raw title:
-{raw_title}
+If the role is clearly outside tech or business functions (e.g., teacher, nurse, waiter), mark Not Relevant, even if some criteria match.
 
-Structured description:
-{structured_description[:12000]}
+Exclude any roles related to construction, civil engineering, retail, electrical, mechanical, manufacturing, microbiology, maritime, injection molding, and beauty brands.
 
-Visible page text:
-{visible_text[:25000]}
+Location - The role is Relevant only if all stated working locations are within these allowed locations:
+
+a) United Kingdom (onsite, hybrid, or remote)
+b) For Ireland, only remote roles are allowed. If the location mentions any onsite or hybrid work, mark Not Relevant.
+c) For Europe, only roles explicitly marked as “Remote Europe” or “Remote EMEA” are allowed. Roles based in specific European countries (e.g., Germany, France) are Not Relevant unless explicitly remote.
+d) Remote Global (worldwide) – but exclude ads that specify or imply Asia-only, Africa-only, Remote APAC, Remote LATAM, USA, or any region outside the allowed list.
+e) If the role mentions a location outside the allowed regions (e.g., USA, Canada), or salary is specified in USD/CAD and no evidence exists the role can be done in allowed regions, mark Not Relevant with explanation.
+f) Accept “UK”, “Great Britain”, “London” (etc.) as United Kingdom.
+g) If multiple locations are listed and at least one is in the allowed set while others are generic (“remote, anywhere”), treat as Relevant only if the contract allows working fully from the allowed location.
+
+Language Criteria:
+a) If the job description requires any language other than English, mark Not Relevant.
+b) Only jobs requiring English (or English only) are Relevant.
+
+Steps to follow:
+Step 1: Extract Location and remote type (onsite, hybrid, remote) from job description.
+Step 2: Check if Location is in allowed list: UK, Ireland (remote only), Remote Europe, Remote EMEA, Remote Global.
+Step 3: For Ireland, if remote type is onsite or hybrid, mark Not Relevant.
+Step 4: For Europe, if location is a specific country (e.g., Germany) and not remote Europe/EMEA, mark Not Relevant.
+Step 5: Otherwise, evaluate role relevance based on job title and other criteria.
+
+2. Position Category (T&P or not T&P)
+
+Determine if the job belongs to the Tech & Product (T&P) category or not.
+
+The T&P category includes roles related to software development, engineering, product management, data science, IT, UX/UI design, QA, DevOps, and similar tech or product-focused positions.
+
+For output mapping:
+- If the prompt would say "T&P job", return job_category as "T&P"
+- If the prompt would say "Not T&P", return job_category as "non-T&P"
+
+Input job title:
+{job_title}
+
+Input description:
+{job_description[:18000]}
 """.strip()
 
     try:
@@ -784,56 +768,30 @@ Visible page text:
 
         data = safe_json_loads(response.output_text)
 
-        expected_keys = [
-            "job_title",
-            "role_relevance",
-            "role_relevance_reason",
-            "job_category",
-            "job_location",
-            "remote_preferences",
-            "remote_days",
-            "salary_min",
-            "salary_max",
-            "salary_currency",
-            "visa_sponsorship",
-            "job_type",
-            "job_description",
-        ]
+        role_relevance = str(data.get("role_relevance", "") or "").strip()
+        job_category = str(data.get("job_category", "") or "").strip()
+        reason = str(data.get("role_relevance_reason", "") or "").strip()
 
-        clean_data: Dict[str, str] = {}
-        for key in expected_keys:
-            value = data.get(key, "")
-            clean_data[key] = "" if value is None else str(value).strip()
+        if role_relevance not in {"Relevant", "Not relevant"}:
+            role_relevance = fallback_role_relevance
 
-        if clean_data["role_relevance"] not in {"Relevant", "Not relevant"}:
-            clean_data["role_relevance"] = ""
+        if job_category not in {"T&P", "non-T&P"}:
+            job_category = fallback_job_category
 
-        if clean_data["job_category"] not in {"T&P", "non-T&P", ""}:
-            clean_data["job_category"] = ""
+        if not reason:
+            reason = fallback_reason
 
-        if clean_data["visa_sponsorship"] not in {"yes", "no", ""}:
-            clean_data["visa_sponsorship"] = ""
-
-        if clean_data["job_type"] not in {"Permanent", "FTC", "Part Time", "Freelance/Contract", ""}:
-            clean_data["job_type"] = ""
-
-        return clean_data
+        return {
+            "role_relevance": role_relevance,
+            "job_category": job_category,
+            "role_relevance_reason": reason,
+        }
 
     except Exception as e:
         return {
-            "job_title": fallback_job_title,
-            "role_relevance": "",
+            "role_relevance": fallback_role_relevance,
+            "job_category": fallback_job_category,
             "role_relevance_reason": f"AI error: {e}",
-            "job_category": "",
-            "job_location": fallback_location,
-            "remote_preferences": fallback_remote_preferences,
-            "remote_days": fallback_remote_days,
-            "salary_min": fallback_salary_min,
-            "salary_max": fallback_salary_max,
-            "salary_currency": fallback_salary_currency,
-            "visa_sponsorship": fallback_visa_sponsorship,
-            "job_type": fallback_job_type,
-            "job_description": fallback_job_description,
         }
 
 
@@ -912,45 +870,34 @@ def process_url(url: str, allowed_locations: List[str], allowed_salaries: List[i
     fallback_visa = detect_visa_sponsorship(visible_text)
     fallback_job_type = detect_job_type(visible_text, structured.get("employment_type_raw", ""))
 
-    fallback_role_relevance, fallback_relevance_reason, fallback_category = classify_tp_and_relevance(
+    fallback_role_relevance, fallback_relevance_reason, fallback_category = classify_tp_and_relevance_fallback(
         fallback_job_title,
         fallback_job_description,
         fallback_location,
         fallback_remote_preferences
     )
 
-    ai_data = ai_extract_job_fields(
-        job_url=url,
-        raw_title=raw_title,
-        visible_text=visible_text,
-        structured_description=description_text,
-        allowed_locations=allowed_locations,
-        allowed_salaries=allowed_salaries,
-        fallback_job_title=fallback_job_title,
-        fallback_location=fallback_location,
-        fallback_remote_preferences=fallback_remote_preferences,
-        fallback_remote_days=fallback_remote_days,
-        fallback_salary_min=fallback_salary_min,
-        fallback_salary_max=fallback_salary_max,
-        fallback_salary_currency=fallback_salary_currency,
-        fallback_visa_sponsorship=fallback_visa,
-        fallback_job_type=fallback_job_type,
-        fallback_job_description=fallback_job_description,
+    ai_relevance = ai_classify_relevance_and_category(
+        job_title=fallback_job_title,
+        job_description=fallback_job_description,
+        fallback_role_relevance=fallback_role_relevance,
+        fallback_job_category=fallback_category,
+        fallback_reason=fallback_relevance_reason,
     )
 
-    result.job_title = ai_data.get("job_title", "") or fallback_job_title
-    result.role_relevance = ai_data.get("role_relevance", "") or fallback_role_relevance
-    result.role_relevance_reason = ai_data.get("role_relevance_reason", "") or fallback_relevance_reason
-    result.job_category = ai_data.get("job_category", "") or fallback_category
-    result.job_location = ai_data.get("job_location", "") or fallback_location
-    result.remote_preferences = ai_data.get("remote_preferences", "") or fallback_remote_preferences
-    result.remote_days = ai_data.get("remote_days", "") or fallback_remote_days
-    result.salary_min = ai_data.get("salary_min", "") or fallback_salary_min
-    result.salary_max = ai_data.get("salary_max", "") or fallback_salary_max
-    result.salary_currency = ai_data.get("salary_currency", "") or fallback_salary_currency
-    result.visa_sponsorship = ai_data.get("visa_sponsorship", "") or fallback_visa
-    result.job_type = ai_data.get("job_type", "") or fallback_job_type
-    result.job_description = ai_data.get("job_description", "") or fallback_job_description
+    result.job_title = fallback_job_title
+    result.role_relevance = ai_relevance.get("role_relevance", "") or fallback_role_relevance
+    result.role_relevance_reason = ai_relevance.get("role_relevance_reason", "") or fallback_relevance_reason
+    result.job_category = ai_relevance.get("job_category", "") or fallback_category
+    result.job_location = fallback_location
+    result.remote_preferences = fallback_remote_preferences
+    result.remote_days = fallback_remote_days
+    result.salary_min = fallback_salary_min
+    result.salary_max = fallback_salary_max
+    result.salary_currency = fallback_salary_currency
+    result.visa_sponsorship = fallback_visa
+    result.job_type = fallback_job_type
+    result.job_description = fallback_job_description
     result.source_method = source_method
     result.status = "ok"
     result.notes = " | ".join(notes)
