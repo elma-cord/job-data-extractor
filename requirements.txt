@@ -4,3 +4,4 @@ lxml
 playwright
 pandas
 python-dateutil
+openai
