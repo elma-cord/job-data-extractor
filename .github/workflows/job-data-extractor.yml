@@ -30,6 +30,8 @@ jobs:
           python -m playwright install chromium --with-deps
 
       - name: Run extractor
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python main.py
 
