@@ -91,7 +91,6 @@ def load_text_list(filepath: str) -> List[str]:
     if not os.path.exists(filepath):
         print(f"[WARN] Missing file: {filepath}")
         return []
-
     df = pd.read_csv(filepath)
     col = df.columns[0]
     return (
@@ -108,7 +107,6 @@ def load_salary_list(filepath: str) -> List[int]:
     if not os.path.exists(filepath):
         print(f"[WARN] Missing file: {filepath}")
         return []
-
     df = pd.read_csv(filepath)
     col = df.columns[0]
     vals = []
@@ -399,7 +397,7 @@ def normalize_category_for_skills(job_category: str) -> str:
     low = (job_category or "").strip().lower()
     if low in {"t&p", "tp", "tech & product", "tech and product"}:
         return "T&P"
-    if low in {"nont&p", "non-t&p", "non tp", "not t&p", "not tp", "non tech", "non-tech"}:
+    if low in {"nont&p", "non-t&p", "non tp", "not t&p", "not tp", "nontp", "non tech", "non-tech"}:
         return "NonT&P"
     return ""
 
@@ -652,8 +650,16 @@ def normalize_seniority_list(values: List[str]) -> List[str]:
     return [x for x in order if x in found][:3]
 
 
-def escape_regexp(string: str) -> str:
-    return re.escape(string)
+def build_skill_regex(skill: str) -> re.Pattern:
+    escaped = re.escape(skill)
+
+    special_exact = {"c++", "c#", ".net", "node.js", "next.js", "vue.js", "nuxt.js"}
+    if skill.strip().lower() in special_exact:
+        pattern = rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])"
+        return re.compile(pattern, flags=re.I)
+
+    pattern = rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])"
+    return re.compile(pattern, flags=re.I)
 
 
 def exact_match_skills_in_order(description: str, skill_list: List[str], limit: int = 10) -> List[str]:
@@ -662,7 +668,7 @@ def exact_match_skills_in_order(description: str, skill_list: List[str], limit: 
 
     found = []
     for skill in skill_list:
-        regex = re.compile(r"(\b|\W)" + escape_regexp(skill) + r"(\b|\W)", flags=re.I)
+        regex = build_skill_regex(skill)
         match = regex.search(description)
         if match:
             index = match.start()
@@ -991,39 +997,46 @@ Input description:
         }
 
 
-def ai_fallback_skills(
+def ai_enrich_skills(
     role_category: str,
     description: str,
-    candidate_skills: List[str],
+    exact_skills: List[str],
     allowed_skills: List[str],
 ) -> List[str]:
     if not client or not role_category or not description or not allowed_skills:
-        return candidate_skills[:10]
+        return exact_skills[:10]
 
     role_category = normalize_category_for_skills(role_category)
     if role_category not in {"T&P", "NonT&P"}:
-        return candidate_skills[:10]
+        return exact_skills[:10]
 
     allowed_skills_text = ", ".join(allowed_skills[:5000])
-    candidate_skills_text = ", ".join(candidate_skills)
+    exact_skills_text = ", ".join(exact_skills)
 
     prompt = f"""
 You are a strict skills tagger for a recruiting workflow.
 
 Return valid json only. No markdown. No commentary.
 
+Goal:
+- You are given skills already found by exact matching.
+- Keep those exact-match skills.
+- Add any other clearly evidenced missing skills from the description, but ONLY from the allowed list.
+- Do not remove correct exact-match skills.
+- Return 2 to 10 skills total.
+
 Hard rules:
 - role_category is PROVIDED as input. You MUST echo it exactly as given ("T&P" or "NonT&P"). Do not change it.
-- skills MUST be an array with 2 to 10 items (try hard to return at least 2).
-- skills MUST be chosen ONLY from the correct Allowed skills list (exact string match):
-  - If role_category = "T&P" use Allowed T&P skills
-  - If role_category = "NonT&P" use Allowed NonT&P skills
+- skills MUST be an array with 2 to 10 items if evidence exists.
+- skills MUST be chosen ONLY from the correct Allowed skills list (exact string match).
 - Prefer concrete, clearly evidenced skills from the description.
-- candidate_skills is provided: use it as the PRIMARY source, but if it has fewer than 2 items, infer additional skills from the description (still only from the allowed list).
+- exact_skills is the PRIMARY base set. Preserve them unless they are empty.
 - NEVER output a skill not present in the allowed list.
-- Before finalizing, verify each returned skill appears exactly in the allowed list. If not, remove it.
+- Before finalizing, verify each returned skill appears exactly in the allowed list.
+- Keep exact_skills first, then add missing clearly evidenced skills.
+- Do not invent skills.
 
-Output schema (exact keys):
+Output schema:
 {{
   "role_category": "T&P" or "NonT&P",
   "skills": ["..."]
@@ -1032,8 +1045,8 @@ Output schema (exact keys):
 role_category:
 {role_category}
 
-candidate_skills:
-{candidate_skills_text}
+exact_skills:
+{exact_skills_text}
 
 Allowed skills:
 {allowed_skills_text}
@@ -1048,23 +1061,27 @@ description:
 
         out_category = normalize_category_for_skills(str(data.get("role_category", "") or "").strip())
         if out_category != role_category:
-            return candidate_skills[:10]
+            return exact_skills[:10]
 
         raw_skills = data.get("skills", [])
         if not isinstance(raw_skills, list):
-            return candidate_skills[:10]
+            return exact_skills[:10]
 
-        allowed_set = {s: s.lower() for s in allowed_skills}
-        valid = []
+        merged = []
+        for sk in exact_skills:
+            exact = next((s for s in allowed_skills if s.lower() == sk.lower()), "")
+            if exact and exact not in merged:
+                merged.append(exact)
+
         for sk in raw_skills:
             sk_clean = str(sk).strip()
             exact = next((s for s in allowed_skills if s.lower() == sk_clean.lower()), "")
-            if exact and exact not in valid:
-                valid.append(exact)
+            if exact and exact not in merged:
+                merged.append(exact)
 
-        return valid[:10] if valid else candidate_skills[:10]
+        return merged[:10]
     except Exception:
-        return candidate_skills[:10]
+        return exact_skills[:10]
 
 
 def process_url(
@@ -1196,15 +1213,12 @@ def process_url(
 
     skill_list = tp_skills if result.job_category == "T&P" else nontp_skills
     exact_skills = exact_match_skills_in_order(result.job_description or all_page_text, skill_list, limit=10)
-
-    final_skills = exact_skills
-    if len(final_skills) < 2:
-        final_skills = ai_fallback_skills(
-            role_category=result.job_category,
-            description=result.job_description or all_page_text,
-            candidate_skills=exact_skills,
-            allowed_skills=skill_list,
-        )
+    final_skills = ai_enrich_skills(
+        role_category=result.job_category,
+        description=result.job_description or all_page_text,
+        exact_skills=exact_skills,
+        allowed_skills=skill_list,
+    )
 
     padded_skills = (final_skills + [""] * 10)[:10]
     result.skill_1 = padded_skills[0]
@@ -1219,12 +1233,12 @@ def process_url(
     result.skill_10 = padded_skills[9]
 
     note_parts = notes + ["ran_relevant_tagging"]
-    if len(exact_skills) >= 2:
-        note_parts.append("skills_exact_match_only")
+    if len(exact_skills) > 0:
+        note_parts.append("skills_exact_plus_ai_enrichment")
     else:
-        note_parts.append("skills_ai_fallback_used")
-
+        note_parts.append("skills_ai_only")
     result.notes = " | ".join(note_parts)
+
     return result
 
 
