@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -52,6 +53,7 @@ class JobResult:
     salary_min: str = ""
     salary_max: str = ""
     salary_currency: str = ""
+    salary_period: str = ""
     visa_sponsorship: str = ""
     job_type: str = ""
     job_description: str = ""
@@ -79,6 +81,66 @@ class JobResult:
     status: str = ""
     notes: str = ""
 
+
+# -------------------------
+# Generic helpers
+# -------------------------
+
+def clean_whitespace(text: str) -> str:
+    text = text or ""
+    text = re.sub(r"\r", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def first_nonempty(*values: Any) -> str:
+    for v in values:
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
+def strip_html(text: str) -> str:
+    return clean_whitespace(BeautifulSoup(text or "", "lxml").get_text("\n", strip=True))
+
+
+def safe_json_loads(text: str) -> Dict[str, Any]:
+    text = (text or "").strip()
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start:end + 1]
+
+    return json.loads(text)
+
+
+def split_lines(text: str) -> List[str]:
+    return [clean_whitespace(x) for x in (text or "").splitlines() if clean_whitespace(x)]
+
+
+def dedupe_keep_order(values: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for v in values:
+        key = v.lower().strip()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(v)
+    return out
+
+
+# -------------------------
+# File loaders
+# -------------------------
 
 def load_urls(filepath: str) -> List[str]:
     if not os.path.exists(filepath):
@@ -118,26 +180,9 @@ def load_salary_list(filepath: str) -> List[int]:
     return sorted(set(vals))
 
 
-def clean_whitespace(text: str) -> str:
-    text = re.sub(r"\r", "\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def first_nonempty(*values: Any) -> str:
-    for v in values:
-        if v is None:
-            continue
-        s = str(v).strip()
-        if s:
-            return s
-    return ""
-
-
-def strip_html(text: str) -> str:
-    return clean_whitespace(BeautifulSoup(text or "", "lxml").get_text("\n", strip=True))
-
+# -------------------------
+# Fetching
+# -------------------------
 
 def fetch_html(url: str) -> Tuple[Optional[str], str]:
     try:
@@ -171,7 +216,7 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
 
 
 def looks_like_js_shell(html: str, text: str) -> bool:
-    low_text = text.lower()
+    low_text = (text or "").lower()
     shell_signals = [
         "enable javascript",
         "javascript is required",
@@ -180,20 +225,26 @@ def looks_like_js_shell(html: str, text: str) -> bool:
     ]
     if any(sig in low_text for sig in shell_signals):
         return True
-    if len(text.strip()) < 350:
+
+    if len(low_text.strip()) < 350:
         return True
 
-    body_len = len(re.sub(r"\s+", " ", html))
-    text_len = len(re.sub(r"\s+", " ", text))
+    body_len = len(re.sub(r"\s+", " ", html or ""))
+    text_len = len(re.sub(r"\s+", " ", text or ""))
     if body_len > 0 and text_len / body_len < 0.03:
         return True
     return False
 
 
+# -------------------------
+# HTML parsing
+# -------------------------
+
 def soup_text(soup: BeautifulSoup) -> str:
-    for tag in soup(["script", "style", "noscript", "svg"]):
+    soup_copy = BeautifulSoup(str(soup), "lxml")
+    for tag in soup_copy(["script", "style", "noscript", "svg"]):
         tag.extract()
-    return clean_whitespace(soup.get_text("\n", strip=True))
+    return clean_whitespace(soup_copy.get_text("\n", strip=True))
 
 
 def extract_jsonld_objects(soup: BeautifulSoup) -> List[Dict[str, Any]]:
@@ -314,6 +365,243 @@ def extract_structured_fields(soup: BeautifulSoup) -> Dict[str, Any]:
     return data
 
 
+# -------------------------
+# Role text extraction
+# -------------------------
+
+ROLE_KEEP_HEADINGS = {
+    "about the role",
+    "job description",
+    "role purpose",
+    "purpose of the role",
+    "context",
+    "key responsibilities",
+    "responsibilities",
+    "what you’ll do",
+    "what you'll do",
+    "what to bring",
+    "what you’ll need",
+    "what you'll need",
+    "required",
+    "required experience",
+    "essential",
+    "essential skills and experience",
+    "desirable",
+    "desirable skills and experience",
+    "qualifications",
+    "skills & experience",
+    "skills and experience",
+    "activities",
+    "to be successful",
+    "who we are looking for",
+    "minimum qualifications",
+    "preferred qualifications",
+    "nice to have",
+    "key relationships",
+    "success measures",
+    "job requirements",
+    "overview",
+}
+
+ROLE_STOP_HEADINGS = {
+    "company description",
+    "about the company",
+    "about us",
+    "benefits",
+    "what we offer",
+    "what do you get for all your hard work?",
+    "what you'll get in return",
+    "what you’ll get in return",
+    "additional information",
+    "why version 1?",
+    "recruitment agencies",
+    "privacy policy",
+    "reasonable adjustments",
+    "smart working",
+    "equality, diversity and inclusion",
+    "safeguarding",
+    "contact",
+    "read more",
+    "follow us",
+}
+
+NOISE_LINE_PATTERNS = [
+    r"^©\s*\d{4}",
+    r"^follow us$",
+    r"^read more$",
+    r"^privacy policy$",
+    r"^recruitment agencies$",
+    r"^temporary roles:",
+    r"^permanent and fixed term roles:",
+    r"^reasonable adjustments$",
+    r"^smart working$",
+    r"^equality, diversity and inclusion$",
+    r"^safeguarding$",
+    r"^contact$",
+    r"^who we are:$",
+    r"^logo$",
+    r"^apply$",
+    r"^employees work in a hybrid mode$",
+]
+
+
+def line_is_noise(line: str) -> bool:
+    low = line.lower().strip()
+    if not low:
+        return True
+    for pat in NOISE_LINE_PATTERNS:
+        if re.search(pat, low, flags=re.I):
+            return True
+    return False
+
+
+def build_header_text(lines: List[str], structured: Dict[str, Any], title_tag_text: str) -> str:
+    keep = []
+    if title_tag_text:
+        keep.append(title_tag_text)
+    if structured.get("title"):
+        keep.append(structured["title"])
+    if structured.get("location_raw"):
+        keep.append(structured["location_raw"])
+    if structured.get("company_name"):
+        keep.append(structured["company_name"])
+
+    # Keep top lines likely containing header meta
+    for line in lines[:40]:
+        low = line.lower()
+        if (
+            "location" in low
+            or "country" in low
+            or "hybrid" in low
+            or "remote" in low
+            or "home based" in low
+            or "onsite" in low
+            or "office" in low
+            or "salary" in low
+            or "rate" in low
+            or "contract" in low
+            or "full time" in low
+            or "full-time" in low
+            or "part time" in low
+            or "part-time" in low
+        ):
+            keep.append(line)
+
+    return clean_whitespace("\n".join(dedupe_keep_order(keep)))
+
+
+def extract_role_body_text(lines: List[str]) -> str:
+    """
+    Keep the parts most likely to be actual role content.
+    Preserve key sections like Required, Desirable, Key Relationships, Qualifications, etc.
+    Remove obvious footer/legal/company/ATS noise.
+    """
+    kept = []
+    in_role_zone = False
+
+    for i, line in enumerate(lines):
+        low = line.lower().strip()
+
+        if line_is_noise(line):
+            continue
+
+        if low in ROLE_KEEP_HEADINGS:
+            in_role_zone = True
+            kept.append(line)
+            continue
+
+        if low in ROLE_STOP_HEADINGS:
+            # stop only if we've already collected a meaningful role zone
+            if in_role_zone:
+                continue
+            else:
+                # If company text comes first, skip it but keep searching
+                continue
+
+        # Start role zone if strong role cues appear
+        if not in_role_zone:
+            if (
+                "key responsibilities" in low
+                or "responsibilities" == low
+                or "minimum qualifications" in low
+                or "preferred qualifications" in low
+                or "required experience" in low
+                or "essential skills" in low
+                or "what you’ll do" in low
+                or "what you'll do" in low
+                or "what to bring" in low
+                or "qualifications" == low
+                or "job requirements" == low
+            ):
+                in_role_zone = True
+                kept.append(line)
+                continue
+
+        # Keep useful role content lines
+        if in_role_zone:
+            kept.append(line)
+
+    # If we captured almost nothing, fallback to a filtered middle-ground
+    if len(kept) < 12:
+        fallback = []
+        for line in lines:
+            low = line.lower().strip()
+            if line_is_noise(line):
+                continue
+            if low in ROLE_STOP_HEADINGS:
+                continue
+            fallback.append(line)
+        kept = fallback
+
+    return clean_whitespace("\n".join(kept))
+
+
+def extract_best_content(html: str) -> Dict[str, Any]:
+    soup = BeautifulSoup(html, "lxml")
+    visible_text = soup_text(soup)
+    structured = extract_structured_fields(soup)
+
+    description_raw = structured.get("description_raw") or ""
+    structured_description_text = strip_html(description_raw)
+
+    title_tag = soup.find("title")
+    title_tag_text = clean_whitespace(title_tag.get_text(" ", strip=True)) if title_tag else ""
+
+    visible_lines = split_lines(visible_text)
+    header_text = build_header_text(visible_lines, structured, title_tag_text)
+
+    # Prefer structured job description when it looks substantial, else visible text-derived role body
+    structured_lines = split_lines(structured_description_text)
+    visible_role_body = extract_role_body_text(visible_lines)
+    structured_role_body = extract_role_body_text(structured_lines) if len(structured_lines) >= 8 else ""
+
+    role_body_text = structured_role_body if len(structured_role_body) > 400 else visible_role_body
+
+    role_context_text = clean_whitespace("\n".join([header_text, role_body_text]))
+    all_page_text = clean_whitespace("\n".join([
+        title_tag_text,
+        structured.get("title", ""),
+        structured.get("company_name", ""),
+        structured.get("location_raw", ""),
+        structured_description_text,
+        visible_text,
+    ]))
+
+    return {
+        "soup": soup,
+        "structured": structured,
+        "title_tag_text": title_tag_text,
+        "header_text": header_text,
+        "role_body_text": role_body_text,
+        "role_context_text": role_context_text,
+        "all_page_text": all_page_text,
+    }
+
+
+# -------------------------
+# Deterministic parsing
+# -------------------------
+
 def clean_job_title(raw_title: str) -> str:
     if not raw_title:
         return ""
@@ -347,52 +635,6 @@ def clean_job_title(raw_title: str) -> str:
     return clean_whitespace(title)
 
 
-def clean_job_description(text: str) -> str:
-    if not text:
-        return ""
-
-    lines = [clean_whitespace(x) for x in text.splitlines()]
-    lines = [x for x in lines if x]
-
-    stop_headers = [
-        "about the company",
-        "about us",
-        "benefits",
-        "perks",
-        "why join us",
-        "what we offer",
-        "company benefits",
-        "our benefits",
-        "equal opportunities",
-        "apply now",
-        "how to apply",
-        "interested in this",
-    ]
-
-    cleaned = []
-    for line in lines:
-        low = line.lower().strip(":")
-        if any(low == h or low.startswith(h + ":") for h in stop_headers):
-            break
-        cleaned.append(line)
-
-    text = "\n".join(cleaned)
-
-    boilerplate_patterns = [
-        r"(?is)\babout the company\b.*$",
-        r"(?is)\bbenefits\b.*$",
-        r"(?is)\bperks\b.*$",
-        r"(?is)\bwhat we offer\b.*$",
-        r"(?is)\bapply now\b.*$",
-        r"(?is)\bequal opportunit(?:y|ies)\b.*$",
-        r"(?is)\binterested in this\b.*$",
-    ]
-    for pat in boilerplate_patterns:
-        text = re.sub(pat, "", text)
-
-    return clean_whitespace(text)[:20000]
-
-
 def normalize_category_for_skills(job_category: str) -> str:
     low = (job_category or "").strip().lower()
     if low in {"t&p", "tp", "tech & product", "tech and product"}:
@@ -402,91 +644,111 @@ def normalize_category_for_skills(job_category: str) -> str:
     return ""
 
 
-def normalize_location_rule_based(raw_location: str, text: str, allowed_locations: List[str]) -> str:
-    if not allowed_locations:
-        return clean_whitespace(raw_location)
-
-    candidates = []
-    if raw_location:
-        candidates.append(clean_whitespace(raw_location))
-
-    lines = [x.strip() for x in text.splitlines() if x.strip()]
-    for line in lines[:400]:
-        if re.search(r"\blocation\b|\bbased in\b|\boffice\b|\bremote\b|\buk\b|\blondon\b", line, flags=re.I):
-            candidates.append(clean_whitespace(line))
-
-    joined = " || ".join(candidates)
-    joined_low = joined.lower()
-
-    for loc in allowed_locations:
-        if joined_low == loc.lower():
-            return loc
-
-    for loc in allowed_locations:
-        if loc.lower() in joined_low:
-            return loc
-
-    city_to_full = {}
+def build_location_lookup(allowed_locations: List[str]) -> Dict[str, str]:
+    city_lookup = {}
     for loc in allowed_locations:
         city = loc.split(",")[0].strip().lower()
-        if city and city not in city_to_full:
-            city_to_full[city] = loc
+        if city and city not in city_lookup:
+            city_lookup[city] = loc
+    return city_lookup
 
-    for city, full in city_to_full.items():
-        if re.search(rf"\b{re.escape(city)}\b", joined_low):
-            return full
 
-    return "Unknown"
+def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> str:
+    if not allowed_locations or not text:
+        return ""
+
+    city_lookup = build_location_lookup(allowed_locations)
+    lines = split_lines(text)
+
+    # Priority 1: explicit location lines in order
+    candidate_lines = []
+    for line in lines[:60]:
+        low = line.lower()
+        if any(x in low for x in ["location", "country", "based at", "based in", "home based", "hybrid", "remote"]):
+            candidate_lines.append(line)
+        elif re.search(r"\b(london|manchester|birmingham|edinburgh|belfast|sheffield|aberdeen|warminster|newcastle)\b", low):
+            candidate_lines.append(line)
+
+    # Priority 2: match most specific location appearing earliest
+    joined = "\n".join(candidate_lines) if candidate_lines else text
+    joined_low = joined.lower()
+
+    # Exact location string match by appearance
+    exact_hits = []
+    for loc in allowed_locations:
+        pos = joined_low.find(loc.lower())
+        if pos != -1:
+            exact_hits.append((pos, len(loc), loc))
+
+    if exact_hits:
+        exact_hits.sort(key=lambda x: (x[0], -x[1]))
+        return exact_hits[0][2]
+
+    # City-only fallback by appearance order
+    city_hits = []
+    for city, full in city_lookup.items():
+        m = re.search(rf"\b{re.escape(city)}\b", joined_low)
+        if m:
+            city_hits.append((m.start(), len(city), full))
+
+    if city_hits:
+        city_hits.sort(key=lambda x: (x[0], -x[1]))
+        return city_hits[0][2]
+
+    # Country fallback only if nothing more specific exists
+    for broad in ["United Kingdom", "England", "Scotland", "Wales", "Northern Ireland", "Ireland"]:
+        for loc in allowed_locations:
+            if loc.lower() == broad.lower() and broad.lower() in joined_low:
+                return loc
+
+    return ""
 
 
 def detect_remote_preferences_rule_based(text: str) -> str:
-    low = text.lower()
+    low = (text or "").lower()
     found = []
 
-    onsite_patterns = [r"\bonsite\b", r"\bon-site\b", r"\bon site\b", r"\bin office\b", r"\bin-office\b"]
-    hybrid_patterns = [r"\bhybrid\b", r"\bhybrid working\b", r"\bhybrid role\b", r"\bhybrid model\b"]
-    remote_patterns = [r"\bremote\b", r"\bfully remote\b", r"\bwork from home\b", r"\bwfh\b"]
-
-    if any(re.search(p, low) for p in onsite_patterns):
-        found.append("onsite")
-    if any(re.search(p, low) for p in hybrid_patterns):
-        found.append("hybrid")
-    if any(re.search(p, low) for p in remote_patterns):
+    # Stronger precedence for explicit role text
+    if re.search(r"\bhome based\b|\buk remote\b|\bfully remote\b|\bremote\b", low):
         found.append("remote")
+    if re.search(r"\bhybrid\b", low):
+        found.append("hybrid")
+    if re.search(r"\bonsite\b|\bon-site\b|\bon site\b|\bin office\b|\bin-office\b", low):
+        found.append("onsite")
 
-    return ", ".join(found)
+    ordered = [x for x in ["onsite", "hybrid", "remote"] if x in found]
+    return ", ".join(ordered)
 
 
 def detect_remote_days_rule_based(text: str, remote_prefs: str) -> str:
-    low = text.lower()
-    if "hybrid" not in remote_prefs:
+    low = (text or "").lower()
+
+    # Only tag days if explicit. Never infer from "hybrid" alone.
+    if "hybrid" not in remote_prefs and "remote" not in remote_prefs:
         return ""
 
-    if re.search(r"\bfully remote\b|\bremote every day\b", low):
-        return ""
-
-    remote_patterns = [
-        r"(\d)\s*-\s*(\d)\s+days?\s+(?:remote|from home|wfh)",
-        r"(\d)\s+days?\s+(?:remote|from home|wfh)",
-    ]
-    office_patterns = [
+    explicit_patterns = [
         r"(\d)\s*-\s*(\d)\s+days?\s+(?:in the office|from the office|office)",
         r"(\d)\s+days?\s+(?:in the office|from the office|office)",
+        r"(\d)\s*-\s*(\d)\s+days?\s+(?:from home|remote|wfh)",
+        r"(\d)\s+days?\s+(?:from home|remote|wfh)",
     ]
 
-    for pat in remote_patterns:
+    for pat in explicit_patterns:
         m = re.search(pat, low)
-        if m:
-            return m.group(2) if len(m.groups()) == 2 else m.group(1)
+        if not m:
+            continue
 
-    for pat in office_patterns:
-        m = re.search(pat, low)
-        if m:
+        if "office" in pat:
             if len(m.groups()) == 2:
-                low_office = int(m.group(1))
-                high_office = int(m.group(2))
-                return str(max(5 - low_office, 5 - high_office))
+                office_days_low = int(m.group(1))
+                office_days_high = int(m.group(2))
+                return str(max(5 - office_days_low, 5 - office_days_high))
             return str(max(0, 5 - int(m.group(1))))
+        else:
+            if len(m.groups()) == 2:
+                return m.group(2)
+            return m.group(1)
 
     return ""
 
@@ -500,79 +762,97 @@ def nearest_salary(value: Optional[int], allowed_salaries: List[int]) -> str:
     return str(nearest)
 
 
-def parse_salary_candidates(text: str) -> List[Tuple[int, str]]:
-    text = text.replace("\xa0", " ")
-    candidates: List[Tuple[int, str]] = []
+def parse_explicit_salary(text: str, allowed_salaries: List[int]) -> Tuple[str, str, str, str]:
+    """
+    Return salary only when there is strong explicit evidence.
+    Supports annual and daily rates.
+    """
+    lines = split_lines(text)
+    candidate_lines = []
 
-    patterns = [
-        r"(£|\$|€)\s?(\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\s?([kK]))?",
-        r"\b(GBP|USD|EUR|CAD)\s?(\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\s?([kK]))?",
-    ]
+    for line in lines[:80]:
+        low = line.lower()
 
-    for pat in patterns:
-        for m in re.finditer(pat, text):
-            currency_raw = m.group(1)
-            number_raw = m.group(2)
-            k_flag = m.group(3) if len(m.groups()) >= 3 else None
+        # Must have strong compensation evidence
+        if (
+            "salary" in low
+            or "rate" in low
+            or "compensation" in low
+            or re.search(r"[£$€]", line)
+            or re.search(r"\b(?:gbp|usd|eur|cad)\b", low)
+        ):
+            candidate_lines.append(line)
 
-            number = re.sub(r"[,\s]", "", number_raw)
-            try:
-                value = int(number)
-                if k_flag:
-                    value *= 1000
-            except Exception:
-                continue
+    # Check day rate first
+    for line in candidate_lines:
+        low = line.lower()
+        if re.search(r"\b(p/d|per day|day rate|daily rate)\b", low):
+            m = re.search(
+                r"(£|\$|€)?\s?(\d{2,6})(?:[,\d]*)\s*[-–to]+\s*(£|\$|€)?\s?(\d{2,6})(?:[,\d]*)",
+                line,
+                flags=re.I,
+            )
+            if m:
+                curr_sym = m.group(1) or m.group(3) or ""
+                min_raw = int(re.sub(r"[^\d]", "", m.group(2)))
+                max_raw = int(re.sub(r"[^\d]", "", m.group(4)))
+                currency = {"£": "GBP", "$": "USD", "€": "EUR"}.get(curr_sym, "")
+                return str(min_raw), str(max_raw), currency, "day"
 
-            if currency_raw == "£":
-                currency = "GBP"
-            elif currency_raw == "$":
-                currency = "USD"
-            elif currency_raw == "€":
-                currency = "EUR"
-            else:
-                currency = currency_raw.upper()
+            m_single = re.search(r"(£|\$|€)\s?(\d{2,6})", line)
+            if m_single:
+                curr_sym = m_single.group(1)
+                val = int(m_single.group(2))
+                currency = {"£": "GBP", "$": "USD", "€": "EUR"}.get(curr_sym, "")
+                return str(val), str(val), currency, "day"
 
-            if 5000 <= value <= 10000000:
-                candidates.append((value, currency))
+    # Annual or normal compensation
+    for line in candidate_lines:
+        low = line.lower()
 
-    return candidates
+        # Skip lines that look like dates/reference or standards
+        if re.search(r"\b(202\d|iso|nist|reference|posted on)\b", low):
+            continue
 
+        if not (
+            "salary" in low
+            or "annually" in low
+            or "gross annually" in low
+            or "per annum" in low
+            or "pa" in low
+            or re.search(r"[£$€]", line)
+        ):
+            continue
 
-def extract_salary_rule_based(text: str, structured: Dict[str, Any], allowed_salaries: List[int]) -> Tuple[str, str, str]:
-    min_raw = structured.get("salary_min_raw")
-    max_raw = structured.get("salary_max_raw")
-    curr_raw = first_nonempty(structured.get("salary_currency_raw")).upper()
-
-    if min_raw is not None or max_raw is not None:
-        if min_raw is None and max_raw is not None:
-            min_raw = max_raw
-        if max_raw is None and min_raw is not None:
-            max_raw = min_raw
-        return (
-            nearest_salary(int(min_raw), allowed_salaries) if min_raw is not None else "",
-            nearest_salary(int(max_raw), allowed_salaries) if max_raw is not None else "",
-            curr_raw,
+        m_range = re.search(
+            r"(£|\$|€)\s?(\d{1,3}(?:,\d{3})+|\d{4,6})\s*(?:-|–|to)\s*(£|\$|€)?\s?(\d{1,3}(?:,\d{3})+|\d{4,6})",
+            line
         )
+        if m_range:
+            curr_sym = m_range.group(1) or m_range.group(3) or ""
+            min_raw = int(re.sub(r"[^\d]", "", m_range.group(2)))
+            max_raw = int(re.sub(r"[^\d]", "", m_range.group(4)))
+            currency = {"£": "GBP", "$": "USD", "€": "EUR"}.get(curr_sym, "")
+            return (
+                nearest_salary(min_raw, allowed_salaries),
+                nearest_salary(max_raw, allowed_salaries),
+                currency,
+                "year",
+            )
 
-    candidates = parse_salary_candidates(text)
-    if not candidates:
-        return "", "", ""
+        m_single = re.search(r"(£|\$|€)\s?(\d{1,3}(?:,\d{3})+|\d{4,6})", line)
+        if m_single:
+            curr_sym = m_single.group(1)
+            val = int(re.sub(r"[^\d]", "", m_single.group(2)))
+            currency = {"£": "GBP", "$": "USD", "€": "EUR"}.get(curr_sym, "")
+            normalized = nearest_salary(val, allowed_salaries)
+            return normalized, normalized, currency, "year"
 
-    values = [v for v, _ in candidates]
-    currencies = [c for _, c in candidates]
-    min_val = min(values)
-    max_val = max(values)
-    currency = max(set(currencies), key=currencies.count)
-
-    return (
-        nearest_salary(min_val, allowed_salaries),
-        nearest_salary(max_val, allowed_salaries),
-        currency,
-    )
+    return "", "", "", ""
 
 
 def detect_visa_rule_based(text: str) -> str:
-    low = text.lower()
+    low = (text or "").lower()
 
     yes_patterns = [
         r"visa sponsorship available",
@@ -588,6 +868,7 @@ def detect_visa_rule_based(text: str) -> str:
         r"cannot sponsor",
         r"do not sponsor",
         r"without sponsorship",
+        r"right to work in the uk is mandatory",
         r"must have the right to work",
     ]
 
@@ -617,20 +898,53 @@ def detect_job_type_rule_based(text: str, structured_employment_type: str = "") 
     return ""
 
 
-def safe_json_loads(text: str) -> Dict[str, Any]:
-    text = text.strip()
+def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
+    title_low = (job_title or "").lower()
+    text_low = (role_text or "").lower()
 
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+    if any(x in title_low for x in ["head of", "director", "vp ", "vice president", "chief ", "cfo", "cto", "cio", "coo", "cmo", "cro", "cpo", "cso", "engineering manager"]):
+        return ["leadership"]
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        text = text[start:end + 1]
+    if any(x in title_low for x in ["senior", "sr "]):
+        return ["senior", "lead"]
 
-    return json.loads(text)
+    if any(x in title_low for x in ["lead ", "principal"]):
+        return ["lead"]
 
+    if any(x in title_low for x in ["junior", "jr "]):
+        return ["junior", "mid"]
+
+    if any(x in title_low for x in ["associate", "mid weight", "mid-weight"]):
+        return ["mid"]
+
+    # Experience rules
+    years = []
+    for m in re.finditer(r"\b(\d)\s*-\s*(\d)\s+years?\b", text_low):
+        years.extend([int(m.group(1)), int(m.group(2))])
+    for m in re.finditer(r"\b(\d)\+?\s+years?\b", text_low):
+        years.append(int(m.group(1)))
+
+    if years:
+        min_y = min(years)
+        max_y = max(years)
+        out = []
+        for y in range(min_y, max_y + 1):
+            if y <= 1:
+                out.extend(["entry", "junior"])
+            elif y == 2:
+                out.extend(["junior", "mid"])
+            elif 3 <= y <= 5:
+                out.extend(["senior", "lead"])
+            elif y > 5:
+                out.extend(["senior", "lead"])
+        return [x for x in ["entry", "junior", "mid", "senior", "lead", "leadership"] if x in out][:3]
+
+    return []
+
+
+# -------------------------
+# AI prompts
+# -------------------------
 
 def normalize_job_title_from_list(value: str, allowed_job_titles: List[str]) -> str:
     value_clean = clean_whitespace(value)
@@ -650,79 +964,9 @@ def normalize_seniority_list(values: List[str]) -> List[str]:
     return [x for x in order if x in found][:3]
 
 
-def build_skill_regex(skill: str) -> re.Pattern:
-    normalized = skill.strip().lower()
-
-    if normalized == "c++":
-        return re.compile(r"(?<![A-Za-z0-9])c\+\+(?![A-Za-z0-9])", flags=re.I)
-    if normalized == "c#":
-        return re.compile(r"(?<![A-Za-z0-9])c#(?![A-Za-z0-9])", flags=re.I)
-    if normalized == ".net":
-        return re.compile(r"(?<![A-Za-z0-9])(?:\.net|dotnet|dot net)(?![A-Za-z0-9])", flags=re.I)
-    if normalized == "node.js":
-        return re.compile(r"(?<![A-Za-z0-9])(?:node\.js|nodejs|node js)(?![A-Za-z0-9])", flags=re.I)
-    if normalized == "next.js":
-        return re.compile(r"(?<![A-Za-z0-9])(?:next\.js|nextjs|next js)(?![A-Za-z0-9])", flags=re.I)
-    if normalized == "vue.js":
-        return re.compile(r"(?<![A-Za-z0-9])(?:vue\.js|vuejs|vue js)(?![A-Za-z0-9])", flags=re.I)
-    if normalized == "nuxt.js":
-        return re.compile(r"(?<![A-Za-z0-9])(?:nuxt\.js|nuxtjs|nuxt js)(?![A-Za-z0-9])", flags=re.I)
-    if normalized == "git":
-        return re.compile(r"(?<![A-Za-z0-9])git(?![A-Za-z0-9])", flags=re.I)
-
-    escaped = re.escape(skill)
-    return re.compile(rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])", flags=re.I)
-
-
-def exact_match_skills_in_order(description: str, skill_list: List[str], limit: int = 10) -> List[str]:
-    if not description or not skill_list:
-        return []
-
-    found = []
-    for skill in skill_list:
-        regex = build_skill_regex(skill)
-        match = regex.search(description)
-        if match:
-            index = match.start()
-            if not any(e["skill"].lower() == skill.lower() for e in found):
-                found.append({"skill": skill, "index": index})
-
-    found.sort(key=lambda x: x["index"])
-    return [x["skill"] for x in found[:limit]]
-
-
-def extract_best_content(html: str) -> Dict[str, Any]:
-    soup = BeautifulSoup(html, "lxml")
-    visible_text = soup_text(soup)
-    structured = extract_structured_fields(soup)
-
-    description_raw = structured.get("description_raw") or ""
-    structured_description_text = strip_html(description_raw)
-
-    title_tag = soup.find("title")
-    title_tag_text = clean_whitespace(title_tag.get_text(" ", strip=True)) if title_tag else ""
-
-    all_page_text_parts = [
-        title_tag_text,
-        structured.get("title", ""),
-        structured.get("company_name", ""),
-        structured.get("location_raw", ""),
-        structured_description_text,
-        visible_text,
-    ]
-    all_page_text = clean_whitespace("\n".join([x for x in all_page_text_parts if x]))
-
-    return {
-        "soup": soup,
-        "structured": structured,
-        "title_tag_text": title_tag_text,
-        "all_page_text": all_page_text,
-    }
-
-
 def ai_check_relevance(
     job_title: str,
-    full_page_text: str,
+    role_context_text: str,
     fallback_role_relevance: str,
     fallback_reason: str,
 ) -> Dict[str, str]:
@@ -741,52 +985,42 @@ role_relevance_reason
 
 Field rules:
 - role_relevance must be exactly "Relevant" or "Not relevant"
-- role_relevance_reason must be concise
+- role_relevance_reason must be concise and specific
 
-Use this logic exactly:
+Role relevance rules:
+- Treat close synonyms and subfunctions of accepted families as relevant.
+- Relevant families include:
+  Account Director, Account Executive, AI Engineer, Automation Engineer, Back End, BI Developer, Big Data Engineer, Brand Marketing, Business Analyst, Business Development Manager, Business Operations, CDO, CFO, Chief of Staff, CIO, CLO, Cloud Engineer, CMO, Computer Vision Engineer, Content Marketing, COO, Copywriting, CPO, CRM Developer, CRM Manager, CRO, CSM / Account Manager, CSO, CTO, Customer Operations, Customer Service Rep, Customer Support, Data Architect, Data Engineer, Data Scientist, Data / Insight Analyst, Database Engineer, Deep Learning Engineer, Demand / Lead Generation, Developer in Test, DevOps Engineer, Digital Marketing, Embedded Developer, Engineering Manager, Events & Community, Executive Assistant, Finance / Accounting, Founder, FP&A, Front End, Full Stack, Games Designer, Games Developer, Generalist Marketing, Graphic Designer, Graphics Developer, Growth Marketing, Head of Customer, Head of Data, Head of Design, Head of Engineering, Head of Finance, Head of HR, Head of Infrastructure, Head of Marketing, Head of Operations, Head of Product, Head of QA, Head of Sales, Human Resources, Implementation Manager, Integration Developer, Legal, Machine Learning Engineer, Marketing Analyst, Mobile Developer, Network Engineer, Operations, Partnerships, Penetration Tester, People Ops, Performance Marketing, PR / Communications, Product Manager, Product Marketing, Product Owner, Project Manager, QA Automation Tester, QA Manual Tester, Quality Assurance, Quantitative Developer, Renewals Manager, Research Engineer, RevOps, Risk & Compliance, Sales Engineer, Sales Operations, Scrum Master, SDR / BDR, Security, Security Engineer, SEO Marketing, Site Reliability Engineer, Social Media Marketing, Solutions Engineer, Support Engineer, System Administrator, System Engineer, Talent Acquisition, Technical Architect, Technical Director, Technical Writer, Testing Manager, UI Designer, UI/UX Designer, UX Designer, UX Researcher, Videography, VP of Engineering.
 
-1. Role Relevance - Decide if the role is Relevant or Not relevant according to these criteria:
+Important expansions:
+- Finance / Accounting includes subfunctions such as accounts payable, accounts receivable, billing, payroll, controllership, bookkeeping, treasury, audit, and similar finance/accounting roles.
+- Business Operations includes transformation, change, program, PMO, operational excellence, AI transformation, and similar program/change/ops roles.
+- Account / client roles include account management, customer success, client services, renewals, and similar relationship-management roles.
+- IT support/infrastructure roles are relevant and should not be excluded just because they are customer-facing or support-oriented.
 
-Relevant roles match any in this list or close synonyms/specializations:
+Location rules:
+- United Kingdom is allowed for onsite, hybrid, or remote.
+- Ireland is allowed only if remote.
+- Europe is allowed only if explicitly Remote Europe or Remote EMEA.
+- Remote Global is allowed unless limited to excluded regions.
+- Use the provided text only. If location is clearly UK city/UK region, that is allowed.
 
-Account Director, Account Executive, AI Engineer, Automation Engineer, Back End, BI Developer, Big Data Engineer, Brand Marketing, Business Analyst, Business Development Manager, Business Operations, CDO, CFO, Chief of Staff, CIO, CLO, Cloud Engineer, CMO, Computer Vision Engineer, Content Marketing, COO, Copywriting, CPO, CRM Developer, CRM Manager, CRO, CSM / Account Manager, CSO, CTO, Customer Operations, Customer Service Rep, Customer Support, Data Architect, Data Engineer, Data Scientist, Data / Insight Analyst, Database Engineer, Deep Learning Engineer, Demand / Lead Generation, Developer in Test, DevOps Engineer, Digital Marketing, Embedded Developer, Engineering Manager, Events & Community, Executive Assistant, Finance / Accounting, Founder, FP&A, Front End, Full Stack, Games Designer, Games Developer, Generalist Marketing, Graphic Designer, Graphics Developer, Growth Marketing, Head of Customer, Head of Data, Head of Design, Head of Engineering, Head of Finance, Head of HR, Head of Infrastructure, Head of Marketing, Head of Operations, Head of Product, Head of QA, Head of Sales, Human Resources, Implementation Manager, Integration Developer, Legal, Machine Learning Engineer, Marketing Analyst, Mobile Developer, Network Engineer, Operations, Partnerships, Penetration Tester, People Ops, Performance Marketing, PR / Communications, Product Manager, Product Marketing, Product Owner, Project Manager, QA Automation Tester, QA Manual Tester, Quality Assurance, Quantitative Developer, Renewals Manager, Research Engineer, RevOps, Risk & Compliance, Sales Engineer, Sales Operations, Scrum Master, SDR / BDR, Security, Security Engineer, SEO Marketing, Site Reliability Engineer, Social Media Marketing, Solutions Engineer, Support Engineer, System Administrator, System Engineer, Talent Acquisition, Technical Architect, Technical Director, Technical Writer, Testing Manager, UI Designer, UI/UX Designer, UX Designer, UX Researcher, Videography, VP of Engineering.
+Language rules:
+- If the description clearly requires a non-English language, mark Not relevant.
+- Otherwise do not reject for language.
 
-If the role is clearly outside tech or business functions (e.g., teacher, nurse, waiter), mark Not Relevant, even if some criteria match.
-
-Exclude any roles related to construction, civil engineering, retail, electrical, mechanical, manufacturing, microbiology, maritime, injection molding, and beauty brands.
-
-Location - The role is Relevant only if all stated working locations are within these allowed locations:
-
-a) United Kingdom (onsite, hybrid, or remote)
-b) For Ireland, only remote roles are allowed. If the location mentions any onsite or hybrid work, mark Not Relevant.
-c) For Europe, only roles explicitly marked as “Remote Europe” or “Remote EMEA” are allowed. Roles based in specific European countries (e.g., Germany, France) are Not Relevant unless explicitly remote.
-d) Remote Global (worldwide) – but exclude ads that specify or imply Asia-only, Africa-only, Remote APAC, Remote LATAM, USA, or any region outside the allowed list.
-e) If the role mentions a location outside the allowed regions (e.g., USA, Canada), or salary is specified in USD/CAD and no evidence exists the role can be done in allowed regions, mark Not Relevant with explanation.
-f) Accept “UK”, “Great Britain”, “London” (etc.) as United Kingdom.
-g) If multiple locations are listed and at least one is in the allowed set while others are generic (“remote, anywhere”), treat as Relevant only if the contract allows working fully from the allowed location.
-
-Language Criteria:
-a) If the job description requires any language other than English, mark Not Relevant.
-b) Only jobs requiring English (or English only) are Relevant.
-
-Steps to follow:
-Step 1: Extract Location and remote type (onsite, hybrid, remote) from job description.
-Step 2: Check if Location is in allowed list: UK, Ireland (remote only), Remote Europe, Remote EMEA, Remote Global.
-Step 3: For Ireland, if remote type is onsite or hybrid, mark Not Relevant.
-Step 4: For Europe, if location is a specific country and not remote Europe/EMEA, mark Not Relevant.
-Step 5: Otherwise, evaluate role relevance based on job title and other criteria.
+Reject roles clearly outside accepted business/tech functions, e.g. teacher, waiter, nurse, construction, civil engineering, retail, mechanical/manufacturing operations, beauty retail, maritime, microbiology when clearly outside the accepted families.
 
 Input job title:
 {job_title}
 
 Input description:
-{full_page_text[:26000]}
+{role_context_text[:22000]}
 """.strip()
 
     try:
         response = client.responses.create(model=OPENAI_MODEL, input=prompt)
         data = safe_json_loads(response.output_text)
-
         role_relevance = str(data.get("role_relevance", "") or "").strip()
         reason = str(data.get("role_relevance_reason", "") or "").strip()
 
@@ -808,7 +1042,8 @@ Input description:
 
 def ai_tag_relevant_job(
     job_title: str,
-    full_page_text: str,
+    header_text: str,
+    role_body_text: str,
     allowed_locations: List[str],
     allowed_salaries: List[int],
     allowed_job_titles: List[str],
@@ -819,6 +1054,7 @@ def ai_tag_relevant_job(
     fallback_salary_min: str,
     fallback_salary_max: str,
     fallback_salary_currency: str,
+    fallback_salary_period: str,
     fallback_visa: str,
     fallback_job_type: str,
     fallback_job_description: str,
@@ -832,6 +1068,7 @@ def ai_tag_relevant_job(
             "salary_min": fallback_salary_min,
             "salary_max": fallback_salary_max,
             "salary_currency": fallback_salary_currency,
+            "salary_period": fallback_salary_period,
             "visa_sponsorship": fallback_visa,
             "job_type": fallback_job_type,
             "job_description": fallback_job_description,
@@ -844,7 +1081,10 @@ def ai_tag_relevant_job(
     job_titles_text = ", ".join(allowed_job_titles[:3000])
 
     prompt = f"""
-You will receive two inputs: job title (position name) and description (full page text).
+You will receive:
+1. job title
+2. header/meta text
+3. role description text
 
 Return ONLY valid JSON with exactly these keys:
 job_category
@@ -854,6 +1094,7 @@ remote_days
 salary_min
 salary_max
 salary_currency
+salary_period
 visa_sponsorship
 job_type
 job_description
@@ -862,30 +1103,30 @@ seniorities
 
 Rules for job_category:
 - Output exactly one of: "T&P", "NonT&P"
-- T&P includes software development, engineering, product, data, IT, UX/UI, QA, DevOps and similar tech/product roles
-- NonT&P is everything else that is still relevant
+- T&P includes software development, engineering, product, data, IT, UX/UI, QA, DevOps, infrastructure, system administration, support engineering, network engineering, solutions engineering, cloud/platform engineering and similar technical roles.
+- NonT&P is everything else that is still relevant.
 
 Rules for job_location:
-- Match exactly one value from the allowed normalized locations list
-- If extracted location is not exactly in the list, choose the closest broader acceptable location
-- If not found, return "Unknown" or ""
+- Use header/meta text first, then role description.
+- Prefer the most specific visible location over a broad country fallback.
+- If multiple valid locations are listed, choose the first clear normalized location from the allowed list or the closest broader valid one.
+- Only return "Unknown" if there is truly no clear location evidence.
 
 Rules for remote_preferences:
 - Allowed values only: onsite, hybrid, remote
-- Normalize all variants
-- If multiple apply, output them comma-separated in this exact order: onsite, hybrid, remote
-- If not specified, return ""
+- Use role-specific/header evidence first
+- Do not let generic company-wide smart-working text override a clearer role-specific line
 
 Rules for remote_days:
 - Return only a single number or ""
-- Return the highest remote-days number if a range is given
-- If office days are stated, calculate remote days as 5 - office days and return the highest
-- If fully remote, ambiguous, unclear, or no remote allowed, return ""
+- Only return a number when explicit days are stated
+- Never infer a number from the word "hybrid" alone
 
 Rules for salary:
-- salary_min and salary_max must be closest values from allowed salary list
-- If only one salary is present, use the same value for both
-- salary_currency should be like GBP, USD, EUR, CAD or ""
+- Only tag salary when compensation/rate is explicitly stated
+- salary_period must be one of: year, day, hour, month, or ""
+- If a daily rate is stated (e.g. £500-£550 p/d), preserve it as min/max with salary_period=day
+- Do not invent salary from unrelated numbers, dates, standards, reference ids, years, counts, targets, ISO/NIST values, etc.
 
 Rules for visa_sponsorship:
 - Return only yes, no, or ""
@@ -900,24 +1141,28 @@ Rules for job_type:
 - Priority: Permanent > FTC > Part Time > Freelance/Contract
 
 Rules for job_description:
-- Keep only the relevant role description
-- Exclude company intro, benefits, perks, equal opportunities, apply now, CTA blocks, and similar boilerplate
+- Keep the main role content
+- Preserve useful sections such as:
+  responsibilities, required, essential, desirable, qualifications, what to bring, key relationships, success measures, minimum qualifications, preferred qualifications
+- Remove company/benefits/footer/privacy/apply/legal/ATS boilerplate
 
 Rules for job_titles:
-- Analyze both job title and description together
-- If the job title exactly matches one predefined job title, return only that one
-- If ambiguous, return up to 3 most appropriate predefined job titles
-- Only return exact strings from the predefined list
-- Return as JSON array, ordered most to least appropriate
-- If none, return []
+- You may return more than one job title if clearly supported
+- Analyze job title and role description together
+- Return up to 3 exact strings from the predefined list
+- Prefer the real job function over buzzwords
+- Do NOT return leadership titles like Head of Engineering / leadership roles unless the role is explicitly that level
+- For account-management style roles, prefer CSM/Account Manager when the function is relationship/account ownership rather than net-new sales
+- For customer-facing technical roles, Solutions Engineer can coexist with another technical title when clearly supported
 
 Rules for seniorities:
 - Allowed only: entry, junior, mid, senior, lead, leadership
 - Must be lowercase
 - Return as JSON array in this order only: entry, junior, mid, senior, lead, leadership
-- If title includes “head of”, “director”, “engineering manager”, or similar leadership terms, use leadership only
-- If fewer than 3 suitable values, return only those
-- If none, return []
+- If title includes explicit org-leadership indicators like "head of", "director", "vp", "chief", return leadership when appropriate
+- Do NOT use leadership only because the role has technical authority or architectural ownership
+- If title says senior, include senior
+- If role clearly suggests multiple levels, return up to 3
 
 Allowed normalized locations:
 {location_list_text}
@@ -931,8 +1176,11 @@ Predefined job titles:
 Input job title:
 {job_title}
 
-Input description:
-{full_page_text[:26000]}
+Header/meta text:
+{header_text[:6000]}
+
+Role description:
+{role_body_text[:22000]}
 """.strip()
 
     try:
@@ -946,6 +1194,7 @@ Input description:
         salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
         salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
         salary_currency = str(data.get("salary_currency", "") or "").strip() or fallback_salary_currency
+        salary_period = str(data.get("salary_period", "") or "").strip() or fallback_salary_period
         visa_sponsorship = str(data.get("visa_sponsorship", "") or "").strip()
         job_type = str(data.get("job_type", "") or "").strip()
         job_description = str(data.get("job_description", "") or "").strip() or fallback_job_description
@@ -954,6 +1203,8 @@ Input description:
             visa_sponsorship = fallback_visa
         if job_type not in {"Permanent", "FTC", "Part Time", "Freelance/Contract", ""}:
             job_type = fallback_job_type
+        if salary_period not in {"year", "day", "hour", "month", ""}:
+            salary_period = fallback_salary_period
 
         if remote_preferences:
             parts = [p.strip() for p in remote_preferences.split(",") if p.strip()]
@@ -984,6 +1235,7 @@ Input description:
             "salary_min": salary_min,
             "salary_max": salary_max,
             "salary_currency": salary_currency,
+            "salary_period": salary_period,
             "visa_sponsorship": visa_sponsorship,
             "job_type": job_type,
             "job_description": job_description,
@@ -999,6 +1251,7 @@ Input description:
             "salary_min": fallback_salary_min,
             "salary_max": fallback_salary_max,
             "salary_currency": fallback_salary_currency,
+            "salary_period": fallback_salary_period,
             "visa_sponsorship": fallback_visa,
             "job_type": fallback_job_type,
             "job_description": fallback_job_description,
@@ -1006,6 +1259,87 @@ Input description:
             "seniorities": [],
             "_ai_error": str(e),
         }
+
+
+# -------------------------
+# Skills tagging
+# -------------------------
+
+def build_skill_regex(skill: str) -> re.Pattern:
+    normalized = skill.strip().lower()
+
+    if normalized == "c++":
+        return re.compile(r"(?<![A-Za-z0-9])c\+\+(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "c#":
+        return re.compile(r"(?<![A-Za-z0-9])c#(?![A-Za-z0-9])", flags=re.I)
+    if normalized == ".net":
+        return re.compile(r"(?<![A-Za-z0-9])(?:\.net|dotnet|dot net)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "node.js":
+        return re.compile(r"(?<![A-Za-z0-9])(?:node\.js|nodejs|node js)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "next.js":
+        return re.compile(r"(?<![A-Za-z0-9])(?:next\.js|nextjs|next js)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "vue.js":
+        return re.compile(r"(?<![A-Za-z0-9])(?:vue\.js|vuejs|vue js)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "nuxt.js":
+        return re.compile(r"(?<![A-Za-z0-9])(?:nuxt\.js|nuxtjs|nuxt js)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "git":
+        return re.compile(r"(?<![A-Za-z0-9])git(?![A-Za-z0-9])", flags=re.I)
+
+    escaped = re.escape(skill)
+    return re.compile(rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])", flags=re.I)
+
+
+def build_skills_source_text(header_text: str, role_body_text: str) -> str:
+    """
+    Skills must come from role-focused text only.
+    Exclude company description, footer, ATS, benefits, privacy, etc.
+    """
+    lines = split_lines("\n".join([header_text, role_body_text]))
+    out = []
+
+    disallow = [
+        "smartrecruiters",
+        "workday",
+        "privacy policy",
+        "read more",
+        "follow us",
+        "recruitment agencies",
+        "why version 1?",
+        "about the company",
+        "company description",
+        "benefits",
+        "what we offer",
+        "additional information",
+        "equality, diversity and inclusion",
+        "reasonable adjustments",
+        "contact",
+        "©",
+    ]
+
+    for line in lines:
+        low = line.lower()
+        if any(x in low for x in disallow):
+            continue
+        out.append(line)
+
+    return clean_whitespace("\n".join(out))
+
+
+def exact_match_skills_in_order(description: str, skill_list: List[str], limit: int = 10) -> List[str]:
+    if not description or not skill_list:
+        return []
+
+    found = []
+    for skill in skill_list:
+        regex = build_skill_regex(skill)
+        match = regex.search(description)
+        if match:
+            index = match.start()
+            if not any(e["skill"].lower() == skill.lower() for e in found):
+                found.append({"skill": skill, "index": index})
+
+    found.sort(key=lambda x: x["index"])
+    return [x["skill"] for x in found[:limit]]
 
 
 def ai_enrich_skills(
@@ -1030,22 +1364,20 @@ You are a strict skills tagger for a recruiting workflow.
 Return valid json only. No markdown. No commentary.
 
 Goal:
-- You are given skills already found by exact matching from the full page text.
-- Keep those exact-match skills.
-- Add any other clearly evidenced missing skills from the description, but ONLY from the allowed list.
-- Do not remove correct exact-match skills.
-- Return up to 10 skills total.
-- Prioritize explicit tools, languages, frameworks, and platforms if they are clearly mentioned.
+- Use ONLY the supplied role-focused description text.
+- Keep the exact-match skills already found.
+- Add only clearly evidenced missing skills from the description.
+- Never use footer/platform/company-marketing text because it is not included here.
+- Do not infer broad adjacent concepts unless explicitly supported by the role description.
 
 Hard rules:
 - role_category is PROVIDED as input. You MUST echo it exactly as given ("T&P" or "NonT&P"). Do not change it.
 - skills MUST be chosen ONLY from the correct Allowed skills list (exact string match).
-- Prefer concrete, clearly evidenced skills from the description.
 - exact_skills is the PRIMARY base set. Preserve them.
 - NEVER output a skill not present in the allowed list.
-- Before finalizing, verify each returned skill appears exactly in the allowed list.
+- Before finalizing, verify every returned skill appears exactly in the allowed list.
 - Keep exact_skills first, then add missing clearly evidenced skills.
-- Do not invent skills.
+- Return up to 10 skills total.
 
 Output schema:
 {{
@@ -1062,8 +1394,8 @@ exact_skills:
 Allowed skills:
 {allowed_skills_text}
 
-description:
-{description[:22000]}
+role_focused_description:
+{description[:18000]}
 """.strip()
 
     try:
@@ -1090,10 +1422,22 @@ description:
             if exact and exact not in merged:
                 merged.append(exact)
 
-        return merged[:10]
+        # Final hard filter
+        filtered = []
+        allowed_lower = {s.lower(): s for s in allowed_skills}
+        for sk in merged:
+            exact = allowed_lower.get(sk.lower())
+            if exact and exact not in filtered:
+                filtered.append(exact)
+
+        return filtered[:10]
     except Exception:
         return exact_skills[:10]
 
+
+# -------------------------
+# Main per-URL logic
+# -------------------------
 
 def process_url(
     url: str,
@@ -1111,7 +1455,7 @@ def process_url(
 
     if html:
         parsed = extract_best_content(html)
-        if looks_like_js_shell(html, parsed["all_page_text"]):
+        if looks_like_js_shell(html, parsed["role_context_text"]):
             pw_html, pw_status = fetch_with_playwright(url)
             notes.append(pw_status)
             if pw_html:
@@ -1131,28 +1475,31 @@ def process_url(
         parsed = extract_best_content(html)
 
     structured = parsed["structured"]
-    all_page_text = parsed["all_page_text"]
     title_tag_text = parsed["title_tag_text"]
+    header_text = parsed["header_text"]
+    role_body_text = parsed["role_body_text"]
+    role_context_text = parsed["role_context_text"]
 
     raw_title = first_nonempty(structured.get("title"), title_tag_text)
     clean_title = clean_job_title(raw_title)
 
-    fallback_location = normalize_location_rule_based(structured.get("location_raw", ""), all_page_text, allowed_locations)
-    fallback_remote_preferences = detect_remote_preferences_rule_based(all_page_text)
-    fallback_remote_days = detect_remote_days_rule_based(all_page_text, fallback_remote_preferences)
-    fallback_salary_min, fallback_salary_max, fallback_salary_currency = extract_salary_rule_based(
-        all_page_text, structured, allowed_salaries
+    fallback_location = normalize_location_rule_based(header_text + "\n" + role_body_text, allowed_locations)
+    fallback_remote_preferences = detect_remote_preferences_rule_based(header_text + "\n" + role_body_text)
+    fallback_remote_days = detect_remote_days_rule_based(header_text + "\n" + role_body_text, fallback_remote_preferences)
+    fallback_salary_min, fallback_salary_max, fallback_salary_currency, fallback_salary_period = parse_explicit_salary(
+        header_text + "\n" + role_body_text,
+        allowed_salaries
     )
-    fallback_visa = detect_visa_rule_based(all_page_text)
-    fallback_job_type = detect_job_type_rule_based(all_page_text, structured.get("employment_type_raw", ""))
-    fallback_description = clean_job_description(all_page_text)
+    fallback_visa = detect_visa_rule_based(role_context_text)
+    fallback_job_type = detect_job_type_rule_based(header_text + "\n" + role_body_text, structured.get("employment_type_raw", ""))
+    fallback_description = clean_job_description(role_body_text)
 
     fallback_role_relevance = "Relevant" if clean_title else "Not relevant"
-    fallback_reason = "Fallback classification based on extracted title and page text."
+    fallback_reason = "Fallback classification based on extracted title and role text."
 
     relevance = ai_check_relevance(
         job_title=clean_title,
-        full_page_text=all_page_text,
+        role_context_text=role_context_text,
         fallback_role_relevance=fallback_role_relevance,
         fallback_reason=fallback_reason,
     )
@@ -1163,28 +1510,25 @@ def process_url(
     result.source_method = source_method
     result.status = "ok"
 
+    # Stop immediately on Not relevant
     if result.role_relevance == "Not relevant":
-        result.job_category = ""
-        result.job_location = ""
-        result.remote_preferences = ""
-        result.remote_days = ""
-        result.salary_min = ""
-        result.salary_max = ""
-        result.salary_currency = ""
-        result.visa_sponsorship = ""
-        result.job_type = ""
-        result.job_description = ""
         result.notes = " | ".join(notes + ["stopped_after_relevance"])
         return result
 
+    # Better fallback category
     fallback_job_category = "T&P" if re.search(
-        r"\b(engineer|developer|software|data|machine learning|ai|product|designer|qa|devops|research|game)\b",
-        clean_title.lower()
+        r"\b("
+        r"engineer|developer|software|data|machine learning|ml|ai|product|designer|qa|devops|research|"
+        r"system administrator|system engineer|support engineer|solutions engineer|network engineer|"
+        r"architect|cloud|platform|infrastructure|it support|2nd line|second line"
+        r")\b",
+        (clean_title + "\n" + role_body_text).lower()
     ) else "NonT&P"
 
     tagged = ai_tag_relevant_job(
         job_title=clean_title,
-        full_page_text=all_page_text,
+        header_text=header_text,
+        role_body_text=role_body_text,
         allowed_locations=allowed_locations,
         allowed_salaries=allowed_salaries,
         allowed_job_titles=allowed_job_titles,
@@ -1195,6 +1539,7 @@ def process_url(
         fallback_salary_min=fallback_salary_min,
         fallback_salary_max=fallback_salary_max,
         fallback_salary_currency=fallback_salary_currency,
+        fallback_salary_period=fallback_salary_period,
         fallback_visa=fallback_visa,
         fallback_job_type=fallback_job_type,
         fallback_job_description=fallback_description,
@@ -1207,33 +1552,55 @@ def process_url(
     result.salary_min = tagged.get("salary_min", "") or fallback_salary_min
     result.salary_max = tagged.get("salary_max", "") or fallback_salary_max
     result.salary_currency = tagged.get("salary_currency", "") or fallback_salary_currency
+    result.salary_period = tagged.get("salary_period", "") or fallback_salary_period
     result.visa_sponsorship = tagged.get("visa_sponsorship", "") or fallback_visa
     result.job_type = tagged.get("job_type", "") or fallback_job_type
     result.job_description = clean_job_description(tagged.get("job_description", "") or fallback_description)
 
-    job_titles = tagged.get("job_titles", []) if isinstance(tagged.get("job_titles", []), list) else []
-    seniorities = tagged.get("seniorities", []) if isinstance(tagged.get("seniorities", []), list) else []
+    # Hard guard: if there is no explicit salary evidence, leave salary blank
+    explicit_salary_check = parse_explicit_salary(header_text + "\n" + role_body_text, allowed_salaries)
+    if explicit_salary_check == ("", "", "", ""):
+        result.salary_min = ""
+        result.salary_max = ""
+        result.salary_currency = ""
+        result.salary_period = ""
 
+    # Titles
+    job_titles = tagged.get("job_titles", []) if isinstance(tagged.get("job_titles", []), list) else []
     result.job_title_tag_1 = job_titles[0] if len(job_titles) > 0 else ""
     result.job_title_tag_2 = job_titles[1] if len(job_titles) > 1 else ""
     result.job_title_tag_3 = job_titles[2] if len(job_titles) > 2 else ""
+
+    # Seniority
+    seniorities = tagged.get("seniorities", []) if isinstance(tagged.get("seniorities", []), list) else []
+    if not seniorities:
+        seniorities = fallback_seniorities(clean_title, role_body_text)
+    seniorities = normalize_seniority_list(seniorities)
 
     result.seniority_1 = seniorities[0] if len(seniorities) > 0 else ""
     result.seniority_2 = seniorities[1] if len(seniorities) > 1 else ""
     result.seniority_3 = seniorities[2] if len(seniorities) > 2 else ""
 
-    # IMPORTANT FIX:
-    # skills should always use FULL PAGE TEXT, not cleaned description
-    skill_source_text = all_page_text
-
+    # Skills: STRICTLY role-focused text only
+    skills_source_text = build_skills_source_text(header_text, role_body_text)
     skill_list = tp_skills if result.job_category == "T&P" else nontp_skills
-    exact_skills = exact_match_skills_in_order(skill_source_text, skill_list, limit=10)
+
+    exact_skills = exact_match_skills_in_order(skills_source_text, skill_list, limit=10)
     final_skills = ai_enrich_skills(
         role_category=result.job_category,
-        description=skill_source_text,
+        description=skills_source_text,
         exact_skills=exact_skills,
         allowed_skills=skill_list,
     )
+
+    # Final strict filter against allowed list
+    allowed_lower = {s.lower(): s for s in skill_list}
+    final_skills = [
+        allowed_lower[sk.lower()]
+        for sk in final_skills
+        if sk.lower() in allowed_lower
+    ]
+    final_skills = dedupe_keep_order(final_skills)[:10]
 
     padded_skills = (final_skills + [""] * 10)[:10]
     result.skill_1 = padded_skills[0]
@@ -1249,13 +1616,17 @@ def process_url(
 
     note_parts = notes + ["ran_relevant_tagging"]
     if len(exact_skills) > 0:
-        note_parts.append("skills_full_page_exact_plus_ai_enrichment")
+        note_parts.append("skills_role_text_exact_plus_ai_enrichment")
     else:
-        note_parts.append("skills_full_page_ai_only")
+        note_parts.append("skills_role_text_ai_only")
     result.notes = " | ".join(note_parts)
 
     return result
 
+
+# -------------------------
+# Output
+# -------------------------
 
 def write_results(rows: List[JobResult], filepath: str) -> None:
     if not rows:
