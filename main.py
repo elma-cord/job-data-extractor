@@ -795,6 +795,157 @@ Input description:
         }
 
 
+def ai_extract_remaining_fields(
+    job_title: str,
+    job_description: str,
+    allowed_locations: List[str],
+    allowed_salaries: List[int],
+    fallback_job_location: str,
+    fallback_remote_preferences: str,
+    fallback_remote_days: str,
+    fallback_salary_min: str,
+    fallback_salary_max: str,
+    fallback_salary_currency: str,
+    fallback_visa_sponsorship: str,
+    fallback_job_type: str,
+) -> Dict[str, str]:
+    if not client:
+        return {
+            "job_location": fallback_job_location,
+            "remote_preferences": fallback_remote_preferences,
+            "remote_days": fallback_remote_days,
+            "salary_min": fallback_salary_min,
+            "salary_max": fallback_salary_max,
+            "salary_currency": fallback_salary_currency,
+            "visa_sponsorship": fallback_visa_sponsorship,
+            "job_type": fallback_job_type,
+        }
+
+    location_list_text = "\n".join(allowed_locations[:3000])
+    salary_list_text = ", ".join(str(x) for x in allowed_salaries[:3000])
+
+    prompt = f"""
+You will receive two inputs: job title and description.
+
+Return ONLY valid JSON with exactly these keys:
+job_location
+remote_preferences
+remote_days
+salary_min
+salary_max
+salary_currency
+visa_sponsorship
+job_type
+
+Rules:
+
+1. job_location
+- Extract the job location from the description.
+- Match exactly one entry from the allowed normalized locations list.
+- If the extracted location does not exactly exist in the list, choose the closest broader acceptable location.
+- If no good match exists, return "Unknown" or "".
+
+2. remote_preferences
+- Allowed values are only: onsite, hybrid, remote
+- Normalize all variants like on-site/on site to onsite
+- If multiple apply, output them in this exact order: onsite, hybrid, remote
+- Separate multiple values with commas
+- If not stated, return ""
+
+3. remote_days
+- Return only a single number or ""
+- Return a number only if remote days are explicitly mentioned
+- If a range is given, return the highest number
+- If office days are stated, calculate remote days as 5 - office days, and return the highest remote value
+- If fully remote, ambiguous, unclear, or no remote allowed, return ""
+
+4. salary_min / salary_max / salary_currency
+- Extract salary numbers from the description
+- salary_min and salary_max must be the closest values from the allowed salary list
+- If only one salary is present, use the same value for both min and max
+- salary_currency should be like GBP, USD, EUR, or ""
+
+5. visa_sponsorship
+- Return only: yes, no, or ""
+- Use yes only if clearly offered
+- Use no only if clearly not offered
+
+6. job_type
+- Return only one of:
+  Permanent
+  FTC
+  Part Time
+  Freelance/Contract
+  or ""
+- Use this priority if multiple appear:
+  Permanent > FTC > Part Time > Freelance/Contract
+
+Allowed normalized locations:
+{location_list_text}
+
+Allowed salaries:
+{salary_list_text}
+
+Job title:
+{job_title}
+
+Job description:
+{job_description[:18000]}
+""".strip()
+
+    try:
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            input=prompt
+        )
+
+        data = safe_json_loads(response.output_text)
+
+        job_location = str(data.get("job_location", "") or "").strip()
+        remote_preferences = str(data.get("remote_preferences", "") or "").strip()
+        remote_days = str(data.get("remote_days", "") or "").strip()
+        salary_min = str(data.get("salary_min", "") or "").strip()
+        salary_max = str(data.get("salary_max", "") or "").strip()
+        salary_currency = str(data.get("salary_currency", "") or "").strip()
+        visa_sponsorship = str(data.get("visa_sponsorship", "") or "").strip()
+        job_type = str(data.get("job_type", "") or "").strip()
+
+        if remote_preferences:
+            parts = [p.strip() for p in remote_preferences.split(",") if p.strip()]
+            valid_order = ["onsite", "hybrid", "remote"]
+            parts = [p for p in valid_order if p in parts]
+            remote_preferences = ", ".join(parts)
+
+        if visa_sponsorship not in {"yes", "no", ""}:
+            visa_sponsorship = fallback_visa_sponsorship
+
+        if job_type not in {"Permanent", "FTC", "Part Time", "Freelance/Contract", ""}:
+            job_type = fallback_job_type
+
+        return {
+            "job_location": job_location or fallback_job_location,
+            "remote_preferences": remote_preferences or fallback_remote_preferences,
+            "remote_days": remote_days or fallback_remote_days,
+            "salary_min": salary_min or fallback_salary_min,
+            "salary_max": salary_max or fallback_salary_max,
+            "salary_currency": salary_currency or fallback_salary_currency,
+            "visa_sponsorship": visa_sponsorship,
+            "job_type": job_type,
+        }
+
+    except Exception:
+        return {
+            "job_location": fallback_job_location,
+            "remote_preferences": fallback_remote_preferences,
+            "remote_days": fallback_remote_days,
+            "salary_min": fallback_salary_min,
+            "salary_max": fallback_salary_max,
+            "salary_currency": fallback_salary_currency,
+            "visa_sponsorship": fallback_visa_sponsorship,
+            "job_type": fallback_job_type,
+        }
+
+
 def extract_best_content(html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "lxml")
     visible_text = soup_text(soup)
@@ -849,24 +1000,18 @@ def process_url(url: str, allowed_locations: List[str], allowed_salaries: List[i
     soup = BeautifulSoup(html, "lxml")
     title_tag_text = soup.title.get_text(strip=True) if soup.title else ""
 
-    raw_title = first_nonempty(
-        structured.get("title"),
-        title_tag_text,
-    )
+    raw_title = first_nonempty(structured.get("title"), title_tag_text)
 
     fallback_job_title = clean_job_title(raw_title)
     fallback_job_description = clean_job_description(description_text)
 
     location_raw = structured.get("location_raw", "")
     fallback_location = normalize_location(location_raw, visible_text, allowed_locations)
-
     fallback_remote_preferences = detect_remote_preferences(visible_text)
     fallback_remote_days = detect_remote_days(visible_text, fallback_remote_preferences)
-
     fallback_salary_min, fallback_salary_max, fallback_salary_currency = extract_salary(
         visible_text, structured, allowed_salaries
     )
-
     fallback_visa = detect_visa_sponsorship(visible_text)
     fallback_job_type = detect_job_type(visible_text, structured.get("employment_type_raw", ""))
 
@@ -889,18 +1034,46 @@ def process_url(url: str, allowed_locations: List[str], allowed_salaries: List[i
     result.role_relevance = ai_relevance.get("role_relevance", "") or fallback_role_relevance
     result.role_relevance_reason = ai_relevance.get("role_relevance_reason", "") or fallback_relevance_reason
     result.job_category = ai_relevance.get("job_category", "") or fallback_category
-    result.job_location = fallback_location
-    result.remote_preferences = fallback_remote_preferences
-    result.remote_days = fallback_remote_days
-    result.salary_min = fallback_salary_min
-    result.salary_max = fallback_salary_max
-    result.salary_currency = fallback_salary_currency
-    result.visa_sponsorship = fallback_visa
-    result.job_type = fallback_job_type
     result.job_description = fallback_job_description
     result.source_method = source_method
     result.status = "ok"
-    result.notes = " | ".join(notes)
+
+    if result.role_relevance == "Not relevant":
+        result.job_location = ""
+        result.remote_preferences = ""
+        result.remote_days = ""
+        result.salary_min = ""
+        result.salary_max = ""
+        result.salary_currency = ""
+        result.visa_sponsorship = ""
+        result.job_type = ""
+        result.notes = " | ".join(notes + ["stopped_after_relevance"])
+        return result
+
+    ai_rest = ai_extract_remaining_fields(
+        job_title=fallback_job_title,
+        job_description=fallback_job_description,
+        allowed_locations=allowed_locations,
+        allowed_salaries=allowed_salaries,
+        fallback_job_location=fallback_location,
+        fallback_remote_preferences=fallback_remote_preferences,
+        fallback_remote_days=fallback_remote_days,
+        fallback_salary_min=fallback_salary_min,
+        fallback_salary_max=fallback_salary_max,
+        fallback_salary_currency=fallback_salary_currency,
+        fallback_visa_sponsorship=fallback_visa,
+        fallback_job_type=fallback_job_type,
+    )
+
+    result.job_location = ai_rest.get("job_location", "") or fallback_location
+    result.remote_preferences = ai_rest.get("remote_preferences", "") or fallback_remote_preferences
+    result.remote_days = ai_rest.get("remote_days", "") or fallback_remote_days
+    result.salary_min = ai_rest.get("salary_min", "") or fallback_salary_min
+    result.salary_max = ai_rest.get("salary_max", "") or fallback_salary_max
+    result.salary_currency = ai_rest.get("salary_currency", "") or fallback_salary_currency
+    result.visa_sponsorship = ai_rest.get("visa_sponsorship", "") or fallback_visa
+    result.job_type = ai_rest.get("job_type", "") or fallback_job_type
+    result.notes = " | ".join(notes + ["ran_full_tagging"])
 
     return result
 
