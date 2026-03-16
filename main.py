@@ -651,15 +651,27 @@ def normalize_seniority_list(values: List[str]) -> List[str]:
 
 
 def build_skill_regex(skill: str) -> re.Pattern:
+    normalized = skill.strip().lower()
+
+    if normalized == "c++":
+        return re.compile(r"(?<![A-Za-z0-9])c\+\+(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "c#":
+        return re.compile(r"(?<![A-Za-z0-9])c#(?![A-Za-z0-9])", flags=re.I)
+    if normalized == ".net":
+        return re.compile(r"(?<![A-Za-z0-9])(?:\.net|dotnet|dot net)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "node.js":
+        return re.compile(r"(?<![A-Za-z0-9])(?:node\.js|nodejs|node js)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "next.js":
+        return re.compile(r"(?<![A-Za-z0-9])(?:next\.js|nextjs|next js)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "vue.js":
+        return re.compile(r"(?<![A-Za-z0-9])(?:vue\.js|vuejs|vue js)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "nuxt.js":
+        return re.compile(r"(?<![A-Za-z0-9])(?:nuxt\.js|nuxtjs|nuxt js)(?![A-Za-z0-9])", flags=re.I)
+    if normalized == "git":
+        return re.compile(r"(?<![A-Za-z0-9])git(?![A-Za-z0-9])", flags=re.I)
+
     escaped = re.escape(skill)
-
-    special_exact = {"c++", "c#", ".net", "node.js", "next.js", "vue.js", "nuxt.js"}
-    if skill.strip().lower() in special_exact:
-        pattern = rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])"
-        return re.compile(pattern, flags=re.I)
-
-    pattern = rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])"
-    return re.compile(pattern, flags=re.I)
+    return re.compile(rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])", flags=re.I)
 
 
 def exact_match_skills_in_order(description: str, skill_list: List[str], limit: int = 10) -> List[str]:
@@ -676,8 +688,7 @@ def exact_match_skills_in_order(description: str, skill_list: List[str], limit: 
                 found.append({"skill": skill, "index": index})
 
     found.sort(key=lambda x: x["index"])
-    ordered = [x["skill"] for x in found[:limit]]
-    return ordered
+    return [x["skill"] for x in found[:limit]]
 
 
 def extract_best_content(html: str) -> Dict[str, Any]:
@@ -1019,18 +1030,18 @@ You are a strict skills tagger for a recruiting workflow.
 Return valid json only. No markdown. No commentary.
 
 Goal:
-- You are given skills already found by exact matching.
+- You are given skills already found by exact matching from the full page text.
 - Keep those exact-match skills.
 - Add any other clearly evidenced missing skills from the description, but ONLY from the allowed list.
 - Do not remove correct exact-match skills.
-- Return 2 to 10 skills total.
+- Return up to 10 skills total.
+- Prioritize explicit tools, languages, frameworks, and platforms if they are clearly mentioned.
 
 Hard rules:
 - role_category is PROVIDED as input. You MUST echo it exactly as given ("T&P" or "NonT&P"). Do not change it.
-- skills MUST be an array with 2 to 10 items if evidence exists.
 - skills MUST be chosen ONLY from the correct Allowed skills list (exact string match).
 - Prefer concrete, clearly evidenced skills from the description.
-- exact_skills is the PRIMARY base set. Preserve them unless they are empty.
+- exact_skills is the PRIMARY base set. Preserve them.
 - NEVER output a skill not present in the allowed list.
 - Before finalizing, verify each returned skill appears exactly in the allowed list.
 - Keep exact_skills first, then add missing clearly evidenced skills.
@@ -1167,7 +1178,7 @@ def process_url(
         return result
 
     fallback_job_category = "T&P" if re.search(
-        r"\b(engineer|developer|software|data|machine learning|ai|product|designer|qa|devops|research)\b",
+        r"\b(engineer|developer|software|data|machine learning|ai|product|designer|qa|devops|research|game)\b",
         clean_title.lower()
     ) else "NonT&P"
 
@@ -1211,11 +1222,15 @@ def process_url(
     result.seniority_2 = seniorities[1] if len(seniorities) > 1 else ""
     result.seniority_3 = seniorities[2] if len(seniorities) > 2 else ""
 
+    # IMPORTANT FIX:
+    # skills should always use FULL PAGE TEXT, not cleaned description
+    skill_source_text = all_page_text
+
     skill_list = tp_skills if result.job_category == "T&P" else nontp_skills
-    exact_skills = exact_match_skills_in_order(result.job_description or all_page_text, skill_list, limit=10)
+    exact_skills = exact_match_skills_in_order(skill_source_text, skill_list, limit=10)
     final_skills = ai_enrich_skills(
         role_category=result.job_category,
-        description=result.job_description or all_page_text,
+        description=skill_source_text,
         exact_skills=exact_skills,
         allowed_skills=skill_list,
     )
@@ -1234,9 +1249,9 @@ def process_url(
 
     note_parts = notes + ["ran_relevant_tagging"]
     if len(exact_skills) > 0:
-        note_parts.append("skills_exact_plus_ai_enrichment")
+        note_parts.append("skills_full_page_exact_plus_ai_enrichment")
     else:
-        note_parts.append("skills_ai_only")
+        note_parts.append("skills_full_page_ai_only")
     result.notes = " | ".join(note_parts)
 
     return result
