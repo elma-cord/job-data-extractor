@@ -26,6 +26,9 @@ OUTPUT_CSV_FILE = "results.csv"
 
 LOCATIONS_CSV = "predefined_locations.csv"
 SALARIES_CSV = "predefined_salaries.csv"
+TP_SKILLS_CSV = "predefined_tp_skills.csv"
+NONTP_SKILLS_CSV = "predefined_nontp_skills.csv"
+JOB_TITLES_CSV = "predefined_job_titles.csv"
 
 REQUEST_TIMEOUT = 25
 PLAYWRIGHT_TIMEOUT_MS = 30000
@@ -52,6 +55,26 @@ class JobResult:
     visa_sponsorship: str = ""
     job_type: str = ""
     job_description: str = ""
+
+    job_title_tag_1: str = ""
+    job_title_tag_2: str = ""
+    job_title_tag_3: str = ""
+
+    seniority_1: str = ""
+    seniority_2: str = ""
+    seniority_3: str = ""
+
+    skill_1: str = ""
+    skill_2: str = ""
+    skill_3: str = ""
+    skill_4: str = ""
+    skill_5: str = ""
+    skill_6: str = ""
+    skill_7: str = ""
+    skill_8: str = ""
+    skill_9: str = ""
+    skill_10: str = ""
+
     source_method: str = ""
     status: str = ""
     notes: str = ""
@@ -64,17 +87,18 @@ def load_urls(filepath: str) -> List[str]:
         return [line.strip() for line in f if line.strip()]
 
 
-def load_location_list(filepath: str) -> List[str]:
+def load_text_list(filepath: str) -> List[str]:
     if not os.path.exists(filepath):
-        print(f"[WARN] {filepath} not found.")
+        print(f"[WARN] Missing file: {filepath}")
         return []
+
     df = pd.read_csv(filepath)
     col = df.columns[0]
     return (
         df[col]
         .dropna()
         .astype(str)
-        .map(str.strip)
+        .map(lambda x: x.strip())
         .loc[lambda s: s != ""]
         .tolist()
     )
@@ -82,8 +106,9 @@ def load_location_list(filepath: str) -> List[str]:
 
 def load_salary_list(filepath: str) -> List[int]:
     if not os.path.exists(filepath):
-        print(f"[WARN] {filepath} not found.")
+        print(f"[WARN] Missing file: {filepath}")
         return []
+
     df = pd.read_csv(filepath)
     col = df.columns[0]
     vals = []
@@ -102,10 +127,18 @@ def clean_whitespace(text: str) -> str:
     return text.strip()
 
 
-def soup_text(soup: BeautifulSoup) -> str:
-    for tag in soup(["script", "style", "noscript", "svg"]):
-        tag.extract()
-    return clean_whitespace(soup.get_text("\n", strip=True))
+def first_nonempty(*values: Any) -> str:
+    for v in values:
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
+def strip_html(text: str) -> str:
+    return clean_whitespace(BeautifulSoup(text or "", "lxml").get_text("\n", strip=True))
 
 
 def fetch_html(url: str) -> Tuple[Optional[str], str]:
@@ -159,6 +192,12 @@ def looks_like_js_shell(html: str, text: str) -> bool:
     return False
 
 
+def soup_text(soup: BeautifulSoup) -> str:
+    for tag in soup(["script", "style", "noscript", "svg"]):
+        tag.extract()
+    return clean_whitespace(soup.get_text("\n", strip=True))
+
+
 def extract_jsonld_objects(soup: BeautifulSoup) -> List[Dict[str, Any]]:
     objs = []
     scripts = soup.find_all("script", attrs={"type": "application/ld+json"})
@@ -193,16 +232,6 @@ def flatten_jobposting(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     walk(obj)
     return found
-
-
-def first_nonempty(*values: Any) -> str:
-    for v in values:
-        if v is None:
-            continue
-        s = str(v).strip()
-        if s:
-            return s
-    return ""
 
 
 def extract_structured_fields(soup: BeautifulSoup) -> Dict[str, Any]:
@@ -287,10 +316,6 @@ def extract_structured_fields(soup: BeautifulSoup) -> Dict[str, Any]:
     return data
 
 
-def strip_html(text: str) -> str:
-    return clean_whitespace(BeautifulSoup(text or "", "lxml").get_text("\n", strip=True))
-
-
 def clean_job_title(raw_title: str) -> str:
     if not raw_title:
         return ""
@@ -319,6 +344,7 @@ def clean_job_title(raw_title: str) -> str:
         idx = low.find(w)
         if idx != -1:
             cut = min(cut, idx)
+
     title = title[:cut].strip(" -|,·")
     return clean_whitespace(title)
 
@@ -360,30 +386,38 @@ def clean_job_description(text: str) -> str:
         r"(?is)\bperks\b.*$",
         r"(?is)\bwhat we offer\b.*$",
         r"(?is)\bapply now\b.*$",
-        r"(?is)\bequal opportunity\b.*$",
+        r"(?is)\bequal opportunit(?:y|ies)\b.*$",
         r"(?is)\binterested in this\b.*$",
     ]
     for pat in boilerplate_patterns:
         text = re.sub(pat, "", text)
 
-    text = clean_whitespace(text)
-    return text[:20000]
+    return clean_whitespace(text)[:20000]
 
 
-def normalize_location_from_rules(raw_location: str, text: str, allowed_locations: List[str]) -> str:
+def normalize_category_for_skills(job_category: str) -> str:
+    low = (job_category or "").strip().lower()
+    if low in {"t&p", "tp", "tech & product", "tech and product"}:
+        return "T&P"
+    if low in {"nont&p", "non-t&p", "non tp", "not t&p", "not tp", "non tech", "non-tech"}:
+        return "NonT&P"
+    return ""
+
+
+def normalize_location_rule_based(raw_location: str, text: str, allowed_locations: List[str]) -> str:
     if not allowed_locations:
         return clean_whitespace(raw_location)
 
-    location_candidates = []
+    candidates = []
     if raw_location:
-        location_candidates.append(clean_whitespace(raw_location))
+        candidates.append(clean_whitespace(raw_location))
 
-    text_lines = [x.strip() for x in text.splitlines() if x.strip()]
-    for line in text_lines[:400]:
-        if re.search(r"\blocation\b|\bbased in\b|\boffice\b|\bremote\b|uk\b|london\b", line, flags=re.I):
-            location_candidates.append(clean_whitespace(line))
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    for line in lines[:400]:
+        if re.search(r"\blocation\b|\bbased in\b|\boffice\b|\bremote\b|\buk\b|\blondon\b", line, flags=re.I):
+            candidates.append(clean_whitespace(line))
 
-    joined = " || ".join(location_candidates)
+    joined = " || ".join(candidates)
     joined_low = joined.lower()
 
     for loc in allowed_locations:
@@ -407,19 +441,13 @@ def normalize_location_from_rules(raw_location: str, text: str, allowed_location
     return "Unknown"
 
 
-def detect_remote_preferences_from_rules(text: str) -> str:
+def detect_remote_preferences_rule_based(text: str) -> str:
     low = text.lower()
     found = []
 
-    onsite_patterns = [
-        r"\bonsite\b", r"\bon-site\b", r"\bon site\b", r"\bin office\b", r"\bin-office\b"
-    ]
-    hybrid_patterns = [
-        r"\bhybrid\b", r"\bhybrid working\b", r"\bhybrid role\b", r"\bhybrid model\b"
-    ]
-    remote_patterns = [
-        r"\bremote\b", r"\bfully remote\b", r"\bwork from home\b", r"\bwfh\b"
-    ]
+    onsite_patterns = [r"\bonsite\b", r"\bon-site\b", r"\bon site\b", r"\bin office\b", r"\bin-office\b"]
+    hybrid_patterns = [r"\bhybrid\b", r"\bhybrid working\b", r"\bhybrid role\b", r"\bhybrid model\b"]
+    remote_patterns = [r"\bremote\b", r"\bfully remote\b", r"\bwork from home\b", r"\bwfh\b"]
 
     if any(re.search(p, low) for p in onsite_patterns):
         found.append("onsite")
@@ -431,7 +459,7 @@ def detect_remote_preferences_from_rules(text: str) -> str:
     return ", ".join(found)
 
 
-def detect_remote_days_from_rules(text: str, remote_prefs: str) -> str:
+def detect_remote_days_rule_based(text: str, remote_prefs: str) -> str:
     low = text.lower()
     if "hybrid" not in remote_prefs:
         return ""
@@ -451,9 +479,7 @@ def detect_remote_days_from_rules(text: str, remote_prefs: str) -> str:
     for pat in remote_patterns:
         m = re.search(pat, low)
         if m:
-            if len(m.groups()) == 2:
-                return m.group(2)
-            return m.group(1)
+            return m.group(2) if len(m.groups()) == 2 else m.group(1)
 
     for pat in office_patterns:
         m = re.search(pat, low)
@@ -461,12 +487,19 @@ def detect_remote_days_from_rules(text: str, remote_prefs: str) -> str:
             if len(m.groups()) == 2:
                 low_office = int(m.group(1))
                 high_office = int(m.group(2))
-                remote_high = max(5 - low_office, 5 - high_office)
-                return str(remote_high)
-            office_days = int(m.group(1))
-            return str(max(0, 5 - office_days))
+                return str(max(5 - low_office, 5 - high_office))
+            return str(max(0, 5 - int(m.group(1))))
 
     return ""
+
+
+def nearest_salary(value: Optional[int], allowed_salaries: List[int]) -> str:
+    if value is None:
+        return ""
+    if not allowed_salaries:
+        return str(value)
+    nearest = min(allowed_salaries, key=lambda x: abs(x - value))
+    return str(nearest)
 
 
 def parse_salary_candidates(text: str) -> List[Tuple[int, str]]:
@@ -507,7 +540,7 @@ def parse_salary_candidates(text: str) -> List[Tuple[int, str]]:
     return candidates
 
 
-def extract_salary_from_rules(text: str, structured: Dict[str, Any], allowed_salaries: List[int]) -> Tuple[str, str, str]:
+def extract_salary_rule_based(text: str, structured: Dict[str, Any], allowed_salaries: List[int]) -> Tuple[str, str, str]:
     min_raw = structured.get("salary_min_raw")
     max_raw = structured.get("salary_max_raw")
     curr_raw = first_nonempty(structured.get("salary_currency_raw")).upper()
@@ -517,13 +550,11 @@ def extract_salary_from_rules(text: str, structured: Dict[str, Any], allowed_sal
             min_raw = max_raw
         if max_raw is None and min_raw is not None:
             max_raw = min_raw
-
-        if allowed_salaries:
-            min_val = min(allowed_salaries, key=lambda x: abs(x - int(min_raw))) if min_raw is not None else ""
-            max_val = min(allowed_salaries, key=lambda x: abs(x - int(max_raw))) if max_raw is not None else ""
-            return str(min_val), str(max_val), curr_raw
-
-        return str(min_raw or ""), str(max_raw or ""), curr_raw
+        return (
+            nearest_salary(int(min_raw), allowed_salaries) if min_raw is not None else "",
+            nearest_salary(int(max_raw), allowed_salaries) if max_raw is not None else "",
+            curr_raw,
+        )
 
     candidates = parse_salary_candidates(text)
     if not candidates:
@@ -531,19 +562,18 @@ def extract_salary_from_rules(text: str, structured: Dict[str, Any], allowed_sal
 
     values = [v for v, _ in candidates]
     currencies = [c for _, c in candidates]
-
     min_val = min(values)
     max_val = max(values)
     currency = max(set(currencies), key=currencies.count)
 
-    if allowed_salaries:
-        min_val = min(allowed_salaries, key=lambda x: abs(x - min_val))
-        max_val = min(allowed_salaries, key=lambda x: abs(x - max_val))
+    return (
+        nearest_salary(min_val, allowed_salaries),
+        nearest_salary(max_val, allowed_salaries),
+        currency,
+    )
 
-    return str(min_val), str(max_val), currency
 
-
-def detect_visa_sponsorship_from_rules(text: str) -> str:
+def detect_visa_rule_based(text: str) -> str:
     low = text.lower()
 
     yes_patterns = [
@@ -570,7 +600,7 @@ def detect_visa_sponsorship_from_rules(text: str) -> str:
     return ""
 
 
-def detect_job_type_from_rules(text: str, structured_employment_type: str = "") -> str:
+def detect_job_type_rule_based(text: str, structured_employment_type: str = "") -> str:
     low = f"{structured_employment_type} {text}".lower()
 
     permanent_patterns = [r"\bpermanent\b", r"\bfull[- ]time\b", r"\bstandard\b"]
@@ -591,6 +621,7 @@ def detect_job_type_from_rules(text: str, structured_employment_type: str = "") 
 
 def safe_json_loads(text: str) -> Dict[str, Any]:
     text = text.strip()
+
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -603,31 +634,96 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
     return json.loads(text)
 
 
-def ai_classify_relevance_and_category(
+def normalize_job_title_from_list(value: str, allowed_job_titles: List[str]) -> str:
+    value_clean = clean_whitespace(value)
+    for jt in allowed_job_titles:
+        if value_clean.lower() == jt.lower():
+            return jt
+    return ""
+
+
+def normalize_seniority_list(values: List[str]) -> List[str]:
+    order = ["entry", "junior", "mid", "senior", "lead", "leadership"]
+    found = []
+    for v in values:
+        low = str(v).strip().lower()
+        if low in order and low not in found:
+            found.append(low)
+    return [x for x in order if x in found][:3]
+
+
+def escape_regexp(string: str) -> str:
+    return re.escape(string)
+
+
+def exact_match_skills_in_order(description: str, skill_list: List[str], limit: int = 10) -> List[str]:
+    if not description or not skill_list:
+        return []
+
+    found = []
+    for skill in skill_list:
+        regex = re.compile(r"(\b|\W)" + escape_regexp(skill) + r"(\b|\W)", flags=re.I)
+        match = regex.search(description)
+        if match:
+            index = match.start()
+            if not any(e["skill"].lower() == skill.lower() for e in found):
+                found.append({"skill": skill, "index": index})
+
+    found.sort(key=lambda x: x["index"])
+    ordered = [x["skill"] for x in found[:limit]]
+    return ordered
+
+
+def extract_best_content(html: str) -> Dict[str, Any]:
+    soup = BeautifulSoup(html, "lxml")
+    visible_text = soup_text(soup)
+    structured = extract_structured_fields(soup)
+
+    description_raw = structured.get("description_raw") or ""
+    structured_description_text = strip_html(description_raw)
+
+    title_tag = soup.find("title")
+    title_tag_text = clean_whitespace(title_tag.get_text(" ", strip=True)) if title_tag else ""
+
+    all_page_text_parts = [
+        title_tag_text,
+        structured.get("title", ""),
+        structured.get("company_name", ""),
+        structured.get("location_raw", ""),
+        structured_description_text,
+        visible_text,
+    ]
+    all_page_text = clean_whitespace("\n".join([x for x in all_page_text_parts if x]))
+
+    return {
+        "soup": soup,
+        "structured": structured,
+        "title_tag_text": title_tag_text,
+        "all_page_text": all_page_text,
+    }
+
+
+def ai_check_relevance(
     job_title: str,
     full_page_text: str,
     fallback_role_relevance: str,
-    fallback_job_category: str,
     fallback_reason: str,
 ) -> Dict[str, str]:
     if not client:
         return {
             "role_relevance": fallback_role_relevance,
-            "job_category": fallback_job_category,
-            "role_relevance_reason": fallback_reason,
+            "role_relevance_reason": fallback_reason or "OPENAI_API_KEY missing",
         }
 
     prompt = f"""
-You will receive two inputs: job title and description. Perform the following tasks carefully and output the results as JSON.
+You will receive two inputs: job title and description. Perform the following task carefully and output the results as JSON.
 
 Return ONLY valid JSON with exactly these keys:
 role_relevance
-job_category
 role_relevance_reason
 
 Field rules:
 - role_relevance must be exactly "Relevant" or "Not relevant"
-- job_category must be exactly "T&P" or "non-T&P"
 - role_relevance_reason must be concise
 
 Use this logic exactly:
@@ -660,18 +756,8 @@ Steps to follow:
 Step 1: Extract Location and remote type (onsite, hybrid, remote) from job description.
 Step 2: Check if Location is in allowed list: UK, Ireland (remote only), Remote Europe, Remote EMEA, Remote Global.
 Step 3: For Ireland, if remote type is onsite or hybrid, mark Not Relevant.
-Step 4: For Europe, if location is a specific country (e.g., Germany) and not remote Europe/EMEA, mark Not Relevant.
+Step 4: For Europe, if location is a specific country and not remote Europe/EMEA, mark Not Relevant.
 Step 5: Otherwise, evaluate role relevance based on job title and other criteria.
-
-2. Position Category (T&P or not T&P)
-
-Determine if the job belongs to the Tech & Product (T&P) category or not.
-
-The T&P category includes roles related to software development, engineering, product management, data science, IT, UX/UI design, QA, DevOps, and similar tech or product-focused positions.
-
-For output mapping:
-- If the prompt would say "T&P job", return job_category as "T&P"
-- If the prompt would say "Not T&P", return job_category as "non-T&P"
 
 Input job title:
 {job_title}
@@ -685,62 +771,66 @@ Input description:
         data = safe_json_loads(response.output_text)
 
         role_relevance = str(data.get("role_relevance", "") or "").strip()
-        job_category = str(data.get("job_category", "") or "").strip()
         reason = str(data.get("role_relevance_reason", "") or "").strip()
 
         if role_relevance not in {"Relevant", "Not relevant"}:
             role_relevance = fallback_role_relevance
-        if job_category not in {"T&P", "non-T&P"}:
-            job_category = fallback_job_category
         if not reason:
             reason = fallback_reason
 
         return {
             "role_relevance": role_relevance,
-            "job_category": job_category,
             "role_relevance_reason": reason,
         }
     except Exception as e:
         return {
             "role_relevance": fallback_role_relevance,
-            "job_category": fallback_job_category,
             "role_relevance_reason": f"AI error: {e}",
         }
 
 
-def ai_extract_remaining_fields(
+def ai_tag_relevant_job(
     job_title: str,
     full_page_text: str,
     allowed_locations: List[str],
     allowed_salaries: List[int],
-    fallback_job_location: str,
+    allowed_job_titles: List[str],
+    fallback_job_category: str,
+    fallback_location: str,
     fallback_remote_preferences: str,
     fallback_remote_days: str,
     fallback_salary_min: str,
     fallback_salary_max: str,
     fallback_salary_currency: str,
-    fallback_visa_sponsorship: str,
+    fallback_visa: str,
     fallback_job_type: str,
-) -> Dict[str, str]:
+    fallback_job_description: str,
+) -> Dict[str, Any]:
     if not client:
         return {
-            "job_location": fallback_job_location,
+            "job_category": fallback_job_category,
+            "job_location": fallback_location,
             "remote_preferences": fallback_remote_preferences,
             "remote_days": fallback_remote_days,
             "salary_min": fallback_salary_min,
             "salary_max": fallback_salary_max,
             "salary_currency": fallback_salary_currency,
-            "visa_sponsorship": fallback_visa_sponsorship,
+            "visa_sponsorship": fallback_visa,
             "job_type": fallback_job_type,
+            "job_description": fallback_job_description,
+            "job_titles": [],
+            "seniorities": [],
         }
 
     location_list_text = "\n".join(allowed_locations[:3000])
     salary_list_text = ", ".join(str(x) for x in allowed_salaries[:3000])
+    job_titles_text = ", ".join(allowed_job_titles[:3000])
 
     prompt = f"""
-You will receive two inputs: job title and description.
+You will receive two inputs: job title (position name) and description (full page text).
 
 Return ONLY valid JSON with exactly these keys:
+job_category
 job_location
 remote_preferences
 remote_days
@@ -749,49 +839,68 @@ salary_max
 salary_currency
 visa_sponsorship
 job_type
+job_description
+job_titles
+seniorities
 
-Rules:
+Rules for job_category:
+- Output exactly one of: "T&P", "NonT&P"
+- T&P includes software development, engineering, product, data, IT, UX/UI, QA, DevOps and similar tech/product roles
+- NonT&P is everything else that is still relevant
 
-1. job_location
-- Extract the job location from the page text.
-- Match exactly one entry from the allowed normalized locations list.
-- If the extracted location does not exactly exist in the list, choose the closest broader acceptable location.
-- If no good match exists, return "Unknown" or "".
+Rules for job_location:
+- Match exactly one value from the allowed normalized locations list
+- If extracted location is not exactly in the list, choose the closest broader acceptable location
+- If not found, return "Unknown" or ""
 
-2. remote_preferences
-- Allowed values are only: onsite, hybrid, remote
-- Normalize all variants like on-site/on site to onsite
-- If multiple apply, output them in this exact order: onsite, hybrid, remote
-- Separate multiple values with commas
-- If not stated, return ""
+Rules for remote_preferences:
+- Allowed values only: onsite, hybrid, remote
+- Normalize all variants
+- If multiple apply, output them comma-separated in this exact order: onsite, hybrid, remote
+- If not specified, return ""
 
-3. remote_days
+Rules for remote_days:
 - Return only a single number or ""
-- Return a number only if remote days are explicitly mentioned
-- If a range is given, return the highest number
-- If office days are stated, calculate remote days as 5 - office days, and return the highest remote value
+- Return the highest remote-days number if a range is given
+- If office days are stated, calculate remote days as 5 - office days and return the highest
 - If fully remote, ambiguous, unclear, or no remote allowed, return ""
 
-4. salary_min / salary_max / salary_currency
-- Extract salary numbers from the page text
-- salary_min and salary_max must be the closest values from the allowed salary list
-- If only one salary is present, use the same value for both min and max
-- salary_currency should be like GBP, USD, EUR, CAD, or ""
+Rules for salary:
+- salary_min and salary_max must be closest values from allowed salary list
+- If only one salary is present, use the same value for both
+- salary_currency should be like GBP, USD, EUR, CAD or ""
 
-5. visa_sponsorship
-- Return only: yes, no, or ""
-- Use yes only if clearly offered
-- Use no only if clearly not offered
+Rules for visa_sponsorship:
+- Return only yes, no, or ""
 
-6. job_type
+Rules for job_type:
 - Return only one of:
   Permanent
   FTC
   Part Time
   Freelance/Contract
   or ""
-- Use this priority if multiple appear:
-  Permanent > FTC > Part Time > Freelance/Contract
+- Priority: Permanent > FTC > Part Time > Freelance/Contract
+
+Rules for job_description:
+- Keep only the relevant role description
+- Exclude company intro, benefits, perks, equal opportunities, apply now, CTA blocks, and similar boilerplate
+
+Rules for job_titles:
+- Analyze both job title and description together
+- If the job title exactly matches one predefined job title, return only that one
+- If ambiguous, return up to 3 most appropriate predefined job titles
+- Only return exact strings from the predefined list
+- Return as JSON array, ordered most to least appropriate
+- If none, return []
+
+Rules for seniorities:
+- Allowed only: entry, junior, mid, senior, lead, leadership
+- Must be lowercase
+- Return as JSON array in this order only: entry, junior, mid, senior, lead, leadership
+- If title includes “head of”, “director”, “engineering manager”, or similar leadership terms, use leadership only
+- If fewer than 3 suitable values, return only those
+- If none, return []
 
 Allowed normalized locations:
 {location_list_text}
@@ -799,10 +908,13 @@ Allowed normalized locations:
 Allowed salaries:
 {salary_list_text}
 
-Job title:
+Predefined job titles:
+{job_titles_text}
+
+Input job title:
 {job_title}
 
-Job description:
+Input description:
 {full_page_text[:26000]}
 """.strip()
 
@@ -810,14 +922,21 @@ Job description:
         response = client.responses.create(model=OPENAI_MODEL, input=prompt)
         data = safe_json_loads(response.output_text)
 
-        job_location = str(data.get("job_location", "") or "").strip()
-        remote_preferences = str(data.get("remote_preferences", "") or "").strip()
-        remote_days = str(data.get("remote_days", "") or "").strip()
-        salary_min = str(data.get("salary_min", "") or "").strip()
-        salary_max = str(data.get("salary_max", "") or "").strip()
-        salary_currency = str(data.get("salary_currency", "") or "").strip()
+        job_category = normalize_category_for_skills(str(data.get("job_category", "") or "").strip()) or fallback_job_category
+        job_location = str(data.get("job_location", "") or "").strip() or fallback_location
+        remote_preferences = str(data.get("remote_preferences", "") or "").strip() or fallback_remote_preferences
+        remote_days = str(data.get("remote_days", "") or "").strip() or fallback_remote_days
+        salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
+        salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
+        salary_currency = str(data.get("salary_currency", "") or "").strip() or fallback_salary_currency
         visa_sponsorship = str(data.get("visa_sponsorship", "") or "").strip()
         job_type = str(data.get("job_type", "") or "").strip()
+        job_description = str(data.get("job_description", "") or "").strip() or fallback_job_description
+
+        if visa_sponsorship not in {"yes", "no", ""}:
+            visa_sponsorship = fallback_visa
+        if job_type not in {"Permanent", "FTC", "Part Time", "Freelance/Contract", ""}:
+            job_type = fallback_job_type
 
         if remote_preferences:
             parts = [p.strip() for p in remote_preferences.split(",") if p.strip()]
@@ -825,67 +944,137 @@ Job description:
             parts = [p for p in valid_order if p in parts]
             remote_preferences = ", ".join(parts)
 
-        if visa_sponsorship not in {"yes", "no", ""}:
-            visa_sponsorship = fallback_visa_sponsorship
+        raw_titles = data.get("job_titles", [])
+        if not isinstance(raw_titles, list):
+            raw_titles = []
+        normalized_titles = []
+        for t in raw_titles:
+            exact = normalize_job_title_from_list(str(t), allowed_job_titles)
+            if exact and exact not in normalized_titles:
+                normalized_titles.append(exact)
+        normalized_titles = normalized_titles[:3]
 
-        if job_type not in {"Permanent", "FTC", "Part Time", "Freelance/Contract", ""}:
-            job_type = fallback_job_type
+        raw_seniorities = data.get("seniorities", [])
+        if not isinstance(raw_seniorities, list):
+            raw_seniorities = []
+        normalized_seniorities = normalize_seniority_list(raw_seniorities)
 
         return {
-            "job_location": job_location or fallback_job_location,
-            "remote_preferences": remote_preferences or fallback_remote_preferences,
-            "remote_days": remote_days or fallback_remote_days,
-            "salary_min": salary_min or fallback_salary_min,
-            "salary_max": salary_max or fallback_salary_max,
-            "salary_currency": salary_currency or fallback_salary_currency,
+            "job_category": job_category,
+            "job_location": job_location,
+            "remote_preferences": remote_preferences,
+            "remote_days": remote_days,
+            "salary_min": salary_min,
+            "salary_max": salary_max,
+            "salary_currency": salary_currency,
             "visa_sponsorship": visa_sponsorship,
             "job_type": job_type,
+            "job_description": job_description,
+            "job_titles": normalized_titles,
+            "seniorities": normalized_seniorities,
         }
-    except Exception:
+    except Exception as e:
         return {
-            "job_location": fallback_job_location,
+            "job_category": fallback_job_category,
+            "job_location": fallback_location,
             "remote_preferences": fallback_remote_preferences,
             "remote_days": fallback_remote_days,
             "salary_min": fallback_salary_min,
             "salary_max": fallback_salary_max,
             "salary_currency": fallback_salary_currency,
-            "visa_sponsorship": fallback_visa_sponsorship,
+            "visa_sponsorship": fallback_visa,
             "job_type": fallback_job_type,
+            "job_description": fallback_job_description,
+            "job_titles": [],
+            "seniorities": [],
+            "_ai_error": str(e),
         }
 
 
-def extract_best_content(html: str) -> Dict[str, Any]:
-    soup = BeautifulSoup(html, "lxml")
-    visible_text = soup_text(soup)
-    structured = extract_structured_fields(soup)
+def ai_fallback_skills(
+    role_category: str,
+    description: str,
+    candidate_skills: List[str],
+    allowed_skills: List[str],
+) -> List[str]:
+    if not client or not role_category or not description or not allowed_skills:
+        return candidate_skills[:10]
 
-    description_raw = structured.get("description_raw") or ""
-    structured_description_text = strip_html(description_raw)
+    role_category = normalize_category_for_skills(role_category)
+    if role_category not in {"T&P", "NonT&P"}:
+        return candidate_skills[:10]
 
-    title_tag = soup.find("title")
-    title_tag_text = clean_whitespace(title_tag.get_text(" ", strip=True)) if title_tag else ""
+    allowed_skills_text = ", ".join(allowed_skills[:5000])
+    candidate_skills_text = ", ".join(candidate_skills)
 
-    all_page_text_parts = [
-        title_tag_text,
-        structured.get("title", ""),
-        structured.get("company_name", ""),
-        structured.get("location_raw", ""),
-        structured_description_text,
-        visible_text,
-    ]
-    all_page_text = clean_whitespace("\n".join([x for x in all_page_text_parts if x]))
+    prompt = f"""
+You are a strict skills tagger for a recruiting workflow.
 
-    return {
-        "soup": soup,
-        "visible_text": visible_text,
-        "structured": structured,
-        "structured_description_text": structured_description_text,
-        "all_page_text": all_page_text,
-        "title_tag_text": title_tag_text,
-    }
+Return valid json only. No markdown. No commentary.
+
+Hard rules:
+- role_category is PROVIDED as input. You MUST echo it exactly as given ("T&P" or "NonT&P"). Do not change it.
+- skills MUST be an array with 2 to 10 items (try hard to return at least 2).
+- skills MUST be chosen ONLY from the correct Allowed skills list (exact string match):
+  - If role_category = "T&P" use Allowed T&P skills
+  - If role_category = "NonT&P" use Allowed NonT&P skills
+- Prefer concrete, clearly evidenced skills from the description.
+- candidate_skills is provided: use it as the PRIMARY source, but if it has fewer than 2 items, infer additional skills from the description (still only from the allowed list).
+- NEVER output a skill not present in the allowed list.
+- Before finalizing, verify each returned skill appears exactly in the allowed list. If not, remove it.
+
+Output schema (exact keys):
+{{
+  "role_category": "T&P" or "NonT&P",
+  "skills": ["..."]
+}}
+
+role_category:
+{role_category}
+
+candidate_skills:
+{candidate_skills_text}
+
+Allowed skills:
+{allowed_skills_text}
+
+description:
+{description[:22000]}
+""".strip()
+
+    try:
+        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
+        data = safe_json_loads(response.output_text)
+
+        out_category = normalize_category_for_skills(str(data.get("role_category", "") or "").strip())
+        if out_category != role_category:
+            return candidate_skills[:10]
+
+        raw_skills = data.get("skills", [])
+        if not isinstance(raw_skills, list):
+            return candidate_skills[:10]
+
+        allowed_set = {s: s.lower() for s in allowed_skills}
+        valid = []
+        for sk in raw_skills:
+            sk_clean = str(sk).strip()
+            exact = next((s for s in allowed_skills if s.lower() == sk_clean.lower()), "")
+            if exact and exact not in valid:
+                valid.append(exact)
+
+        return valid[:10] if valid else candidate_skills[:10]
+    except Exception:
+        return candidate_skills[:10]
 
 
-def process_url(url: str, allowed_locations: List[str], allowed_salaries: List[int]) -> JobResult:
+def process_url(
+    url: str,
+    allowed_locations: List[str],
+    allowed_salaries: List[int],
+    tp_skills: List[str],
+    nontp_skills: List[str],
+    allowed_job_titles: List[str],
+) -> JobResult:
     result = JobResult(job_url=url)
 
     html, status = fetch_html(url)
@@ -918,49 +1107,36 @@ def process_url(url: str, allowed_locations: List[str], allowed_salaries: List[i
     title_tag_text = parsed["title_tag_text"]
 
     raw_title = first_nonempty(structured.get("title"), title_tag_text)
-    fallback_job_title = clean_job_title(raw_title)
+    clean_title = clean_job_title(raw_title)
 
-    fallback_location = normalize_location_from_rules(
-        structured.get("location_raw", ""),
-        all_page_text,
-        allowed_locations
+    fallback_location = normalize_location_rule_based(structured.get("location_raw", ""), all_page_text, allowed_locations)
+    fallback_remote_preferences = detect_remote_preferences_rule_based(all_page_text)
+    fallback_remote_days = detect_remote_days_rule_based(all_page_text, fallback_remote_preferences)
+    fallback_salary_min, fallback_salary_max, fallback_salary_currency = extract_salary_rule_based(
+        all_page_text, structured, allowed_salaries
     )
-    fallback_remote_preferences = detect_remote_preferences_from_rules(all_page_text)
-    fallback_remote_days = detect_remote_days_from_rules(all_page_text, fallback_remote_preferences)
-    fallback_salary_min, fallback_salary_max, fallback_salary_currency = extract_salary_from_rules(
-        all_page_text,
-        structured,
-        allowed_salaries
-    )
-    fallback_visa = detect_visa_sponsorship_from_rules(all_page_text)
-    fallback_job_type = detect_job_type_from_rules(
-        all_page_text,
-        structured.get("employment_type_raw", "")
-    )
+    fallback_visa = detect_visa_rule_based(all_page_text)
+    fallback_job_type = detect_job_type_rule_based(all_page_text, structured.get("employment_type_raw", ""))
+    fallback_description = clean_job_description(all_page_text)
 
-    fallback_role_relevance = "Relevant" if fallback_job_title else "Not relevant"
-    fallback_category = "T&P" if re.search(
-        r"\b(engineer|developer|software|data|machine learning|ai|product manager|designer|qa|devops|research engineer)\b",
-        fallback_job_title.lower()
-    ) else "non-T&P"
-    fallback_relevance_reason = "Fallback classification based on extracted title and page text."
+    fallback_role_relevance = "Relevant" if clean_title else "Not relevant"
+    fallback_reason = "Fallback classification based on extracted title and page text."
 
-    ai_relevance = ai_classify_relevance_and_category(
-        job_title=fallback_job_title,
+    relevance = ai_check_relevance(
+        job_title=clean_title,
         full_page_text=all_page_text,
         fallback_role_relevance=fallback_role_relevance,
-        fallback_job_category=fallback_category,
-        fallback_reason=fallback_relevance_reason,
+        fallback_reason=fallback_reason,
     )
 
-    result.job_title = fallback_job_title
-    result.role_relevance = ai_relevance.get("role_relevance", "") or fallback_role_relevance
-    result.role_relevance_reason = ai_relevance.get("role_relevance_reason", "") or fallback_relevance_reason
-    result.job_category = ai_relevance.get("job_category", "") or fallback_category
+    result.job_title = clean_title
+    result.role_relevance = relevance.get("role_relevance", "") or fallback_role_relevance
+    result.role_relevance_reason = relevance.get("role_relevance_reason", "") or fallback_reason
     result.source_method = source_method
     result.status = "ok"
 
     if result.role_relevance == "Not relevant":
+        result.job_category = ""
         result.job_location = ""
         result.remote_preferences = ""
         result.remote_days = ""
@@ -973,32 +1149,82 @@ def process_url(url: str, allowed_locations: List[str], allowed_salaries: List[i
         result.notes = " | ".join(notes + ["stopped_after_relevance"])
         return result
 
-    ai_rest = ai_extract_remaining_fields(
-        job_title=fallback_job_title,
+    fallback_job_category = "T&P" if re.search(
+        r"\b(engineer|developer|software|data|machine learning|ai|product|designer|qa|devops|research)\b",
+        clean_title.lower()
+    ) else "NonT&P"
+
+    tagged = ai_tag_relevant_job(
+        job_title=clean_title,
         full_page_text=all_page_text,
         allowed_locations=allowed_locations,
         allowed_salaries=allowed_salaries,
-        fallback_job_location=fallback_location,
+        allowed_job_titles=allowed_job_titles,
+        fallback_job_category=fallback_job_category,
+        fallback_location=fallback_location,
         fallback_remote_preferences=fallback_remote_preferences,
         fallback_remote_days=fallback_remote_days,
         fallback_salary_min=fallback_salary_min,
         fallback_salary_max=fallback_salary_max,
         fallback_salary_currency=fallback_salary_currency,
-        fallback_visa_sponsorship=fallback_visa,
+        fallback_visa=fallback_visa,
         fallback_job_type=fallback_job_type,
+        fallback_job_description=fallback_description,
     )
 
-    result.job_location = ai_rest.get("job_location", "") or fallback_location
-    result.remote_preferences = ai_rest.get("remote_preferences", "") or fallback_remote_preferences
-    result.remote_days = ai_rest.get("remote_days", "") or fallback_remote_days
-    result.salary_min = ai_rest.get("salary_min", "") or fallback_salary_min
-    result.salary_max = ai_rest.get("salary_max", "") or fallback_salary_max
-    result.salary_currency = ai_rest.get("salary_currency", "") or fallback_salary_currency
-    result.visa_sponsorship = ai_rest.get("visa_sponsorship", "") or fallback_visa
-    result.job_type = ai_rest.get("job_type", "") or fallback_job_type
+    result.job_category = normalize_category_for_skills(tagged.get("job_category", "")) or fallback_job_category
+    result.job_location = tagged.get("job_location", "") or fallback_location
+    result.remote_preferences = tagged.get("remote_preferences", "") or fallback_remote_preferences
+    result.remote_days = tagged.get("remote_days", "") or fallback_remote_days
+    result.salary_min = tagged.get("salary_min", "") or fallback_salary_min
+    result.salary_max = tagged.get("salary_max", "") or fallback_salary_max
+    result.salary_currency = tagged.get("salary_currency", "") or fallback_salary_currency
+    result.visa_sponsorship = tagged.get("visa_sponsorship", "") or fallback_visa
+    result.job_type = tagged.get("job_type", "") or fallback_job_type
+    result.job_description = clean_job_description(tagged.get("job_description", "") or fallback_description)
 
-    result.job_description = clean_job_description(all_page_text)
-    result.notes = " | ".join(notes + ["used_full_page_text_then_cleaned_description"])
+    job_titles = tagged.get("job_titles", []) if isinstance(tagged.get("job_titles", []), list) else []
+    seniorities = tagged.get("seniorities", []) if isinstance(tagged.get("seniorities", []), list) else []
+
+    result.job_title_tag_1 = job_titles[0] if len(job_titles) > 0 else ""
+    result.job_title_tag_2 = job_titles[1] if len(job_titles) > 1 else ""
+    result.job_title_tag_3 = job_titles[2] if len(job_titles) > 2 else ""
+
+    result.seniority_1 = seniorities[0] if len(seniorities) > 0 else ""
+    result.seniority_2 = seniorities[1] if len(seniorities) > 1 else ""
+    result.seniority_3 = seniorities[2] if len(seniorities) > 2 else ""
+
+    skill_list = tp_skills if result.job_category == "T&P" else nontp_skills
+    exact_skills = exact_match_skills_in_order(result.job_description or all_page_text, skill_list, limit=10)
+
+    final_skills = exact_skills
+    if len(final_skills) < 2:
+        final_skills = ai_fallback_skills(
+            role_category=result.job_category,
+            description=result.job_description or all_page_text,
+            candidate_skills=exact_skills,
+            allowed_skills=skill_list,
+        )
+
+    padded_skills = (final_skills + [""] * 10)[:10]
+    result.skill_1 = padded_skills[0]
+    result.skill_2 = padded_skills[1]
+    result.skill_3 = padded_skills[2]
+    result.skill_4 = padded_skills[3]
+    result.skill_5 = padded_skills[4]
+    result.skill_6 = padded_skills[5]
+    result.skill_7 = padded_skills[6]
+    result.skill_8 = padded_skills[7]
+    result.skill_9 = padded_skills[8]
+    result.skill_10 = padded_skills[9]
+
+    note_parts = notes + ["ran_relevant_tagging"]
+    if len(exact_skills) >= 2:
+        note_parts.append("skills_exact_match_only")
+    else:
+        note_parts.append("skills_ai_fallback_used")
+
+    result.notes = " | ".join(note_parts)
     return result
 
 
@@ -1019,12 +1245,18 @@ def main() -> None:
     start = time.time()
 
     urls = load_urls(INPUT_URLS_FILE)
-    allowed_locations = load_location_list(LOCATIONS_CSV)
+    allowed_locations = load_text_list(LOCATIONS_CSV)
     allowed_salaries = load_salary_list(SALARIES_CSV)
+    tp_skills = load_text_list(TP_SKILLS_CSV)
+    nontp_skills = load_text_list(NONTP_SKILLS_CSV)
+    allowed_job_titles = load_text_list(JOB_TITLES_CSV)
 
     print(f"[INFO] URLs loaded: {len(urls)}")
     print(f"[INFO] Allowed locations loaded: {len(allowed_locations)}")
     print(f"[INFO] Allowed salaries loaded: {len(allowed_salaries)}")
+    print(f"[INFO] T&P skills loaded: {len(tp_skills)}")
+    print(f"[INFO] NonT&P skills loaded: {len(nontp_skills)}")
+    print(f"[INFO] Job titles loaded: {len(allowed_job_titles)}")
     print(f"[INFO] OpenAI enabled: {'yes' if client else 'no'}")
 
     results: List[JobResult] = []
@@ -1032,7 +1264,14 @@ def main() -> None:
     for idx, url in enumerate(urls, start=1):
         print(f"[{idx}/{len(urls)}] Processing: {url}")
         try:
-            row = process_url(url, allowed_locations, allowed_salaries)
+            row = process_url(
+                url=url,
+                allowed_locations=allowed_locations,
+                allowed_salaries=allowed_salaries,
+                tp_skills=tp_skills,
+                nontp_skills=nontp_skills,
+                allowed_job_titles=allowed_job_titles,
+            )
         except Exception as e:
             row = JobResult(
                 job_url=url,
