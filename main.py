@@ -466,7 +466,6 @@ def build_header_text(lines: List[str], structured: Dict[str, Any], title_tag_te
     if structured.get("company_name"):
         keep.append(structured["company_name"])
 
-    # Keep top lines likely containing header meta
     for line in lines[:40]:
         low = line.lower()
         if (
@@ -491,15 +490,10 @@ def build_header_text(lines: List[str], structured: Dict[str, Any], title_tag_te
 
 
 def extract_role_body_text(lines: List[str]) -> str:
-    """
-    Keep the parts most likely to be actual role content.
-    Preserve key sections like Required, Desirable, Key Relationships, Qualifications, etc.
-    Remove obvious footer/legal/company/ATS noise.
-    """
     kept = []
     in_role_zone = False
 
-    for i, line in enumerate(lines):
+    for line in lines:
         low = line.lower().strip()
 
         if line_is_noise(line):
@@ -511,14 +505,11 @@ def extract_role_body_text(lines: List[str]) -> str:
             continue
 
         if low in ROLE_STOP_HEADINGS:
-            # stop only if we've already collected a meaningful role zone
             if in_role_zone:
                 continue
             else:
-                # If company text comes first, skip it but keep searching
                 continue
 
-        # Start role zone if strong role cues appear
         if not in_role_zone:
             if (
                 "key responsibilities" in low
@@ -537,11 +528,9 @@ def extract_role_body_text(lines: List[str]) -> str:
                 kept.append(line)
                 continue
 
-        # Keep useful role content lines
         if in_role_zone:
             kept.append(line)
 
-    # If we captured almost nothing, fallback to a filtered middle-ground
     if len(kept) < 12:
         fallback = []
         for line in lines:
@@ -554,6 +543,56 @@ def extract_role_body_text(lines: List[str]) -> str:
         kept = fallback
 
     return clean_whitespace("\n".join(kept))
+
+
+def clean_job_description(text: str) -> str:
+    """
+    Final cleaning pass that preserves useful role sections and removes obvious boilerplate.
+    """
+    if not text:
+        return ""
+
+    lines = split_lines(text)
+    cleaned = []
+
+    hard_stop_patterns = [
+        r"^recruitment agencies$",
+        r"^privacy policy$",
+        r"^read more$",
+        r"^follow us$",
+        r"^contact$",
+        r"^reasonable adjustments$",
+        r"^smart working$",
+        r"^equality, diversity and inclusion$",
+        r"^safeguarding$",
+    ]
+
+    for line in lines:
+        low = line.lower().strip()
+
+        if line_is_noise(line):
+            continue
+
+        if any(re.search(p, low, flags=re.I) for p in hard_stop_patterns):
+            continue
+
+        # Remove obvious footer/platform/company promo noise
+        if any(
+            phrase in low for phrase in [
+                "© ",
+                "all rights reserved",
+                "workday, inc.",
+                "smartrecruiters",
+                "drop us a note to find out more",
+                "follow us on linkedin",
+            ]
+        ):
+            continue
+
+        cleaned.append(line)
+
+    out = clean_whitespace("\n".join(cleaned))
+    return out[:20000]
 
 
 def extract_best_content(html: str) -> Dict[str, Any]:
@@ -570,7 +609,6 @@ def extract_best_content(html: str) -> Dict[str, Any]:
     visible_lines = split_lines(visible_text)
     header_text = build_header_text(visible_lines, structured, title_tag_text)
 
-    # Prefer structured job description when it looks substantial, else visible text-derived role body
     structured_lines = split_lines(structured_description_text)
     visible_role_body = extract_role_body_text(visible_lines)
     structured_role_body = extract_role_body_text(structured_lines) if len(structured_lines) >= 8 else ""
@@ -660,7 +698,6 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
     city_lookup = build_location_lookup(allowed_locations)
     lines = split_lines(text)
 
-    # Priority 1: explicit location lines in order
     candidate_lines = []
     for line in lines[:60]:
         low = line.lower()
@@ -669,11 +706,9 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
         elif re.search(r"\b(london|manchester|birmingham|edinburgh|belfast|sheffield|aberdeen|warminster|newcastle)\b", low):
             candidate_lines.append(line)
 
-    # Priority 2: match most specific location appearing earliest
     joined = "\n".join(candidate_lines) if candidate_lines else text
     joined_low = joined.lower()
 
-    # Exact location string match by appearance
     exact_hits = []
     for loc in allowed_locations:
         pos = joined_low.find(loc.lower())
@@ -684,7 +719,6 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
         exact_hits.sort(key=lambda x: (x[0], -x[1]))
         return exact_hits[0][2]
 
-    # City-only fallback by appearance order
     city_hits = []
     for city, full in city_lookup.items():
         m = re.search(rf"\b{re.escape(city)}\b", joined_low)
@@ -695,7 +729,6 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
         city_hits.sort(key=lambda x: (x[0], -x[1]))
         return city_hits[0][2]
 
-    # Country fallback only if nothing more specific exists
     for broad in ["United Kingdom", "England", "Scotland", "Wales", "Northern Ireland", "Ireland"]:
         for loc in allowed_locations:
             if loc.lower() == broad.lower() and broad.lower() in joined_low:
@@ -708,7 +741,6 @@ def detect_remote_preferences_rule_based(text: str) -> str:
     low = (text or "").lower()
     found = []
 
-    # Stronger precedence for explicit role text
     if re.search(r"\bhome based\b|\buk remote\b|\bfully remote\b|\bremote\b", low):
         found.append("remote")
     if re.search(r"\bhybrid\b", low):
@@ -723,7 +755,6 @@ def detect_remote_preferences_rule_based(text: str) -> str:
 def detect_remote_days_rule_based(text: str, remote_prefs: str) -> str:
     low = (text or "").lower()
 
-    # Only tag days if explicit. Never infer from "hybrid" alone.
     if "hybrid" not in remote_prefs and "remote" not in remote_prefs:
         return ""
 
@@ -763,17 +794,11 @@ def nearest_salary(value: Optional[int], allowed_salaries: List[int]) -> str:
 
 
 def parse_explicit_salary(text: str, allowed_salaries: List[int]) -> Tuple[str, str, str, str]:
-    """
-    Return salary only when there is strong explicit evidence.
-    Supports annual and daily rates.
-    """
     lines = split_lines(text)
     candidate_lines = []
 
     for line in lines[:80]:
         low = line.lower()
-
-        # Must have strong compensation evidence
         if (
             "salary" in low
             or "rate" in low
@@ -783,7 +808,6 @@ def parse_explicit_salary(text: str, allowed_salaries: List[int]) -> Tuple[str, 
         ):
             candidate_lines.append(line)
 
-    # Check day rate first
     for line in candidate_lines:
         low = line.lower()
         if re.search(r"\b(p/d|per day|day rate|daily rate)\b", low):
@@ -806,11 +830,9 @@ def parse_explicit_salary(text: str, allowed_salaries: List[int]) -> Tuple[str, 
                 currency = {"£": "GBP", "$": "USD", "€": "EUR"}.get(curr_sym, "")
                 return str(val), str(val), currency, "day"
 
-    # Annual or normal compensation
     for line in candidate_lines:
         low = line.lower()
 
-        # Skip lines that look like dates/reference or standards
         if re.search(r"\b(202\d|iso|nist|reference|posted on)\b", low):
             continue
 
@@ -917,7 +939,6 @@ def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
     if any(x in title_low for x in ["associate", "mid weight", "mid-weight"]):
         return ["mid"]
 
-    # Experience rules
     years = []
     for m in re.finditer(r"\b(\d)\s*-\s*(\d)\s+years?\b", text_low):
         years.extend([int(m.group(1)), int(m.group(2))])
@@ -1290,10 +1311,6 @@ def build_skill_regex(skill: str) -> re.Pattern:
 
 
 def build_skills_source_text(header_text: str, role_body_text: str) -> str:
-    """
-    Skills must come from role-focused text only.
-    Exclude company description, footer, ATS, benefits, privacy, etc.
-    """
     lines = split_lines("\n".join([header_text, role_body_text]))
     out = []
 
@@ -1422,7 +1439,6 @@ role_focused_description:
             if exact and exact not in merged:
                 merged.append(exact)
 
-        # Final hard filter
         filtered = []
         allowed_lower = {s.lower(): s for s in allowed_skills}
         for sk in merged:
@@ -1510,12 +1526,10 @@ def process_url(
     result.source_method = source_method
     result.status = "ok"
 
-    # Stop immediately on Not relevant
     if result.role_relevance == "Not relevant":
         result.notes = " | ".join(notes + ["stopped_after_relevance"])
         return result
 
-    # Better fallback category
     fallback_job_category = "T&P" if re.search(
         r"\b("
         r"engineer|developer|software|data|machine learning|ml|ai|product|designer|qa|devops|research|"
@@ -1557,7 +1571,6 @@ def process_url(
     result.job_type = tagged.get("job_type", "") or fallback_job_type
     result.job_description = clean_job_description(tagged.get("job_description", "") or fallback_description)
 
-    # Hard guard: if there is no explicit salary evidence, leave salary blank
     explicit_salary_check = parse_explicit_salary(header_text + "\n" + role_body_text, allowed_salaries)
     if explicit_salary_check == ("", "", "", ""):
         result.salary_min = ""
@@ -1565,13 +1578,11 @@ def process_url(
         result.salary_currency = ""
         result.salary_period = ""
 
-    # Titles
     job_titles = tagged.get("job_titles", []) if isinstance(tagged.get("job_titles", []), list) else []
     result.job_title_tag_1 = job_titles[0] if len(job_titles) > 0 else ""
     result.job_title_tag_2 = job_titles[1] if len(job_titles) > 1 else ""
     result.job_title_tag_3 = job_titles[2] if len(job_titles) > 2 else ""
 
-    # Seniority
     seniorities = tagged.get("seniorities", []) if isinstance(tagged.get("seniorities", []), list) else []
     if not seniorities:
         seniorities = fallback_seniorities(clean_title, role_body_text)
@@ -1581,7 +1592,6 @@ def process_url(
     result.seniority_2 = seniorities[1] if len(seniorities) > 1 else ""
     result.seniority_3 = seniorities[2] if len(seniorities) > 2 else ""
 
-    # Skills: STRICTLY role-focused text only
     skills_source_text = build_skills_source_text(header_text, role_body_text)
     skill_list = tp_skills if result.job_category == "T&P" else nontp_skills
 
@@ -1593,7 +1603,6 @@ def process_url(
         allowed_skills=skill_list,
     )
 
-    # Final strict filter against allowed list
     allowed_lower = {s.lower(): s for s in skill_list}
     final_skills = [
         allowed_lower[sk.lower()]
