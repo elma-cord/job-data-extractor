@@ -797,7 +797,84 @@ def merge_role_bodies(*candidates: str) -> str:
     for text in candidates:
         for line in split_lines(text):
             merged_lines.append(line)
-    return clean_job_description("\n".join(dedupe_keep_order(merged_lines)))
+    return clean_job_description("
+".join(dedupe_keep_order(merged_lines)))
+
+
+def job_text_score(text: str) -> int:
+    low = normalize_quotes(text or "").lower()
+    score = 0
+
+    positive_terms = [
+        "responsibilities",
+        "duties and responsibilities",
+        "requirements",
+        "qualifications",
+        "experience",
+        "skills",
+        "knowledge, skills, and abilities",
+        "person specification",
+        "job description",
+        "overview",
+        "benefits",
+        "preferred",
+        "required",
+        "certifications",
+        "availability",
+        "what you'll do",
+        "what you’ll do",
+        "what to bring",
+        "key responsibilities",
+        "minimum qualifications",
+        "preferred qualifications",
+        "desirable",
+        "key relationships",
+        "success measures",
+    ]
+    for term in positive_terms:
+        if term in low:
+            score += 3
+
+    strong_terms = [
+        "kubernetes",
+        "openshift",
+        "linux",
+        "vmware",
+        "azure",
+        "storage",
+        "monitoring",
+        "on-call",
+        "root cause",
+        "python",
+        "tensorflow",
+        "pytorch",
+        "account management",
+        "customer success",
+        "risk & compliance",
+        "machine learning",
+    ]
+    for term in strong_terms:
+        if term in low:
+            score += 2
+
+    negative_terms = [
+        "about us",
+        "company overview",
+        "who we are",
+        "our mission",
+        "service listing",
+        "our offerings",
+        "follow us",
+        "privacy policy",
+        "recruitment agencies",
+        "read more",
+    ]
+    for term in negative_terms:
+        if term in low:
+            score -= 3
+
+    score += min(len(text) // 500, 10)
+    return score
 
 
 def extract_best_content(html: str) -> Dict[str, Any]:
@@ -826,9 +903,27 @@ def extract_best_content(html: str) -> Dict[str, Any]:
     structured_role_body = extract_role_body_text(structured_lines) if structured_lines else ""
     json_role_body = extract_role_body_text(json_lines) if json_lines else ""
 
-    role_body_text = merge_role_bodies(structured_role_body, visible_role_body, json_role_body)
-    role_context_text = clean_whitespace("\n".join([header_text, role_body_text]))
-    all_page_text = clean_whitespace("\n".join([
+    candidates = [
+        ("visible", clean_job_description(visible_role_body)),
+        ("structured", clean_job_description(structured_role_body)),
+        ("json", clean_job_description(json_role_body)),
+    ]
+    candidates = [(name, body) for name, body in candidates if body]
+
+    best_body = ""
+    if candidates:
+        scored = [(job_text_score(body), len(body), name, body) for name, body in candidates]
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        best_body = scored[0][3]
+
+    role_body_text = best_body
+    if len(role_body_text.strip()) < 600:
+        role_body_text = merge_role_bodies(visible_role_body, structured_role_body, json_role_body)
+
+    role_context_text = clean_whitespace("
+".join([header_text, role_body_text]))
+    all_page_text = clean_whitespace("
+".join([
         title_tag_text,
         structured.get("title", ""),
         structured.get("company_name", ""),
@@ -847,7 +942,6 @@ def extract_best_content(html: str) -> Dict[str, Any]:
         "role_context_text": role_context_text,
         "all_page_text": all_page_text,
     }
-
 
 # -------------------------
 # Deterministic parsing
