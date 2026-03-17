@@ -797,8 +797,7 @@ def merge_role_bodies(*candidates: str) -> str:
     for text in candidates:
         for line in split_lines(text):
             merged_lines.append(line)
-    return clean_job_description("
-".join(dedupe_keep_order(merged_lines)))
+    __already_fixed__
 
 
 def job_text_score(text: str) -> int:
@@ -920,10 +919,8 @@ def extract_best_content(html: str) -> Dict[str, Any]:
     if len(role_body_text.strip()) < 600:
         role_body_text = merge_role_bodies(visible_role_body, structured_role_body, json_role_body)
 
-    role_context_text = clean_whitespace("
-".join([header_text, role_body_text]))
-    all_page_text = clean_whitespace("
-".join([
+    role_context_text = clean_whitespace("\n".join([header_text, role_body_text]))
+    all_page_text = clean_whitespace("\n".join([
         title_tag_text,
         structured.get("title", ""),
         structured.get("company_name", ""),
