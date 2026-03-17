@@ -797,54 +797,84 @@ def merge_role_bodies(*candidates: str) -> str:
     for text in candidates:
         for line in split_lines(text):
             merged_lines.append(line)
-    return clean_job_description("\n".join(dedupe_keep_order(merged_lines)))
+    __already_fixed__
 
 
+def job_text_score(text: str) -> int:
+    low = normalize_quotes(text or "").lower()
+    score = 0
 
+    positive_terms = [
+        "responsibilities",
+        "duties and responsibilities",
+        "requirements",
+        "qualifications",
+        "experience",
+        "skills",
+        "knowledge, skills, and abilities",
+        "person specification",
+        "job description",
+        "overview",
+        "benefits",
+        "preferred",
+        "required",
+        "certifications",
+        "availability",
+        "what you'll do",
+        "what you’ll do",
+        "what to bring",
+        "key responsibilities",
+        "minimum qualifications",
+        "preferred qualifications",
+        "desirable",
+        "key relationships",
+        "success measures",
+    ]
+    for term in positive_terms:
+        if term in low:
+            score += 3
 
-def extract_title_from_page(soup: BeautifulSoup, title_tag_text: str, visible_lines: List[str], structured_title: str = "") -> str:
-    candidates: List[str] = []
+    strong_terms = [
+        "kubernetes",
+        "openshift",
+        "linux",
+        "vmware",
+        "azure",
+        "storage",
+        "monitoring",
+        "on-call",
+        "root cause",
+        "python",
+        "tensorflow",
+        "pytorch",
+        "account management",
+        "customer success",
+        "risk & compliance",
+        "machine learning",
+    ]
+    for term in strong_terms:
+        if term in low:
+            score += 2
 
-    if structured_title:
-        candidates.append(structured_title)
+    negative_terms = [
+        "about us",
+        "company overview",
+        "who we are",
+        "our mission",
+        "service listing",
+        "our offerings",
+        "follow us",
+        "privacy policy",
+        "recruitment agencies",
+        "read more",
+    ]
+    for term in negative_terms:
+        if term in low:
+            score -= 3
 
-    og = soup.find("meta", attrs={"property": "og:title"}) or soup.find("meta", attrs={"name": "og:title"})
-    if og and og.get("content"):
-        candidates.append(clean_whitespace(og.get("content", "")))
+    score += min(len(text) // 500, 10)
+    return score
 
-    tw = soup.find("meta", attrs={"name": "twitter:title"})
-    if tw and tw.get("content"):
-        candidates.append(clean_whitespace(tw.get("content", "")))
-
-    h1 = soup.find("h1")
-    if h1:
-        candidates.append(clean_whitespace(h1.get_text(" ", strip=True)))
-
-    for tag in soup.find_all(["h2", "h3"], limit=5):
-        txt = clean_whitespace(tag.get_text(" ", strip=True))
-        if txt:
-            candidates.append(txt)
-
-    if title_tag_text:
-        candidates.append(title_tag_text)
-
-    candidates.extend(visible_lines[:12])
-
-    for cand in candidates:
-        c = clean_job_title(cand)
-        low = c.lower()
-        if not c:
-            continue
-        if len(c) < 4 or len(c) > 160:
-            continue
-        if any(x in low for x in [
-            "privacy policy", "read more", "follow us", "apply now", "job openings",
-            "careers", "workday", "smartrecruiters", "greenhouse", "lever", "overview"
-        ]):
-            continue
-        return c
-
-    return ""
 
 def extract_best_content(html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "lxml")
@@ -872,7 +902,23 @@ def extract_best_content(html: str) -> Dict[str, Any]:
     structured_role_body = extract_role_body_text(structured_lines) if structured_lines else ""
     json_role_body = extract_role_body_text(json_lines) if json_lines else ""
 
-    role_body_text = merge_role_bodies(structured_role_body, visible_role_body, json_role_body)
+    candidates = [
+        ("visible", clean_job_description(visible_role_body)),
+        ("structured", clean_job_description(structured_role_body)),
+        ("json", clean_job_description(json_role_body)),
+    ]
+    candidates = [(name, body) for name, body in candidates if body]
+
+    best_body = ""
+    if candidates:
+        scored = [(job_text_score(body), len(body), name, body) for name, body in candidates]
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        best_body = scored[0][3]
+
+    role_body_text = best_body
+    if len(role_body_text.strip()) < 600:
+        role_body_text = merge_role_bodies(visible_role_body, structured_role_body, json_role_body)
+
     role_context_text = clean_whitespace("\n".join([header_text, role_body_text]))
     all_page_text = clean_whitespace("\n".join([
         title_tag_text,
@@ -884,19 +930,15 @@ def extract_best_content(html: str) -> Dict[str, Any]:
         visible_text,
     ]))
 
-    page_title = extract_title_from_page(soup, title_tag_text, visible_lines, structured.get("title", ""))
-
     return {
         "soup": soup,
         "structured": structured,
         "title_tag_text": title_tag_text,
-        "page_title": page_title,
         "header_text": header_text,
         "role_body_text": role_body_text,
         "role_context_text": role_context_text,
         "all_page_text": all_page_text,
     }
-
 
 # -------------------------
 # Deterministic parsing
@@ -1350,6 +1392,99 @@ def is_tp_by_rules(job_title: str, role_text: str) -> bool:
     return any(re.search(p, text) for p in tp_patterns)
 
 
+def is_relevant_by_rules(job_title: str, role_text: str, header_text: str = "") -> bool:
+    text = f"{job_title}\n{header_text}\n{role_text}".lower()
+
+    allowed_patterns = [
+        r"\btalent acquisition\b",
+        r"\brecruiter\b",
+        r"\brecruitment\b",
+        r"\bhuman resources\b",
+        r"\bhead of hr\b",
+        r"\bhr manager\b",
+        r"\bpeople ops\b",
+        r"\bpeople operations\b",
+        r"\bpeople partner\b",
+        r"\baccount manager\b",
+        r"\baccount executive\b",
+        r"\baccount director\b",
+        r"\bcustomer success\b",
+        r"\bcsm\b",
+        r"\brenewals\b",
+        r"\bclient services\b",
+        r"\bbusiness analyst\b",
+        r"\bbusiness operations\b",
+        r"\boperations\b",
+        r"\bchange manager\b",
+        r"\btransformation\b",
+        r"\bpmo\b",
+        r"\bprogramme manager\b",
+        r"\bprogram manager\b",
+        r"\bproject manager\b",
+        r"\brisk\b",
+        r"\bcompliance\b",
+        r"\blegal\b",
+        r"\bfinance\b",
+        r"\baccounting\b",
+        r"\bfp&a\b",
+        r"\brevops\b",
+        r"\bsales operations\b",
+        r"\bsdr\b",
+        r"\bbdr\b",
+        r"\bmarketing\b",
+        r"\bseo\b",
+        r"\bpr\b",
+        r"\bcommunications\b",
+        r"\bengineer\b",
+        r"\bdeveloper\b",
+        r"\barchitect\b",
+        r"\bdevops\b",
+        r"\bqa\b",
+        r"\bproduct\b",
+        r"\bdesigner\b",
+        r"\bux\b",
+        r"\bui\b",
+        r"\bdata\b",
+        r"\bmachine learning\b",
+        r"\bai\b",
+        r"\bsecurity\b",
+        r"\bcloud\b",
+        r"\bnetwork\b",
+        r"\binfrastructure\b",
+        r"\bsystems\b",
+        r"\bsupport engineer\b",
+        r"\bsystem administrator\b",
+        r"\bsystem engineer\b",
+        r"\bsolutions engineer\b",
+        r"\bit support\b",
+        r"\b2nd line\b",
+        r"\bsecond line\b",
+    ]
+    excluded_patterns = [
+        r"\bteacher\b",
+        r"\bnurse\b",
+        r"\bwaiter\b",
+        r"\bchef\b",
+        r"\bconstruction\b",
+        r"\bcivil engineer\b",
+        r"\belectrician\b",
+        r"\bmechanical engineer\b",
+        r"\bmanufacturing\b",
+        r"\bmaritime\b",
+        r"\bmicrobiology\b",
+        r"\binjection molding\b",
+        r"\bwarehouse\b",
+        r"\bdriver\b",
+        r"\bcleaner\b",
+    ]
+
+    if any(re.search(p, text) for p in allowed_patterns):
+        return True
+    if any(re.search(p, text) for p in excluded_patterns):
+        return False
+    return False
+
+
 # -------------------------
 # AI prompts
 # -------------------------
@@ -1385,41 +1520,56 @@ def ai_check_relevance(
         }
 
     prompt = f"""
-You will receive two inputs: job title and description. Perform the following task carefully and output the results as JSON.
+You will receive two inputs: position name and job description.
 
 Return ONLY valid JSON with exactly these keys:
 role_relevance
 role_relevance_reason
 
-Field rules:
+Rules:
 - role_relevance must be exactly "Relevant" or "Not relevant"
 - role_relevance_reason must be concise and specific
 
-Role relevance rules:
-- Treat close synonyms and subfunctions of accepted families as relevant.
-- Relevant families include:
-  Account Director, Account Executive, AI Engineer, Automation Engineer, Back End, BI Developer, Big Data Engineer, Brand Marketing, Business Analyst, Business Development Manager, Business Operations, CDO, CFO, Chief of Staff, CIO, CLO, Cloud Engineer, CMO, Computer Vision Engineer, Content Marketing, COO, Copywriting, CPO, CRM Developer, CRM Manager, CRO, CSM / Account Manager, CSO, CTO, Customer Operations, Customer Service Rep, Customer Support, Data Architect, Data Engineer, Data Scientist, Data / Insight Analyst, Database Engineer, Deep Learning Engineer, Demand / Lead Generation, Developer in Test, DevOps Engineer, Digital Marketing, Embedded Developer, Engineering Manager, Events & Community, Executive Assistant, Finance / Accounting, Founder, FP&A, Front End, Full Stack, Games Designer, Games Developer, Generalist Marketing, Graphic Designer, Graphics Developer, Growth Marketing, Head of Customer, Head of Data, Head of Design, Head of Engineering, Head of Finance, Head of HR, Head of Infrastructure, Head of Marketing, Head of Operations, Head of Product, Head of QA, Head of Sales, Human Resources, Implementation Manager, Integration Developer, Legal, Machine Learning Engineer, Marketing Analyst, Mobile Developer, Network Engineer, Operations, Partnerships, Penetration Tester, People Ops, Performance Marketing, PR / Communications, Product Manager, Product Marketing, Product Owner, Project Manager, QA Automation Tester, QA Manual Tester, Quality Assurance, Quantitative Developer, Renewals Manager, Research Engineer, RevOps, Risk & Compliance, Sales Engineer, Sales Operations, Scrum Master, SDR / BDR, Security, Security Engineer, SEO Marketing, Site Reliability Engineer, Social Media Marketing, Solutions Engineer, Support Engineer, System Administrator, System Engineer, Talent Acquisition, Technical Architect, Technical Director, Technical Writer, Testing Manager, UI Designer, UI/UX Designer, UX Designer, UX Researcher, Videography, VP of Engineering.
+Relevant roles match any in this list or close synonyms/specializations:
 
-Important expansions:
-- Finance / Accounting includes subfunctions such as accounts payable, accounts receivable, billing, payroll, controllership, bookkeeping, treasury, audit, and similar finance/accounting roles.
-- Business Operations includes transformation, change, program, PMO, operational excellence, AI transformation, and similar program/change/ops roles.
-- Account / client roles include account management, customer success, client services, renewals, and similar relationship-management roles.
-- IT support/infrastructure roles are relevant and should not be excluded just because they are customer-facing or support-oriented.
+Account Director, Account Executive, AI Engineer, Automation Engineer, Back End, BI Developer, Big Data Engineer, Brand Marketing, Business Analyst, Business Development Manager, Business Operations, CDO, CFO, Chief of Staff, CIO, CLO, Cloud Engineer, CMO, Computer Vision Engineer, Content Marketing, COO, Copywriting, CPO, CRM Developer, CRM Manager, CRO, CSM / Account Manager, CSO, CTO, Customer Operations, Customer Service Rep, Customer Support, Data Architect, Data Engineer, Data Scientist, Data / Insight Analyst, Database Engineer, Deep Learning Engineer, Demand / Lead Generation, Developer in Test, DevOps Engineer, Digital Marketing, Embedded Developer, Engineering Manager, Events & Community, Executive Assistant, Finance / Accounting, Founder, FP&A, Front End, Full Stack, Games Designer, Games Developer, Generalist Marketing, Graphic Designer, Graphics Developer, Growth Marketing, Head of Customer, Head of Data, Head of Design, Head of Engineering, Head of Finance, Head of HR, Head of Infrastructure, Head of Marketing, Head of Operations, Head of Product, Head of QA, Head of Sales, Human Resources, Implementation Manager, Integration Developer, Legal, Machine Learning Engineer, Marketing Analyst, Mobile Developer, Network Engineer, Operations, Partnerships, Penetration Tester, People Ops, Performance Marketing, PR / Communications, Product Manager, Product Marketing, Product Owner, Project Manager, QA Automation Tester, QA Manual Tester, Quality Assurance, Quantitative Developer, Renewals Manager, Research Engineer, RevOps, Risk & Compliance, Sales Engineer, Sales Operations, Scrum Master, SDR / BDR, Security, Security Engineer, SEO Marketing, Site Reliability Engineer, Social Media Marketing, Solutions Engineer, Support Engineer, System Administrator, System Engineer, Talent Acquisition, Technical Architect, Technical Director, Technical Writer, Testing Manager, UI Designer, UI/UX Designer, UX Designer, UX Researcher, Videography, VP of Engineering.
+
+Important allow rules:
+- Talent Acquisition roles ARE relevant.
+- Human Resources roles ARE relevant.
+- People Ops roles ARE relevant.
+- Recruitment roles are relevant when they are internal/corporate talent acquisition, recruiting, people, HR, or employer-branding functions.
+- IT support / infrastructure / support engineering roles ARE relevant and should not be excluded just because they are support-oriented or customer-facing.
+- Business/program/change/transformation/PMO/operations roles can be relevant under Business Operations / Project Manager / Operations families.
+
+Reject only when the role is clearly outside allowed business/tech functions, such as:
+teacher, nurse, waiter, chef, construction worker, civil engineer, electrician, mechanical engineer in manufacturing/plant context, manufacturing operator, maritime crew, microbiology lab role, beauty retail staff, injection molding technician, warehouse operative, driver, cleaner.
 
 Location rules:
-- United Kingdom is allowed for onsite, hybrid, or remote.
-- Ireland is allowed only if remote.
-- Europe is allowed only if explicitly Remote Europe or Remote EMEA.
-- Remote Global is allowed unless limited to excluded regions.
-- Use the provided text only. If location is clearly UK city/UK region, that is allowed.
+- Relevant only if the working location is allowed:
+  a) United Kingdom: onsite, hybrid, or remote allowed
+  b) Ireland: only remote allowed
+  c) Europe: only explicitly Remote Europe or Remote EMEA allowed
+  d) Remote Global allowed unless explicitly limited to excluded regions
+  e) If the role clearly points to USA/Canada/other non-allowed region with no evidence of UK/allowed-region work, mark Not relevant
+- Accept UK cities/regions as UK
+- If multiple locations are listed, use the stated working arrangement and whether at least one valid allowed working option clearly exists
 
 Language rules:
-- If the description clearly requires a non-English language, mark Not relevant.
-- Otherwise do not reject for language.
+- If the role clearly requires a non-English language, mark Not relevant
+- English-only roles are fine
 
-Reject roles clearly outside accepted business/tech functions, e.g. teacher, waiter, nurse, construction, civil engineering, retail, mechanical/manufacturing operations, beauty retail, maritime, microbiology when clearly outside the accepted families.
+Decision priority:
+1. First determine whether the role family is in the allowed list or a close synonym
+2. Then determine whether the location/remote setup is allowed
+3. Only then decide final relevance
 
-Input job title:
+Be careful:
+- Do NOT mark a role Not relevant simply because it is recruitment/HR if it is clearly Talent Acquisition / Human Resources / People Ops
+- Do NOT mark a role Not relevant simply because it is support/infrastructure if it is clearly IT / systems / cloud / network / support engineering
+- Use the actual job title and role duties, not generic company overview text
+
+Input position name:
 {job_title}
 
 Input description:
@@ -1888,12 +2038,11 @@ def process_url(
 
     structured = parsed["structured"]
     title_tag_text = parsed["title_tag_text"]
-    page_title = parsed.get("page_title", "")
     header_text = parsed["header_text"]
     role_body_text = parsed["role_body_text"]
     role_context_text = parsed["role_context_text"]
 
-    raw_title = first_nonempty(structured.get("title"), page_title, title_tag_text)
+    raw_title = first_nonempty(structured.get("title"), title_tag_text)
     clean_title = clean_job_title(raw_title)
 
     fallback_location = normalize_location_rule_based(header_text + "\n" + role_body_text, allowed_locations)
@@ -1907,11 +2056,7 @@ def process_url(
     fallback_job_type = detect_job_type_rule_based(header_text + "\n" + role_body_text, structured.get("employment_type_raw", ""))
     fallback_description = clean_job_description(role_body_text)
 
-    has_role_signal = bool(clean_title) or len(role_body_text) > 500 or any(
-        sig in (header_text + "\n" + role_body_text).lower()
-        for sig in ["responsibilities", "qualifications", "requirements", "about the role", "job description", "minimum qualifications"]
-    )
-    fallback_role_relevance = "Relevant" if has_role_signal else "Not relevant"
+    fallback_role_relevance = "Relevant" if clean_title else "Not relevant"
     fallback_reason = "Fallback classification based on extracted title and role text."
 
     relevance = ai_check_relevance(
@@ -1927,13 +2072,7 @@ def process_url(
     result.source_method = source_method
     result.status = "ok"
 
-    if result.role_relevance == "Not relevant" and not clean_title and len(role_body_text) > 500:
-        result.role_relevance = "Relevant"
-        result.role_relevance_reason = "Rule override: substantial role-specific description exists even though title extraction was weak."
-
     if result.role_relevance == "Not relevant":
-        if not result.job_title and role_body_text:
-            result.job_title = first_nonempty(page_title, title_tag_text)
         result.notes = " | ".join(notes + ["stopped_after_relevance"])
         return result
 
