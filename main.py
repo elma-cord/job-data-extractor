@@ -10,7 +10,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
 HEADERS = {
@@ -26,13 +26,13 @@ INPUT_URLS_FILE = "job_urls.txt"
 OUTPUT_CSV_FILE = "results.csv"
 
 LOCATIONS_CSV = "predefined_locations.csv"
-SALARIES_CSV = "predefined_salaries.csv"  # loaded only for compatibility; no rounding is applied anymore
+SALARIES_CSV = "predefined_salaries.csv"
 TP_SKILLS_CSV = "predefined_tp_skills.csv"
 NONTP_SKILLS_CSV = "predefined_nontp_skills.csv"
 JOB_TITLES_CSV = "predefined_job_titles.csv"
 
 REQUEST_TIMEOUT = 25
-PLAYWRIGHT_TIMEOUT_MS = 30000
+PLAYWRIGHT_TIMEOUT_MS = 35000
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
@@ -138,10 +138,6 @@ def dedupe_keep_order(values: List[str]) -> List[str]:
     return out
 
 
-def squeeze_spaces(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
-
-
 def normalize_quotes(text: str) -> str:
     return (
         (text or "")
@@ -151,6 +147,7 @@ def normalize_quotes(text: str) -> str:
         .replace("\u201d", '"')
         .replace("\u2013", "-")
         .replace("\u2014", "-")
+        .replace("•", "-")
     )
 
 
@@ -218,7 +215,8 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
             page = browser.new_page()
 
             def route_handler(route):
-                if route.request.resource_type in {"image", "media", "font"}:
+                rtype = route.request.resource_type
+                if rtype in {"image", "media", "font"}:
                     try:
                         route.abort()
                     except Exception:
@@ -230,8 +228,36 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
                         pass
 
             page.route("**/*", route_handler)
+
             page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT_MS)
-            page.wait_for_timeout(2500)
+
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except PlaywrightTimeoutError:
+                pass
+
+            try:
+                page.evaluate("""
+                    async () => {
+                        await new Promise((resolve) => {
+                            let total = 0;
+                            const step = 900;
+                            const timer = setInterval(() => {
+                                window.scrollBy(0, step);
+                                total += step;
+                                if (total > 5000) {
+                                    clearInterval(timer);
+                                    resolve();
+                                }
+                            }, 120);
+                        });
+                        window.scrollTo(0, 0);
+                    }
+                """)
+            except Exception:
+                pass
+
+            page.wait_for_timeout(1800)
             html = page.content()
             browser.close()
             return html, "playwright"
@@ -331,9 +357,8 @@ def extract_embedded_json_candidates(soup: BeautifulSoup) -> List[Dict[str, Any]
             r"window\.__INITIAL_DATA__\s*=\s*(\{.*?\})\s*;",
             r"window\.__NEXT_DATA__\s*=\s*(\{.*?\})\s*;",
             r"window\.__NUXT__\s*=\s*(\{.*?\})\s*;",
-            r"__NEXT_DATA__"  # marker only, direct JSON already covered
         ]
-        for pat in patterns[:4]:
+        for pat in patterns:
             m = re.search(pat, text, flags=re.S)
             if not m:
                 continue
@@ -467,7 +492,7 @@ def extract_structured_fields(soup: BeautifulSoup) -> Dict[str, Any]:
 
 
 # -------------------------
-# Text extraction and cleaning
+# DOM / section extraction
 # -------------------------
 
 ROLE_KEEP_HEADINGS = {
@@ -508,10 +533,13 @@ ROLE_KEEP_HEADINGS = {
     "landscape",
     "summary",
     "full job description summary",
-    "activities",
-    "responsibilities",
-    "what's in it for you",
-    "what’s in it for you",
+    "person specification",
+    "requirements",
+    "about you",
+    "you will be responsible for",
+    "duties and responsibilities",
+    "knowledge, skills, and abilities",
+    "experience",
 }
 
 ROLE_STOP_HEADINGS = {
@@ -536,6 +564,9 @@ ROLE_STOP_HEADINGS = {
     "follow us",
     "about aqa",
     "logo",
+    "equal opportunities for all",
+    "more about",
+    "reasonably adjustments",
 }
 
 NOISE_LINE_PATTERNS = [
@@ -580,7 +611,7 @@ def looks_like_heading(line: str) -> bool:
         return False
     if x in ROLE_KEEP_HEADINGS or x in ROLE_STOP_HEADINGS:
         return True
-    if len(x) <= 70 and not re.search(r"[.!?]", x):
+    if len(x) <= 80 and not re.search(r"[.!?]", x):
         keyword_hits = [
             "responsib",
             "qualif",
@@ -595,153 +626,214 @@ def looks_like_heading(line: str) -> bool:
             "purpose",
             "overview",
             "landscape",
+            "requirements",
+            "about you",
+            "person specification",
         ]
         if any(k in x for k in keyword_hits):
             return True
     return False
 
 
-def build_header_text(lines: List[str], structured: Dict[str, Any], title_tag_text: str) -> str:
-    keep = []
-    if title_tag_text:
-        keep.append(title_tag_text)
-    if structured.get("title"):
-        keep.append(structured["title"])
-    if structured.get("location_raw"):
-        keep.append(structured["location_raw"])
-    if structured.get("company_name"):
-        keep.append(structured["company_name"])
-
-    for line in lines[:60]:
-        low = line.lower()
-        if (
-            "location" in low
-            or "country" in low
-            or "territories available" in low
-            or "ideal locations" in low
-            or "based at" in low
-            or "based in" in low
-            or "home based" in low
-            or "hybrid" in low
-            or "remote" in low
-            or "onsite" in low
-            or "office" in low
-            or "salary" in low
-            or "rate" in low
-            or "contract" in low
-            or "full time" in low
-            or "full-time" in low
-            or "part time" in low
-            or "part-time" in low
-            or "position role type" in low
-        ):
-            keep.append(line)
-
-    return clean_whitespace("\n".join(dedupe_keep_order(keep)))
-
-
-def prune_role_lines(lines: List[str]) -> List[str]:
-    out: List[str] = []
-    stop_mode = False
-
-    for line in lines:
-        norm = normalize_heading(line)
-        low = line.lower().strip()
-
-        if line_is_noise(line):
-            continue
-
-        if norm in ROLE_STOP_HEADINGS:
-            stop_mode = True
-            continue
-
-        if stop_mode:
-            if looks_like_heading(line) and norm in ROLE_KEEP_HEADINGS:
-                stop_mode = False
-            else:
-                continue
-
-        if any(
-            phrase in low
-            for phrase in [
-                "all rights reserved",
-                "privacy policy",
-                "follow us",
-                "read more",
-                "recruitment agencies",
-                "reasonable adjustments",
-                "equality, diversity and inclusion",
-                "drop us a note to find out more",
-                "unsolicited cvs",
-            ]
-        ):
-            continue
-
-        out.append(line)
-
-    return out
-
-
-def extract_role_body_text(lines: List[str]) -> str:
-    if not lines:
+def text_from_node(node) -> str:
+    if not node:
         return ""
+    return clean_whitespace(node.get_text("\n", strip=True))
 
-    lines = prune_role_lines(lines)
-    if not lines:
+
+def find_primary_root(soup: BeautifulSoup):
+    candidates = []
+    selectors = [
+        "main",
+        "article",
+        "[role='main']",
+        "section",
+        "div[id*='job']",
+        "div[class*='job']",
+        "div[data-ui='job-description']",
+        "div[class*='description']",
+        "div[class*='posting']",
+        "div[class*='content']",
+    ]
+    seen = set()
+    for sel in selectors:
+        for node in soup.select(sel):
+            txt = text_from_node(node)
+            if not txt:
+                continue
+            key = id(node)
+            if key in seen:
+                continue
+            seen.add(key)
+            score = len(txt)
+            classes = " ".join(node.get("class", [])) if node.get("class") else ""
+            node_id = node.get("id", "") or ""
+            low_meta = f"{classes} {node_id}".lower()
+            if any(k in low_meta for k in ["job", "career", "opening", "posting", "description", "apply"]):
+                score += 800
+            if node.name in {"main", "article"}:
+                score += 1200
+            candidates.append((score, node))
+    if not candidates:
+        return soup.body or soup
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+def extract_dom_blocks(root) -> List[str]:
+    if not root:
+        return []
+
+    blocks: List[str] = []
+
+    heading_tags = {"h1", "h2", "h3", "h4", "strong", "b"}
+    text_tags = {"p", "li", "div", "span"}
+
+    nodes = root.find_all(list(heading_tags | text_tags), recursive=True)
+    for node in nodes:
+        txt = text_from_node(node)
+        if not txt:
+            continue
+        txt = normalize_quotes(txt)
+        if len(txt) > 1200 and node.name in {"div", "span"}:
+            continue
+        blocks.append(txt)
+
+    blocks = dedupe_keep_order(blocks)
+    return blocks[:500]
+
+
+def build_section_based_role_text(blocks: List[str]) -> str:
+    if not blocks:
         return ""
 
     kept: List[str] = []
-    in_role_zone = False
+    in_keep = False
 
-    starter_patterns = [
-        "about the role",
-        "about the job",
-        "job description",
-        "role purpose",
-        "purpose of the role",
-        "key responsibilities",
-        "responsibilities",
-        "minimum qualifications",
-        "preferred qualifications",
-        "what you'll do",
-        "what you’ll do",
-        "what to bring",
-        "qualifications",
-        "who we are looking for",
-        "skills & experience",
-        "skills and experience",
-        "context",
-        "summary",
-        "full job description summary",
-    ]
+    for block in blocks:
+        norm = normalize_heading(block)
+        low = block.lower().strip()
 
-    for line in lines:
-        norm = normalize_heading(line)
-        low = line.lower().strip()
+        if line_is_noise(block):
+            continue
 
-        if not in_role_zone:
-            if norm in ROLE_KEEP_HEADINGS or any(p in low for p in starter_patterns):
-                in_role_zone = True
-                kept.append(line)
+        if norm in ROLE_STOP_HEADINGS:
+            if in_keep:
+                break
+            continue
+
+        if norm in ROLE_KEEP_HEADINGS or looks_like_heading(block):
+            if norm in ROLE_KEEP_HEADINGS:
+                in_keep = True
+                kept.append(block)
                 continue
-
-            if re.search(
-                r"\b(key responsibilities|minimum qualifications|preferred qualifications|responsibilities|essential skills|what to bring|who we are looking for|job requirements)\b",
-                low,
+            if any(
+                x in norm
+                for x in [
+                    "responsib",
+                    "qualif",
+                    "experience",
+                    "about the role",
+                    "about the job",
+                    "requirements",
+                    "about you",
+                    "person specification",
+                    "minimum qualifications",
+                    "preferred qualifications",
+                    "what you'll do",
+                    "what you’ll do",
+                ]
             ):
-                in_role_zone = True
-                kept.append(line)
+                in_keep = True
+                kept.append(block)
                 continue
 
-        if in_role_zone:
+        if in_keep:
+            if any(
+                phrase in low
+                for phrase in [
+                    "privacy policy",
+                    "follow us",
+                    "recruitment agencies",
+                    "all rights reserved",
+                    "read more",
+                    "equal opportunities for all",
+                ]
+            ):
+                break
+            kept.append(block)
+
+    if len(kept) < 8:
+        fallback = []
+        for block in blocks:
+            norm = normalize_heading(block)
+            low = block.lower().strip()
+            if line_is_noise(block):
+                continue
             if norm in ROLE_STOP_HEADINGS:
                 continue
-            kept.append(line)
-
-    if len(kept) < 12:
-        kept = [line for line in lines if normalize_heading(line) not in ROLE_STOP_HEADINGS]
+            if any(
+                phrase in low
+                for phrase in [
+                    "privacy policy",
+                    "follow us",
+                    "recruitment agencies",
+                    "all rights reserved",
+                    "read more",
+                ]
+            ):
+                continue
+            fallback.append(block)
+        kept = fallback
 
     return clean_whitespace("\n".join(kept))
+
+
+def extract_header_candidates(soup: BeautifulSoup, root, structured: Dict[str, Any], title_tag_text: str) -> List[str]:
+    out: List[str] = []
+
+    if structured.get("title"):
+        out.append(structured["title"])
+    if title_tag_text:
+        out.append(title_tag_text)
+    if structured.get("company_name"):
+        out.append(structured["company_name"])
+    if structured.get("location_raw"):
+        out.append(structured["location_raw"])
+
+    for tag_name in ["h1", "h2"]:
+        for tag in root.find_all(tag_name):
+            txt = text_from_node(tag)
+            if txt and 2 <= len(txt) <= 200:
+                out.append(txt)
+
+    for node in root.find_all(["p", "div", "span", "li"], recursive=True):
+        txt = text_from_node(node)
+        if not txt or len(txt) > 220:
+            continue
+        low = txt.lower()
+        if any(
+            token in low for token in [
+                "location",
+                "country",
+                "city",
+                "based in",
+                "based at",
+                "remote",
+                "hybrid",
+                "onsite",
+                "on-site",
+                "home based",
+                "home-based",
+                "salary",
+                "rate",
+                "contract",
+                "position role type",
+            ]
+        ):
+            out.append(txt)
+
+    return dedupe_keep_order(out)[:80]
 
 
 def clean_job_description(text: str) -> str:
@@ -762,6 +854,9 @@ def clean_job_description(text: str) -> str:
         r"^equality, diversity and inclusion$",
         r"^safeguarding$",
         r"^additional information$",
+        r"^benefits$",
+        r"^what we offer$",
+        r"^equal opportunities for all$",
     ]
 
     for line in lines:
@@ -771,7 +866,7 @@ def clean_job_description(text: str) -> str:
             continue
 
         if any(re.search(p, low, flags=re.I) for p in hard_stop_patterns):
-            continue
+            break
 
         if any(
             phrase in low
@@ -782,6 +877,8 @@ def clean_job_description(text: str) -> str:
                 "drop us a note to find out more",
                 "follow us on linkedin",
                 "apply now",
+                "instagram",
+                "linkedin",
             ]
         ):
             continue
@@ -816,7 +913,6 @@ def job_text_score(text: str) -> int:
         "person specification",
         "job description",
         "overview",
-        "benefits",
         "preferred",
         "required",
         "certifications",
@@ -830,6 +926,8 @@ def job_text_score(text: str) -> int:
         "desirable",
         "key relationships",
         "success measures",
+        "about you",
+        "you will be responsible for",
     ]
     for term in positive_terms:
         if term in low:
@@ -852,6 +950,9 @@ def job_text_score(text: str) -> int:
         "customer success",
         "risk & compliance",
         "machine learning",
+        "payroll",
+        "people operations",
+        "talent acquisition",
     ]
     for term in strong_terms:
         if term in low:
@@ -889,21 +990,23 @@ def extract_best_content(html: str) -> Dict[str, Any]:
     title_tag = soup.find("title")
     title_tag_text = clean_whitespace(title_tag.get_text(" ", strip=True)) if title_tag else ""
 
+    root = find_primary_root(soup)
+    dom_blocks = extract_dom_blocks(root)
+    dom_role_text = build_section_based_role_text(dom_blocks)
+
     visible_lines = split_lines(visible_text)
     structured_lines = split_lines(structured_description_text)
     json_lines = split_lines(json_blob_text)
 
-    header_text = build_header_text(
-        visible_lines if visible_lines else structured_lines,
-        structured,
-        title_tag_text,
-    )
+    visible_role_body = build_section_based_role_text(visible_lines)
+    structured_role_body = build_section_based_role_text(structured_lines) if structured_lines else ""
+    json_role_body = build_section_based_role_text(json_lines) if json_lines else ""
 
-    visible_role_body = extract_role_body_text(visible_lines)
-    structured_role_body = extract_role_body_text(structured_lines) if structured_lines else ""
-    json_role_body = extract_role_body_text(json_lines) if json_lines else ""
+    header_candidates = extract_header_candidates(soup, root, structured, title_tag_text)
+    header_text = clean_whitespace("\n".join(header_candidates))
 
     candidates = [
+        ("dom", clean_job_description(dom_role_text)),
         ("visible", clean_job_description(visible_role_body)),
         ("structured", clean_job_description(structured_role_body)),
         ("json", clean_job_description(json_role_body)),
@@ -917,8 +1020,8 @@ def extract_best_content(html: str) -> Dict[str, Any]:
         best_body = scored[0][3]
 
     role_body_text = best_body
-    if len(role_body_text.strip()) < 600:
-        role_body_text = merge_role_bodies(visible_role_body, structured_role_body, json_role_body)
+    if len(role_body_text.strip()) < 700:
+        role_body_text = merge_role_bodies(dom_role_text, visible_role_body, structured_role_body, json_role_body)
 
     role_context_text = clean_whitespace("\n".join([header_text, role_body_text]))
     all_page_text = clean_whitespace("\n".join([
@@ -940,6 +1043,7 @@ def extract_best_content(html: str) -> Dict[str, Any]:
         "role_context_text": role_context_text,
         "all_page_text": all_page_text,
     }
+
 
 # -------------------------
 # Deterministic parsing
@@ -1004,14 +1108,14 @@ def extract_best_title_candidate(soup: BeautifulSoup, structured_title: str, tit
             if txt:
                 candidates.append(txt)
 
-    early_lines = split_lines("\n".join([header_text, role_body_text]))[:12]
+    early_lines = split_lines("\n".join([header_text, role_body_text]))[:14]
     for line in early_lines:
         low = line.lower()
         if len(line) > 180:
             continue
         if any(x in low for x in ["location:", "salary", "rate:", "contract", "apply", "posted", "remote in ", "hybrid", "onsite"]):
             continue
-        if re.search(r"\b(job description|overview|responsibilities|qualifications|about the role)\b", low):
+        if re.search(r"\b(job description|overview|responsibilities|qualifications|about the role|description)\b", low):
             continue
         candidates.append(line)
 
@@ -1021,7 +1125,7 @@ def extract_best_title_candidate(soup: BeautifulSoup, structured_title: str, tit
         low = ct.lower().strip()
         if not ct:
             continue
-        if low in {"job openings", "careers", "apply", "overview"}:
+        if low in {"job openings", "careers", "apply", "overview", "description"}:
             continue
         if len(low) < 3:
             continue
@@ -1071,18 +1175,19 @@ def gather_location_lines(text: str) -> List[str]:
         r"\bwork location\b",
         r"\bideal locations\b",
         r"\bterritories available\b",
+        r"\bremote in\b",
     ]
     soft_tokens = [" hybrid", " remote", " onsite", " on-site", " home based", " from home"]
 
-    for idx, line in enumerate(lines[:180]):
+    for idx, line in enumerate(lines[:200]):
         low = f" {normalize_quotes(line).lower()} "
         if any(re.search(p, low, flags=re.I) for p in strong_patterns):
             out.append(line)
             continue
-        if idx < 20 and any(tok in low for tok in soft_tokens):
+        if idx < 30 and any(tok in low for tok in soft_tokens):
             out.append(line)
 
-    out.extend(lines[:12])
+    out.extend(lines[:15])
     return dedupe_keep_order(out)
 
 
@@ -1109,6 +1214,19 @@ def location_value_has_evidence(location_value: str, text: str, allowed_location
     return False
 
 
+def location_specificity_score(location: str) -> int:
+    if not location:
+        return 0
+    parts = [p.strip() for p in location.split(",") if p.strip()]
+    score = len(parts) * 100 + len(location)
+    low = location.lower()
+    if "united kingdom" in low:
+        score += 5
+    if len(parts) >= 3:
+        score += 50
+    return score
+
+
 def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> str:
     if not allowed_locations or not text:
         return ""
@@ -1121,26 +1239,18 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
     joined = "\n".join(candidate_lines)
     joined_low = normalize_quotes(joined).lower()
 
-    exact_hits = []
+    matches: List[Tuple[int, int, str]] = []
+
     for loc in allowed_locations:
         loc_low = normalize_quotes(loc).lower()
         m = re.search(rf"(?<![a-z]){re.escape(loc_low)}(?![a-z])", joined_low)
         if m:
-            exact_hits.append((m.start(), -len(loc), loc))
+            matches.append((m.start(), -location_specificity_score(loc), loc))
 
-    if exact_hits:
-        exact_hits.sort(key=lambda x: (x[0], x[1]))
-        return exact_hits[0][2]
-
-    city_hits = []
     for city, full in city_lookup.items():
         m = re.search(rf"\b{re.escape(city)}\b", joined_low)
         if m:
-            city_hits.append((m.start(), -len(city), full))
-
-    if city_hits:
-        city_hits.sort(key=lambda x: (x[0], x[1]))
-        return city_hits[0][2]
+            matches.append((m.start(), -location_specificity_score(full), full))
 
     broad_fallbacks = [
         "United Kingdom",
@@ -1153,16 +1263,20 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
     for broad in broad_fallbacks:
         for loc in allowed_locations:
             if loc.lower() == broad.lower() and re.search(rf"(?<![a-z]){re.escape(broad.lower())}(?![a-z])", joined_low):
-                return loc
+                matches.append((999999, -location_specificity_score(loc), loc))
 
-    return ""
+    if not matches:
+        return ""
+
+    matches.sort(key=lambda x: (x[0], x[1]))
+    return matches[0][2]
 
 
 def detect_remote_preferences_rule_based(text: str) -> str:
     low = normalize_quotes(text).lower()
     found = []
 
-    if re.search(r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote\b", low):
+    if re.search(r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote\b|\bremote enabled\b", low):
         found.append("remote")
     if re.search(r"\bhybrid\b", low):
         found.append("hybrid")
@@ -1180,10 +1294,10 @@ def detect_remote_days_rule_based(text: str, remote_prefs: str) -> str:
         return ""
 
     patterns = [
-        r"\b(\d)\s*[-to]{1,3}\s*(\d)\s+days?\s+(?:in the office|from the office|office|on site|onsite|on-site)\b",
-        r"\b(\d)\s+days?\s+(?:in the office|from the office|office|on site|onsite|on-site)\b",
-        r"\b(\d)\s*[-to]{1,3}\s*(\d)\s+days?\s+(?:from home|remote|wfh)\b",
-        r"\b(\d)\s+days?\s+(?:from home|remote|wfh)\b",
+        r"\b(?:approx\.?\s*)?(\d)\s*[-to]{1,3}\s*(\d)\s+days?\s+(?:per week\s+)?(?:in the office|from the office|office|on site|onsite|on-site)\b",
+        r"\b(?:approx\.?\s*)?(\d)\s+days?\s+(?:per week\s+)?(?:in the office|from the office|office|on site|onsite|on-site)\b",
+        r"\b(?:approx\.?\s*)?(\d)\s*[-to]{1,3}\s*(\d)\s+days?\s+(?:per week\s+)?(?:from home|remote|wfh)\b",
+        r"\b(?:approx\.?\s*)?(\d)\s+days?\s+(?:per week\s+)?(?:from home|remote|wfh)\b",
         r"\b(?:work|working)\s+(\d)\s+days?\s+(?:from home|remote|wfh)\b",
     ]
 
@@ -1305,7 +1419,7 @@ def parse_money_range_from_line(line: str) -> Tuple[str, str, str, str]:
 
 def parse_explicit_salary(text: str, _allowed_salaries_unused: List[int]) -> Tuple[str, str, str, str]:
     lines = split_lines(text)
-    candidate_lines = [line for line in lines[:120] if line_has_compensation_anchor(line)]
+    candidate_lines = [line for line in lines[:140] if line_has_compensation_anchor(line)]
 
     for line in candidate_lines:
         parsed = parse_money_range_from_line(line)
@@ -1725,7 +1839,7 @@ Rules for job_category:
 Rules for job_location:
 - Use header/meta text first, then role description.
 - Prefer the most specific visible location over a broad country fallback.
-- If multiple valid locations are listed, choose the first clear normalized location from the allowed list or the closest broader valid one.
+- If multiple valid locations are listed, choose the most specific clear normalized location from the allowed list.
 - Only return "Unknown" if there is truly no clear location evidence.
 
 Rules for remote_preferences:
@@ -1745,7 +1859,7 @@ Rules for salary:
 - Only tag salary when compensation/rate is explicitly stated for this role.
 - salary_period must be one of: year, day, hour, month, or ""
 - If a daily rate is stated (e.g. £500-£550 p/d), preserve it as min/max with salary_period=day.
-- Do not invent salary from unrelated numbers, dates, standards, reference ids, years, counts, targets, ISO/NIST values, legislation references, percentages, revenues, or employee counts.
+- Do not invent salary from unrelated numbers, dates, standards, reference ids, years, counts, targets, legislation references, percentages, revenues, or employee counts.
 - Do not normalize or round salary to a predefined list. Preserve the actual explicit number.
 
 Rules for visa_sponsorship:
@@ -1761,10 +1875,10 @@ Rules for job_type:
 - Priority: Permanent > FTC > Part Time > Freelance/Contract
 
 Rules for job_description:
-- Keep the main role content.
+- Keep the main role content only.
 - Preserve useful sections such as:
-  responsibilities, required, essential, desirable, qualifications, what to bring, key relationships, success measures, minimum qualifications, preferred qualifications, summary, activities, landscape.
-- Remove company/benefits/footer/privacy/apply/legal/ATS boilerplate.
+  responsibilities, required, essential, desirable, qualifications, what to bring, key relationships, success measures, minimum qualifications, preferred qualifications, summary, activities, landscape, about you, requirements.
+- Remove company marketing, benefits, footer, privacy, legal, ATS boilerplate, follow-us, equal-opportunity sections.
 - Do not shorten to one paragraph if multiple role sections are clearly present.
 
 Rules for job_titles:
@@ -2108,15 +2222,16 @@ def process_url(
     )
     clean_title = clean_job_title(raw_title)
 
-    fallback_location = normalize_location_rule_based(header_text + "\n" + role_body_text, allowed_locations)
-    fallback_remote_preferences = detect_remote_preferences_rule_based(header_text + "\n" + role_body_text)
-    fallback_remote_days = detect_remote_days_rule_based(header_text + "\n" + role_body_text, fallback_remote_preferences)
+    evidence_text = "\n".join([header_text, role_body_text, structured.get("location_raw", "")])
+    fallback_location = normalize_location_rule_based(evidence_text, allowed_locations)
+    fallback_remote_preferences = detect_remote_preferences_rule_based(evidence_text)
+    fallback_remote_days = detect_remote_days_rule_based(evidence_text, fallback_remote_preferences)
     fallback_salary_min, fallback_salary_max, fallback_salary_currency, fallback_salary_period = parse_explicit_salary(
-        header_text + "\n" + role_body_text,
+        evidence_text,
         allowed_salaries,
     )
     fallback_visa = detect_visa_rule_based(role_context_text)
-    fallback_job_type = detect_job_type_rule_based(header_text + "\n" + role_body_text, structured.get("employment_type_raw", ""))
+    fallback_job_type = detect_job_type_rule_based(evidence_text, structured.get("employment_type_raw", ""))
     fallback_description = clean_job_description(role_body_text)
 
     substantial_role_text = len(clean_job_description(role_body_text)) >= 700
@@ -2169,8 +2284,7 @@ def process_url(
     result.job_category = normalize_category_for_skills(tagged.get("job_category", "")) or fallback_job_category
 
     ai_location = tagged.get("job_location", "") or ""
-    evidence_text_for_location = "\n".join([header_text, role_body_text, structured.get("location_raw", "")])
-    if ai_location and location_value_has_evidence(ai_location, evidence_text_for_location, allowed_locations):
+    if ai_location and location_value_has_evidence(ai_location, evidence_text, allowed_locations):
         result.job_location = ai_location
     else:
         result.job_location = fallback_location
@@ -2185,12 +2299,12 @@ def process_url(
     result.job_type = tagged.get("job_type", "") or fallback_job_type
     result.job_description = clean_job_description(tagged.get("job_description", "") or fallback_description)
 
-    # Final hard overrides so the model cannot invent values.
-    result.job_location = normalize_location_rule_based(header_text + "\n" + result.job_description, allowed_locations) or result.job_location
-    result.remote_preferences = detect_remote_preferences_rule_based(header_text + "\n" + result.job_description) or result.remote_preferences
-    result.remote_days = detect_remote_days_rule_based(header_text + "\n" + result.job_description, result.remote_preferences)
+    hard_evidence_text = "\n".join([header_text, result.job_description, structured.get("location_raw", "")])
+    result.job_location = normalize_location_rule_based(hard_evidence_text, allowed_locations) or result.job_location
+    result.remote_preferences = detect_remote_preferences_rule_based(hard_evidence_text) or result.remote_preferences
+    result.remote_days = detect_remote_days_rule_based(hard_evidence_text, result.remote_preferences)
 
-    explicit_salary_check = parse_explicit_salary(header_text + "\n" + result.job_description, allowed_salaries)
+    explicit_salary_check = parse_explicit_salary(hard_evidence_text, allowed_salaries)
     if explicit_salary_check == ("", "", "", ""):
         result.salary_min = ""
         result.salary_max = ""
