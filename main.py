@@ -906,28 +906,59 @@ def build_location_lookup(allowed_locations: List[str]) -> Dict[str, str]:
 
 def gather_location_lines(text: str) -> List[str]:
     out = []
-    for line in split_lines(text)[:160]:
-        low = line.lower()
-        if any(
-            token in low
-            for token in [
-                "location",
-                "locations",
-                "country",
-                "based at",
-                "based in",
-                "home based",
-                "territories available",
-                "ideal locations",
-                "position role type",
-                "hybrid",
-                "remote",
-                "onsite",
-                "office",
-            ]
-        ):
+    lines = split_lines(text)
+
+    strong_patterns = [
+        r"^location\s*:",
+        r"^locations\s*:",
+        r"^country\s*:",
+        r"^city\s*:",
+        r"^office\s*:",
+        r"^based at\b",
+        r"^based in\b",
+        r"^home based\b",
+        r"^position role type\s*:",
+        r"\blocated in\b",
+        r"\bthis is a .* position located in\b",
+        r"\bwork location\b",
+        r"\bideal locations\b",
+        r"\bterritories available\b",
+    ]
+    soft_tokens = [" hybrid", " remote", " onsite", " on-site", " home based", " from home"]
+
+    for idx, line in enumerate(lines[:180]):
+        low = f" {normalize_quotes(line).lower()} "
+        if any(re.search(p, low, flags=re.I) for p in strong_patterns):
             out.append(line)
-    return out
+            continue
+        if idx < 20 and any(tok in low for tok in soft_tokens):
+            out.append(line)
+
+    out.extend(lines[:12])
+    return dedupe_keep_order(out)
+
+
+def location_value_has_evidence(location_value: str, text: str, allowed_locations: List[str]) -> bool:
+    if not location_value or not text:
+        return False
+
+    candidate_lines = gather_location_lines(text)
+    if not candidate_lines:
+        return False
+
+    joined = normalize_quotes("\n".join(candidate_lines)).lower()
+    loc_low = normalize_quotes(location_value).lower().strip()
+    if loc_low and re.search(rf"(?<![a-z]){re.escape(loc_low)}(?![a-z])", joined):
+        return True
+
+    city_lookup = build_location_lookup(allowed_locations)
+    city = loc_low.split(",")[0].strip()
+    mapped = city_lookup.get(city, "")
+    city_to_check = mapped.split(",")[0].strip().lower() if mapped else city
+    if city_to_check and re.search(rf"\b{re.escape(city_to_check)}\b", joined):
+        return True
+
+    return False
 
 
 def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> str:
@@ -936,15 +967,18 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
 
     city_lookup = build_location_lookup(allowed_locations)
     candidate_lines = gather_location_lines(text)
-    joined = "\n".join(candidate_lines) if candidate_lines else text[:4000]
+    if not candidate_lines:
+        return ""
+
+    joined = "\n".join(candidate_lines)
     joined_low = normalize_quotes(joined).lower()
 
     exact_hits = []
     for loc in allowed_locations:
-        loc_low = loc.lower()
-        pos = joined_low.find(loc_low)
-        if pos != -1:
-            exact_hits.append((pos, -len(loc), loc))
+        loc_low = normalize_quotes(loc).lower()
+        m = re.search(rf"(?<![a-z]){re.escape(loc_low)}(?![a-z])", joined_low)
+        if m:
+            exact_hits.append((m.start(), -len(loc), loc))
 
     if exact_hits:
         exact_hits.sort(key=lambda x: (x[0], x[1]))
@@ -970,7 +1004,7 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
     ]
     for broad in broad_fallbacks:
         for loc in allowed_locations:
-            if loc.lower() == broad.lower() and broad.lower() in joined_low:
+            if loc.lower() == broad.lower() and re.search(rf"(?<![a-z]){re.escape(broad.lower())}(?![a-z])", joined_low):
                 return loc
 
     return ""
@@ -1866,7 +1900,14 @@ def process_url(
     )
 
     result.job_category = normalize_category_for_skills(tagged.get("job_category", "")) or fallback_job_category
-    result.job_location = tagged.get("job_location", "") or fallback_location
+
+    ai_location = tagged.get("job_location", "") or ""
+    evidence_text_for_location = "\n".join([header_text, role_body_text, structured.get("location_raw", "")])
+    if ai_location and location_value_has_evidence(ai_location, evidence_text_for_location, allowed_locations):
+        result.job_location = ai_location
+    else:
+        result.job_location = fallback_location
+
     result.remote_preferences = tagged.get("remote_preferences", "") or fallback_remote_preferences
     result.remote_days = tagged.get("remote_days", "") or fallback_remote_days
     result.salary_min = tagged.get("salary_min", "") or fallback_salary_min
