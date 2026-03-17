@@ -797,7 +797,8 @@ def merge_role_bodies(*candidates: str) -> str:
     for text in candidates:
         for line in split_lines(text):
             merged_lines.append(line)
-    __already_fixed__
+    merged_lines = dedupe_keep_order(merged_lines)
+    return clean_job_description("\n".join(merged_lines))
 
 
 def job_text_score(text: str) -> int:
@@ -975,6 +976,62 @@ def clean_job_title(raw_title: str) -> str:
 
     title = title[:cut].strip(" -|,·")
     return clean_whitespace(title)
+
+
+def extract_best_title_candidate(soup: BeautifulSoup, structured_title: str, title_tag_text: str, header_text: str, role_body_text: str) -> str:
+    candidates: List[str] = []
+
+    if structured_title:
+        candidates.append(structured_title)
+    if title_tag_text:
+        candidates.append(title_tag_text)
+
+    for tag_name in ["h1", "h2"]:
+        for tag in soup.find_all(tag_name):
+            txt = clean_whitespace(tag.get_text(" ", strip=True))
+            if txt and 3 <= len(txt) <= 180:
+                candidates.append(txt)
+
+    meta_props = [
+        ("property", "og:title"),
+        ("name", "twitter:title"),
+        ("name", "title"),
+    ]
+    for attr, val in meta_props:
+        tag = soup.find("meta", attrs={attr: val})
+        if tag and tag.get("content"):
+            txt = clean_whitespace(tag.get("content"))
+            if txt:
+                candidates.append(txt)
+
+    early_lines = split_lines("\n".join([header_text, role_body_text]))[:12]
+    for line in early_lines:
+        low = line.lower()
+        if len(line) > 180:
+            continue
+        if any(x in low for x in ["location:", "salary", "rate:", "contract", "apply", "posted", "remote in ", "hybrid", "onsite"]):
+            continue
+        if re.search(r"\b(job description|overview|responsibilities|qualifications|about the role)\b", low):
+            continue
+        candidates.append(line)
+
+    cleaned = []
+    for cand in candidates:
+        ct = clean_job_title(cand)
+        low = ct.lower().strip()
+        if not ct:
+            continue
+        if low in {"job openings", "careers", "apply", "overview"}:
+            continue
+        if len(low) < 3:
+            continue
+        cleaned.append(ct)
+
+    cleaned = dedupe_keep_order(cleaned)
+    if cleaned:
+        cleaned.sort(key=lambda x: ((" - " in x) or (" | " in x), len(x)))
+        return cleaned[0]
+    return ""
 
 
 def normalize_category_for_skills(job_category: str) -> str:
@@ -2042,7 +2099,13 @@ def process_url(
     role_body_text = parsed["role_body_text"]
     role_context_text = parsed["role_context_text"]
 
-    raw_title = first_nonempty(structured.get("title"), title_tag_text)
+    raw_title = extract_best_title_candidate(
+        soup=parsed["soup"],
+        structured_title=structured.get("title", ""),
+        title_tag_text=title_tag_text,
+        header_text=header_text,
+        role_body_text=role_body_text,
+    )
     clean_title = clean_job_title(raw_title)
 
     fallback_location = normalize_location_rule_based(header_text + "\n" + role_body_text, allowed_locations)
@@ -2056,7 +2119,8 @@ def process_url(
     fallback_job_type = detect_job_type_rule_based(header_text + "\n" + role_body_text, structured.get("employment_type_raw", ""))
     fallback_description = clean_job_description(role_body_text)
 
-    fallback_role_relevance = "Relevant" if clean_title else "Not relevant"
+    substantial_role_text = len(clean_job_description(role_body_text)) >= 700
+    fallback_role_relevance = "Relevant" if ((clean_title and is_relevant_by_rules(clean_title, role_body_text, header_text)) or substantial_role_text) else "Not relevant"
     fallback_reason = "Fallback classification based on extracted title and role text."
 
     relevance = ai_check_relevance(
@@ -2071,6 +2135,10 @@ def process_url(
     result.role_relevance_reason = relevance.get("role_relevance_reason", "") or fallback_reason
     result.source_method = source_method
     result.status = "ok"
+
+    if result.role_relevance == "Not relevant" and substantial_role_text and is_relevant_by_rules(clean_title, role_body_text, header_text):
+        result.role_relevance = "Relevant"
+        result.role_relevance_reason = "Rule-based override: extracted title and role description indicate an allowed relevant role."
 
     if result.role_relevance == "Not relevant":
         result.notes = " | ".join(notes + ["stopped_after_relevance"])
