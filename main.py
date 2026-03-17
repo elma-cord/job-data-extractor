@@ -797,84 +797,54 @@ def merge_role_bodies(*candidates: str) -> str:
     for text in candidates:
         for line in split_lines(text):
             merged_lines.append(line)
-    __already_fixed__
+    return clean_job_description("\n".join(dedupe_keep_order(merged_lines)))
 
 
-def job_text_score(text: str) -> int:
-    low = normalize_quotes(text or "").lower()
-    score = 0
 
-    positive_terms = [
-        "responsibilities",
-        "duties and responsibilities",
-        "requirements",
-        "qualifications",
-        "experience",
-        "skills",
-        "knowledge, skills, and abilities",
-        "person specification",
-        "job description",
-        "overview",
-        "benefits",
-        "preferred",
-        "required",
-        "certifications",
-        "availability",
-        "what you'll do",
-        "what you’ll do",
-        "what to bring",
-        "key responsibilities",
-        "minimum qualifications",
-        "preferred qualifications",
-        "desirable",
-        "key relationships",
-        "success measures",
-    ]
-    for term in positive_terms:
-        if term in low:
-            score += 3
 
-    strong_terms = [
-        "kubernetes",
-        "openshift",
-        "linux",
-        "vmware",
-        "azure",
-        "storage",
-        "monitoring",
-        "on-call",
-        "root cause",
-        "python",
-        "tensorflow",
-        "pytorch",
-        "account management",
-        "customer success",
-        "risk & compliance",
-        "machine learning",
-    ]
-    for term in strong_terms:
-        if term in low:
-            score += 2
+def extract_title_from_page(soup: BeautifulSoup, title_tag_text: str, visible_lines: List[str], structured_title: str = "") -> str:
+    candidates: List[str] = []
 
-    negative_terms = [
-        "about us",
-        "company overview",
-        "who we are",
-        "our mission",
-        "service listing",
-        "our offerings",
-        "follow us",
-        "privacy policy",
-        "recruitment agencies",
-        "read more",
-    ]
-    for term in negative_terms:
-        if term in low:
-            score -= 3
+    if structured_title:
+        candidates.append(structured_title)
 
-    score += min(len(text) // 500, 10)
-    return score
+    og = soup.find("meta", attrs={"property": "og:title"}) or soup.find("meta", attrs={"name": "og:title"})
+    if og and og.get("content"):
+        candidates.append(clean_whitespace(og.get("content", "")))
 
+    tw = soup.find("meta", attrs={"name": "twitter:title"})
+    if tw and tw.get("content"):
+        candidates.append(clean_whitespace(tw.get("content", "")))
+
+    h1 = soup.find("h1")
+    if h1:
+        candidates.append(clean_whitespace(h1.get_text(" ", strip=True)))
+
+    for tag in soup.find_all(["h2", "h3"], limit=5):
+        txt = clean_whitespace(tag.get_text(" ", strip=True))
+        if txt:
+            candidates.append(txt)
+
+    if title_tag_text:
+        candidates.append(title_tag_text)
+
+    candidates.extend(visible_lines[:12])
+
+    for cand in candidates:
+        c = clean_job_title(cand)
+        low = c.lower()
+        if not c:
+            continue
+        if len(c) < 4 or len(c) > 160:
+            continue
+        if any(x in low for x in [
+            "privacy policy", "read more", "follow us", "apply now", "job openings",
+            "careers", "workday", "smartrecruiters", "greenhouse", "lever", "overview"
+        ]):
+            continue
+        return c
+
+    return ""
 
 def extract_best_content(html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "lxml")
@@ -902,23 +872,7 @@ def extract_best_content(html: str) -> Dict[str, Any]:
     structured_role_body = extract_role_body_text(structured_lines) if structured_lines else ""
     json_role_body = extract_role_body_text(json_lines) if json_lines else ""
 
-    candidates = [
-        ("visible", clean_job_description(visible_role_body)),
-        ("structured", clean_job_description(structured_role_body)),
-        ("json", clean_job_description(json_role_body)),
-    ]
-    candidates = [(name, body) for name, body in candidates if body]
-
-    best_body = ""
-    if candidates:
-        scored = [(job_text_score(body), len(body), name, body) for name, body in candidates]
-        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        best_body = scored[0][3]
-
-    role_body_text = best_body
-    if len(role_body_text.strip()) < 600:
-        role_body_text = merge_role_bodies(visible_role_body, structured_role_body, json_role_body)
-
+    role_body_text = merge_role_bodies(structured_role_body, visible_role_body, json_role_body)
     role_context_text = clean_whitespace("\n".join([header_text, role_body_text]))
     all_page_text = clean_whitespace("\n".join([
         title_tag_text,
@@ -930,15 +884,19 @@ def extract_best_content(html: str) -> Dict[str, Any]:
         visible_text,
     ]))
 
+    page_title = extract_title_from_page(soup, title_tag_text, visible_lines, structured.get("title", ""))
+
     return {
         "soup": soup,
         "structured": structured,
         "title_tag_text": title_tag_text,
+        "page_title": page_title,
         "header_text": header_text,
         "role_body_text": role_body_text,
         "role_context_text": role_context_text,
         "all_page_text": all_page_text,
     }
+
 
 # -------------------------
 # Deterministic parsing
@@ -1930,11 +1888,12 @@ def process_url(
 
     structured = parsed["structured"]
     title_tag_text = parsed["title_tag_text"]
+    page_title = parsed.get("page_title", "")
     header_text = parsed["header_text"]
     role_body_text = parsed["role_body_text"]
     role_context_text = parsed["role_context_text"]
 
-    raw_title = first_nonempty(structured.get("title"), title_tag_text)
+    raw_title = first_nonempty(structured.get("title"), page_title, title_tag_text)
     clean_title = clean_job_title(raw_title)
 
     fallback_location = normalize_location_rule_based(header_text + "\n" + role_body_text, allowed_locations)
@@ -1948,7 +1907,11 @@ def process_url(
     fallback_job_type = detect_job_type_rule_based(header_text + "\n" + role_body_text, structured.get("employment_type_raw", ""))
     fallback_description = clean_job_description(role_body_text)
 
-    fallback_role_relevance = "Relevant" if clean_title else "Not relevant"
+    has_role_signal = bool(clean_title) or len(role_body_text) > 500 or any(
+        sig in (header_text + "\n" + role_body_text).lower()
+        for sig in ["responsibilities", "qualifications", "requirements", "about the role", "job description", "minimum qualifications"]
+    )
+    fallback_role_relevance = "Relevant" if has_role_signal else "Not relevant"
     fallback_reason = "Fallback classification based on extracted title and role text."
 
     relevance = ai_check_relevance(
@@ -1964,7 +1927,13 @@ def process_url(
     result.source_method = source_method
     result.status = "ok"
 
+    if result.role_relevance == "Not relevant" and not clean_title and len(role_body_text) > 500:
+        result.role_relevance = "Relevant"
+        result.role_relevance_reason = "Rule override: substantial role-specific description exists even though title extraction was weak."
+
     if result.role_relevance == "Not relevant":
+        if not result.job_title and role_body_text:
+            result.job_title = first_nonempty(page_title, title_tag_text)
         result.notes = " | ".join(notes + ["stopped_after_relevance"])
         return result
 
