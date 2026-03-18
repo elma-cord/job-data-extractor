@@ -43,6 +43,7 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 class JobResult:
     job_url: str = ""
     job_title: str = ""
+    formatted_position_name: str = ""
     role_relevance: str = ""
     role_relevance_reason: str = ""
     job_category: str = ""
@@ -94,6 +95,10 @@ def clean_whitespace(text: str) -> str:
     return text.strip()
 
 
+def compact_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
 def first_nonempty(*values: Any) -> str:
     for v in values:
         if v is None:
@@ -112,7 +117,7 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
     text = (text or "").strip()
 
     if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"^```(?:json|html)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
 
     start = text.find("{")
@@ -151,8 +156,15 @@ def normalize_quotes(text: str) -> str:
     )
 
 
-def compact_spaces(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
+def canonical_label(text: str) -> str:
+    s = normalize_quotes(text or "").lower().strip()
+    s = s.replace("&", "and")
+    s = s.replace("/", "")
+    s = s.replace("\\", "")
+    s = s.replace(",", "")
+    s = s.replace("-", "")
+    s = re.sub(r"\s+", "", s)
+    return s
 
 
 # -------------------------
@@ -232,7 +244,6 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
                         pass
 
             page.route("**/*", route_handler)
-
             page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT_MS)
 
             try:
@@ -240,7 +251,6 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
             except PlaywrightTimeoutError:
                 pass
 
-            # wait for common ATS/job signals if present
             job_like_selectors = [
                 "main",
                 "article",
@@ -1348,7 +1358,6 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
         if m:
             matches.append((m.start(), -location_specificity_score(full), full))
 
-    # explicit UK/GB aliases
     if re.search(r"\b(united kingdom|great britain)\b", joined_low):
         for loc in allowed_locations:
             if loc.lower() in {"united kingdom", "england, united kingdom"}:
@@ -1386,7 +1395,6 @@ def detect_remote_preferences_rule_based(text: str) -> str:
     if re.search(r"\bonsite\b|\bon-site\b|\bon site\b|\bin office\b|\bin-office\b", low):
         found.append("onsite")
 
-    # prefer remote-only if explicit role line says remote working in UK
     if re.search(r"\bwork location\b.*\bremote\b", low) or re.search(r"\bremote working within the united kingdom\b", low):
         return "remote"
 
@@ -1768,14 +1776,23 @@ def is_relevant_by_rules(job_title: str, role_text: str, header_text: str = "") 
 
 
 # -------------------------
-# AI prompts
+# Normalizers / AI helpers
 # -------------------------
 
 def normalize_job_title_from_list(value: str, allowed_job_titles: List[str]) -> str:
     value_clean = clean_whitespace(value)
+    if not value_clean:
+        return ""
+
     for jt in allowed_job_titles:
         if value_clean.lower() == jt.lower():
             return jt
+
+    canon_value = canonical_label(value_clean)
+    for jt in allowed_job_titles:
+        if canon_value == canonical_label(jt):
+            return jt
+
     return ""
 
 
@@ -1788,6 +1805,214 @@ def normalize_seniority_list(values: List[str]) -> List[str]:
             found.append(low)
     return [x for x in order if x in found][:3]
 
+
+def ai_format_position_name(raw_position_name: str) -> str:
+    if not raw_position_name:
+        return ""
+    if not client:
+        return clean_job_title(raw_position_name)
+
+    prompt = f"""
+You are given a raw position name string that may contain extra information such as company names, locations, contract types, separators (e.g., "·", "-", "|"), and other trailing details.
+
+Your task is to extract and output only the clean job title without any trailing location names, company names, contract info, or extra text.
+
+Rules:
+1. Identify and keep only the core job title at the start of the string, stopping at the first indication of any location, company, contract type, or separator.
+2. Common separators that may indicate trailing info include: "·", "-", "|", commas, or words like "Full-Time", "Contract", "Ltd", "Limited", "Inc", "Remote", "Location", "Office".
+3. Remove all trailing words or phrases related to location, contract types, and company names.
+4. Preserve the exact wording and order of the job title portion only; do not rephrase or add words.
+5. If the job title contains commas or hyphens inside the core title, preserve those, but stop extracting once trailing info starts.
+
+Output only the cleaned job title. No extra text.
+
+Input:
+{raw_position_name}
+""".strip()
+
+    try:
+        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
+        cleaned = clean_whitespace(response.output_text)
+        return cleaned or clean_job_title(raw_position_name)
+    except Exception:
+        return clean_job_title(raw_position_name)
+
+
+def ai_map_job_titles_only(position_name: str, description: str, allowed_job_titles: List[str]) -> List[str]:
+    if not client:
+        return []
+
+    job_titles_text = ", ".join(allowed_job_titles[:3000])
+
+    prompt = f"""
+You will receive two inputs: position name and description.
+
+Task:
+Choose up to 3 best matching job titles from the predefined list.
+
+Rules:
+- Analyze both the position name and description together.
+- Use ONLY job titles from the predefined list.
+- If the position name exactly matches one predefined job title, return only that single title.
+- If the position name is unclear or broader than the predefined list, choose up to the top 3 most appropriate job titles from the predefined list.
+- Return a JSON object with one key only:
+  "job_titles": ["...", "..."]
+- job_titles must contain exact strings from the predefined list only.
+- Order from most appropriate to least appropriate.
+- If no suitable match exists, return an empty array.
+- Do NOT leave job_titles empty if there is a clear best-fit title in the predefined list.
+
+Predefined job titles:
+{job_titles_text}
+
+Position name:
+{position_name}
+
+Description:
+{description[:18000]}
+""".strip()
+
+    try:
+        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
+        data = safe_json_loads(response.output_text)
+        raw_titles = data.get("job_titles", [])
+        if not isinstance(raw_titles, list):
+            return []
+
+        out = []
+        for t in raw_titles:
+            exact = normalize_job_title_from_list(str(t), allowed_job_titles)
+            if exact and exact not in out:
+                out.append(exact)
+        return out[:3]
+    except Exception:
+        return []
+
+
+def ai_map_seniority_only(position_name: str, description: str) -> List[str]:
+    if not client:
+        return []
+
+    prompt = f"""
+You will receive two inputs: position name and description.
+
+Determine seniority using only this allowed list:
+entry, junior, mid, senior, lead, leadership
+
+Rules:
+1. First analyze the position name.
+2. If title includes leadership indicators such as "head of", "director", "engineering manager", "vp", "chief", return leadership only.
+3. If the title clearly contains seniority like junior, senior, lead, return the appropriate value(s).
+4. If ambiguous, analyze both title and description together and return up to 3 most appropriate seniority levels.
+5. Output must be JSON with one key only:
+   "seniorities": ["...", "..."]
+6. Use only these exact lowercase values:
+   entry, junior, mid, senior, lead, leadership
+7. Keep order exactly:
+   entry, junior, mid, senior, lead, leadership
+8. If experience is a range, include all applicable seniorities across the range:
+   - 0-1 years -> entry, junior
+   - 2 years -> junior, mid
+   - 3-5 years -> senior, lead
+9. If managerial/team-management responsibilities are clearly present, include lead.
+10. If nothing suitable is identified, return an empty array.
+
+Position name:
+{position_name}
+
+Description:
+{description[:18000]}
+""".strip()
+
+    try:
+        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
+        data = safe_json_loads(response.output_text)
+        raw = data.get("seniorities", [])
+        if not isinstance(raw, list):
+            return []
+        return normalize_seniority_list(raw)
+    except Exception:
+        return []
+
+
+def ai_clean_job_description_html(job_description_text: str) -> str:
+    if not job_description_text:
+        return ""
+    if not client:
+        return clean_job_description(job_description_text)
+
+    prompt = f"""
+From the job description input, extract only relevant job content.
+
+Include
+1. Purpose and responsibilities (About the Role, Responsibilities, Key Duties).
+2. Candidate requirements, qualifications, skills, experience (About You, Requirements, Ideally You Will Have).
+3. Any text that directly explains what the job involves or what the candidate should bring.
+
+Exclude
+1. Company background
+2. Benefits and perks
+3. Disclaimers or application instructions
+4. Marketing/promotional text
+5. Unrelated content
+
+Formatting Rules
+1. HTML only:
+<b> for section titles
+<ul><li> for bullet lists
+<p> for plain paragraphs
+<em> only if in source
+No markdown, no backticks, no wrappers
+
+2. Section titles:
+a) Keep original headers word-for-word
+b) Preserve casing, but if ALL CAPS convert to Title Case
+c) If header is “About the Role/About this Role/The Role”, remove the header and keep only the content
+
+3. Bullets:
+a) Use <ul><li> only if source has bullets
+b) Do not convert plain paragraphs into bullets
+c) Keep each bullet in one <li>, no merging/splitting
+d) Remove empty <li></li>
+
+4. Lists & nesting:
+a) Sub-bullets -> nested <ul> inside <li>
+b) If unclear, flatten under nearest header
+c) Do not invent new headers
+
+5. Preservation & cleanup:
+a) Keep sentences word-for-word, no rephrasing
+b) Remove stray dots and extra spaces
+c) Intro text before first header -> <p>
+
+6. Header fallback:
+a) If bullets appear without header:
+- Duties -> <b>Responsibilities</b>
+- Qualifications/skills -> <b>Requirements</b> or <b>Skills & Experience</b> if closer
+b) If nothing remains -> output empty string
+
+7. Output only valid HTML. No explanations.
+
+Input job description:
+{job_description_text[:26000]}
+""".strip()
+
+    try:
+        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
+        html = clean_whitespace(response.output_text)
+
+        if html.startswith("```"):
+            html = re.sub(r"^```(?:html)?\s*", "", html)
+            html = re.sub(r"\s*```$", "", html)
+
+        return html
+    except Exception:
+        return clean_job_description(job_description_text)
+
+
+# -------------------------
+# AI prompts
+# -------------------------
 
 def ai_check_relevance(
     job_title: str,
@@ -1879,6 +2104,7 @@ Input description:
             "role_relevance": fallback_role_relevance,
             "role_relevance_reason": f"AI error: {e}",
         }
+
 
 def ai_tag_relevant_job(
     job_title: str,
@@ -1973,7 +2199,7 @@ Rules for salary:
 - salary_period must be one of: year, day, hour, month, or ""
 - If a daily rate is stated (e.g. £500-£550 p/d), preserve it as min/max with salary_period=day.
 - Do not invent salary from unrelated numbers, dates, standards, reference ids, years, counts, targets, legislation references, percentages, revenues, or employee counts.
-- Do not normalize or round salary to a predefined list. Preserve the actual explicit number.
+- Preserve the actual explicit number. Do not round to predefined salary list.
 
 Rules for visa_sponsorship:
 - Return only yes, no, or ""
@@ -1995,7 +2221,7 @@ Rules for job_description:
 - Do not shorten to one paragraph if multiple role sections are clearly present.
 
 Rules for job_titles:
-- Analyze both the position name and the role description together.
+- Analyze both the position name and role description together.
 - Use ONLY job titles from the predefined list.
 - Return job_titles as a JSON array of up to 3 exact strings from the predefined list.
 - If the position name exactly matches one predefined job title, return only that single title.
@@ -2030,7 +2256,7 @@ Rules for seniorities:
 Allowed normalized locations:
 {location_list_text}
 
-Allowed salaries reference list (do not round to these; use only as background context if needed):
+Allowed salaries reference list:
 {salary_list_text}
 
 Predefined job titles:
@@ -2078,7 +2304,6 @@ Role description:
         raw_titles = data.get("job_titles", [])
         if not isinstance(raw_titles, list):
             raw_titles = []
-
         normalized_titles = []
         for t in raw_titles:
             exact = normalize_job_title_from_list(str(t), allowed_job_titles)
@@ -2124,6 +2349,7 @@ Role description:
             "_ai_error": str(e),
         }
 
+
 # -------------------------
 # Skills tagging
 # -------------------------
@@ -2149,7 +2375,8 @@ def build_skill_regex(skill: str) -> re.Pattern:
 
 
 def build_skills_source_text(role_body_text: str) -> str:
-    lines = split_lines(role_body_text)
+    plain = strip_html(role_body_text)
+    lines = split_lines(plain)
     out = []
 
     disallow = [
@@ -2348,6 +2575,7 @@ def process_url(
         role_body_text=role_body_text,
     )
     clean_title = clean_job_title(raw_title)
+    formatted_position_name = ai_format_position_name(raw_title or clean_title or title_tag_text)
 
     evidence_text = "\n".join([header_text, role_body_text, structured.get("location_raw", "")])
     evidence_text = normalize_common_location_aliases(evidence_text)
@@ -2367,19 +2595,19 @@ def process_url(
     fallback_role_relevance = "Relevant" if ((clean_title and is_relevant_by_rules(clean_title, role_body_text, header_text)) or substantial_role_text) else "Not relevant"
     fallback_reason = "Fallback classification based on extracted title and role text."
 
-    # stronger override for clearly relevant pages even if extraction is imperfect
     if not clean_title and role_body_text:
         if is_relevant_by_rules(role_body_text[:300], role_body_text, header_text):
             fallback_role_relevance = "Relevant"
 
     relevance = ai_check_relevance(
-        job_title=clean_title,
+        job_title=formatted_position_name or clean_title,
         role_context_text=role_context_text,
         fallback_role_relevance=fallback_role_relevance,
         fallback_reason=fallback_reason,
     )
 
     result.job_title = clean_title
+    result.formatted_position_name = formatted_position_name or clean_title
     result.role_relevance = relevance.get("role_relevance", "") or fallback_role_relevance
     result.role_relevance_reason = relevance.get("role_relevance_reason", "") or fallback_reason
     result.source_method = source_method
@@ -2398,7 +2626,7 @@ def process_url(
     fallback_job_category = "T&P" if is_tp_by_rules(clean_title, role_body_text) else "NonT&P"
 
     tagged = ai_tag_relevant_job(
-        job_title=clean_title,
+        job_title=formatted_position_name or clean_title,
         header_text=header_text,
         role_body_text=role_body_text,
         allowed_locations=allowed_locations,
@@ -2433,9 +2661,13 @@ def process_url(
     result.salary_period = tagged.get("salary_period", "") or fallback_salary_period
     result.visa_sponsorship = tagged.get("visa_sponsorship", "") or fallback_visa
     result.job_type = tagged.get("job_type", "") or fallback_job_type
-    result.job_description = clean_job_description(tagged.get("job_description", "") or fallback_description)
 
-    hard_evidence_text = "\n".join([header_text, result.job_description, structured.get("location_raw", "")])
+    final_html_description = ai_clean_job_description_html(role_body_text)
+    if not final_html_description:
+        final_html_description = clean_job_description(tagged.get("job_description", "") or fallback_description)
+    result.job_description = final_html_description
+
+    hard_evidence_text = "\n".join([header_text, strip_html(result.job_description), structured.get("location_raw", "")])
     hard_evidence_text = normalize_common_location_aliases(hard_evidence_text)
 
     result.job_location = normalize_location_rule_based(hard_evidence_text, allowed_locations) or result.job_location
@@ -2452,11 +2684,23 @@ def process_url(
         result.salary_min, result.salary_max, result.salary_currency, result.salary_period = explicit_salary_check
 
     job_titles = tagged.get("job_titles", []) if isinstance(tagged.get("job_titles", []), list) else []
+    if not job_titles:
+        job_titles = ai_map_job_titles_only(
+            position_name=formatted_position_name or clean_title,
+            description=strip_html(result.job_description) or role_body_text,
+            allowed_job_titles=allowed_job_titles,
+        )
+
     result.job_title_tag_1 = job_titles[0] if len(job_titles) > 0 else ""
     result.job_title_tag_2 = job_titles[1] if len(job_titles) > 1 else ""
     result.job_title_tag_3 = job_titles[2] if len(job_titles) > 2 else ""
 
     seniorities = tagged.get("seniorities", []) if isinstance(tagged.get("seniorities", []), list) else []
+    if not seniorities:
+        seniorities = ai_map_seniority_only(
+            position_name=formatted_position_name or clean_title,
+            description=strip_html(result.job_description) or role_body_text,
+        )
     if not seniorities:
         seniorities = fallback_seniorities(clean_title, role_body_text)
     seniorities = normalize_seniority_list(seniorities)
@@ -2496,7 +2740,11 @@ def process_url(
     result.skill_9 = padded_skills[8]
     result.skill_10 = padded_skills[9]
 
-    note_parts = notes + ["ran_relevant_tagging"]
+    note_parts = notes + ["ran_relevant_tagging", "formatted_position_name_added", "html_clean_description_added"]
+    if len(job_titles) == 0:
+        note_parts.append("job_titles_empty")
+    else:
+        note_parts.append("job_titles_present")
     if len(exact_skills) > 0:
         note_parts.append("skills_from_clean_role_text_exact_plus_ai_enrichment")
     else:
