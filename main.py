@@ -1282,17 +1282,20 @@ def gather_location_lines(text: str) -> List[str]:
         r"\bremote in\b",
         r"\bright to work in the\b",
     ]
-    soft_tokens = [" hybrid", " remote", " onsite", " on-site", " home based", " from home", " united kingdom"]
+    soft_tokens = [
+        " hybrid", " remote", " onsite", " on-site", " home based", " from home",
+        " united kingdom", " office attendance", " days per week", " remote-enabled"
+    ]
 
-    for idx, line in enumerate(lines[:250]):
+    for idx, line in enumerate(lines[:300]):
         low = f" {normalize_quotes(line).lower()} "
         if any(re.search(p, low, flags=re.I) for p in strong_patterns):
             out.append(line)
             continue
-        if idx < 35 and any(tok in low for tok in soft_tokens):
+        if idx < 80 and any(tok in low for tok in soft_tokens):
             out.append(line)
 
-    out.extend(lines[:20])
+    out.extend(lines[:30])
     return dedupe_keep_order(out)
 
 
@@ -1388,9 +1391,9 @@ def detect_remote_preferences_rule_based(text: str) -> str:
     low = normalize_quotes("\n".join(lines)).lower()
     found = []
 
-    if re.search(r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote\b|\bremote enabled\b|\bremote working\b", low):
+    if re.search(r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote\b|\bremote enabled\b|\bremote-enabled\b|\bremote working\b", low):
         found.append("remote")
-    if re.search(r"\bhybrid\b", low):
+    if re.search(r"\bhybrid\b|\bagile working\b", low):
         found.append("hybrid")
     if re.search(r"\bonsite\b|\bon-site\b|\bon site\b|\bin office\b|\bin-office\b", low):
         found.append("onsite")
@@ -1402,37 +1405,72 @@ def detect_remote_preferences_rule_based(text: str) -> str:
     return ", ".join(ordered)
 
 
-def detect_remote_days_rule_based(text: str, remote_prefs: str) -> str:
-    low = normalize_quotes("\n".join(gather_location_lines(text) + split_lines(text)[:120])).lower()
+def _extract_remote_days_from_text(text: str) -> str:
+    low = normalize_quotes(text).lower()
 
-    if "hybrid" not in remote_prefs and "remote" not in remote_prefs:
+    low = low.replace("approximately", "approx")
+    low = low.replace("a week", "per week")
+    low = re.sub(r"\s+", " ", low)
+
+    # fully remote / remote-only cases -> blank
+    if re.search(r"\bfully remote\b", low):
+        return ""
+    if re.search(r"\bremote working within the united kingdom\b", low):
+        return ""
+    if re.search(r"\buk remote\b", low):
         return ""
 
-    patterns = [
-        r"\b(?:approx\.?\s*)?(\d)\s*[-to]{1,3}\s*(\d)\s+days?\s+(?:per week\s+)?(?:in the office|from the office|office|on site|onsite|on-site)\b",
+    office_patterns = [
+        r"\boffice attendance requirement(?: of)?(?: approx\.?)?\s*(\d)\s*-\s*(\d)\s+days?\s+per week\b",
+        r"\boffice attendance requirement(?: of)?(?: approx\.?)?\s*(\d)\s+days?\s+per week\b",
+        r"\b(?:approx\.?\s*)?(\d)\s*-\s*(\d)\s+days?\s+(?:per week\s+)?(?:in the office|from the office|office|on site|onsite|on-site)\b",
         r"\b(?:approx\.?\s*)?(\d)\s+days?\s+(?:per week\s+)?(?:in the office|from the office|office|on site|onsite|on-site)\b",
-        r"\b(?:approx\.?\s*)?(\d)\s*[-to]{1,3}\s*(\d)\s+days?\s+(?:per week\s+)?(?:from home|remote|wfh)\b",
-        r"\b(?:approx\.?\s*)?(\d)\s+days?\s+(?:per week\s+)?(?:from home|remote|wfh)\b",
-        r"\b(?:work|working)\s+(\d)\s+days?\s+(?:from home|remote|wfh)\b",
-        r"\boffice attendance requirement of approx\.?\s*(\d)\s*[-to]{1,3}\s*(\d)\s+days?\s+per week\b",
+        r"\bthis role has .*?office attendance requirement .*?(\d)\s*-\s*(\d)\s+days?\s+per week\b",
+        r"\bthis role has .*?office attendance requirement .*?(\d)\s+days?\s+per week\b",
+        r"\b(\d)\s*-\s*(\d)\s+days?\s+per week\b.*?\boffice\b",
+        r"\b(\d)\s+days?\s+per week\b.*?\boffice\b",
     ]
 
-    for pat in patterns:
+    for pat in office_patterns:
         m = re.search(pat, low)
         if not m:
             continue
-        groups = [g for g in m.groups() if g is not None]
-        if "office" in pat or "attendance" in pat or "on site" in pat or "onsite" in pat:
-            if len(groups) == 2:
-                vals = [int(groups[0]), int(groups[1])]
-                remote_options = [max(0, 5 - v) for v in vals]
-                return str(min(remote_options))
-            return str(max(0, 5 - int(groups[0])))
+        groups = [int(g) for g in m.groups() if g is not None]
         if len(groups) == 2:
-            return groups[1]
-        return groups[0]
+            remote_options = [max(0, 5 - groups[0]), max(0, 5 - groups[1])]
+            return str(min(remote_options))
+        if len(groups) == 1:
+            return str(max(0, 5 - groups[0]))
+
+    remote_patterns = [
+        r"\b(\d)\s*-\s*(\d)\s+days?\s+(?:per week\s+)?(?:from home|remote|wfh)\b",
+        r"\b(\d)\s+days?\s+(?:per week\s+)?(?:from home|remote|wfh)\b",
+        r"\b(?:work|working)\s+(\d)\s+days?\s+(?:from home|remote|wfh)\b",
+    ]
+
+    for pat in remote_patterns:
+        m = re.search(pat, low)
+        if not m:
+            continue
+        groups = [int(g) for g in m.groups() if g is not None]
+        if len(groups) == 2:
+            return str(max(groups))
+        if len(groups) == 1:
+            return str(groups[0])
 
     return ""
+
+
+def detect_remote_days_rule_based(text: str, remote_prefs: str) -> str:
+    if "hybrid" not in remote_prefs and "remote" not in remote_prefs:
+        return ""
+
+    candidate_text = "\n".join([
+        "\n".join(gather_location_lines(text)),
+        normalize_common_location_aliases(text),
+    ])
+
+    return _extract_remote_days_from_text(candidate_text)
 
 
 def normalize_currency_symbol(sym: str) -> str:
@@ -1601,6 +1639,10 @@ def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
     if any(x in title_low for x in ["head of", "director", "vp ", "vice president", "chief ", "cfo", "cto", "cio", "coo", "cmo", "cro", "cpo", "cso"]):
         return ["leadership"]
 
+    # NEW RULE: manager-level roles should push to lead, but not leadership
+    if re.search(r"\bmanager\b", title_low):
+        return ["lead"]
+
     if any(x in title_low for x in ["senior", "sr ", "sr."]):
         return ["senior", "lead"]
 
@@ -1612,6 +1654,26 @@ def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
 
     if any(x in title_low for x in ["associate", "mid weight", "mid-weight"]):
         return ["mid"]
+
+    # NEW RULE: managerial responsibility signals
+    lead_signals = [
+        r"\bmanage(?:s|d|ing)? team\b",
+        r"\bmanage(?:s|d|ing)? team members\b",
+        r"\bcoaching team members\b",
+        r"\bmanage and coach\b",
+        r"\blead end-to-end\b",
+        r"\bact as an escalation point\b",
+        r"\bescalation point\b",
+        r"\bline manager\b",
+        r"\bdirect report\b",
+        r"\bpeople management\b",
+        r"\bteam management\b",
+        r"\bmanage(?:s|d|ing)? a third-party provider\b",
+        r"\bown(?:s|ing)? end-to-end\b",
+        r"\blead .* delivery\b",
+    ]
+    if any(re.search(p, text_low) for p in lead_signals):
+        return ["lead"]
 
     years = []
     for m in re.finditer(r"\b(\d)\s*-\s*(\d)\s+years?\b", text_low):
@@ -1902,20 +1964,21 @@ entry, junior, mid, senior, lead, leadership
 Rules:
 1. First analyze the position name.
 2. If title includes leadership indicators such as "head of", "director", "engineering manager", "vp", "chief", return leadership only.
-3. If the title clearly contains seniority like junior, senior, lead, return the appropriate value(s).
-4. If ambiguous, analyze both title and description together and return up to 3 most appropriate seniority levels.
-5. Output must be JSON with one key only:
+3. Plain manager titles usually indicate lead, not leadership.
+4. If the title clearly contains seniority like junior, senior, lead, return the appropriate value(s).
+5. If ambiguous, analyze both title and description together and return up to 3 most appropriate seniority levels.
+6. Output must be JSON with one key only:
    "seniorities": ["...", "..."]
-6. Use only these exact lowercase values:
+7. Use only these exact lowercase values:
    entry, junior, mid, senior, lead, leadership
-7. Keep order exactly:
+8. Keep order exactly:
    entry, junior, mid, senior, lead, leadership
-8. If experience is a range, include all applicable seniorities across the range:
+9. If experience is a range, include all applicable seniorities across the range:
    - 0-1 years -> entry, junior
    - 2 years -> junior, mid
    - 3-5 years -> senior, lead
-9. If managerial/team-management responsibilities are clearly present, include lead.
-10. If nothing suitable is identified, return an empty array.
+10. If managerial/team-management/coaching/escalation-point/ownership responsibilities are clearly present, include lead.
+11. If nothing suitable is identified, return an empty array.
 
 Position name:
 {position_name}
@@ -2191,8 +2254,9 @@ Rules for remote_preferences:
 Rules for remote_days:
 - Return only a single number or ""
 - Only return a number when explicit days are stated.
+- For office ranges such as 1-2 days in office per week, return the conservative remote-days value.
 - Never infer a number from the word "hybrid" alone.
-- Do not infer from company-wide smart-working statements.
+- Do not infer from company-wide smart-working statements unless they are explicitly role-specific.
 
 Rules for salary:
 - Only tag salary when compensation/rate is explicitly stated for this role.
@@ -2232,25 +2296,16 @@ Rules for job_titles:
 - Prefer functional fit over literal wording.
 - Never invent a title outside the predefined list.
 - Do NOT leave job_titles empty if there is a clear best-fit title in the predefined list.
-- Examples:
-  - "People Operations Manager" -> ["People Ops"]
-  - "Software Development Engineer" -> choose the closest engineering title(s) supported by the description, such as ["Back End"] or ["Full Stack"]
-  - "National Account Manager - Wholesale" -> choose the best account/client-facing title from the predefined list based on responsibilities
-  - "Sr. Engineer, Systems" -> ["System Engineer"] or ["System Administrator"] depending on the description
-  - "DTN Software engineer" -> choose the closest software/infrastructure engineering title(s) from the predefined list supported by the description
-- For account-management style roles, prefer "CSM/Account Manager" when the function is relationship/account ownership rather than net-new sales.
-- For customer-facing technical roles, "Solutions Engineer" can coexist with another technical title when clearly supported.
-- For AI Solution Architect, prefer "Technical Architect" / "AI Engineer" style tags, not Head of Engineering.
-- For People/HR roles, map to "People Ops", "Human Resources", or "Talent Acquisition" based on the real function.
-- For data/analytics roles, map to the closest valid title such as "Data/Insight Analyst", "Data Scientist", "Data Engineer", etc., based on duties rather than title wording alone.
 
 Rules for seniorities:
 - Allowed only: entry, junior, mid, senior, lead, leadership
 - Must be lowercase
 - Return as JSON array in this order only: entry, junior, mid, senior, lead, leadership
 - If title includes explicit org-leadership indicators like "head of", "director", "vp", "chief", return leadership when appropriate.
+- Plain manager titles usually indicate lead, not leadership.
 - Do NOT use leadership only because the role has technical authority or architectural ownership.
 - If title says senior, include senior.
+- If managerial/team-management/coaching/escalation-point/ownership responsibilities are clearly present, include lead.
 - If role clearly suggests multiple levels, return up to 3.
 
 Allowed normalized locations:
@@ -2672,7 +2727,7 @@ def process_url(
 
     result.job_location = normalize_location_rule_based(hard_evidence_text, allowed_locations) or result.job_location
     result.remote_preferences = detect_remote_preferences_rule_based(hard_evidence_text) or result.remote_preferences
-    result.remote_days = detect_remote_days_rule_based(hard_evidence_text, result.remote_preferences)
+    result.remote_days = detect_remote_days_rule_based(hard_evidence_text, result.remote_preferences) or result.remote_days
 
     explicit_salary_check = parse_explicit_salary(hard_evidence_text, allowed_salaries)
     if explicit_salary_check == ("", "", "", ""):
@@ -2702,7 +2757,7 @@ def process_url(
             description=strip_html(result.job_description) or role_body_text,
         )
     if not seniorities:
-        seniorities = fallback_seniorities(clean_title, role_body_text)
+        seniorities = fallback_seniorities(clean_title, strip_html(result.job_description) or role_body_text)
     seniorities = normalize_seniority_list(seniorities)
 
     result.seniority_1 = seniorities[0] if len(seniorities) > 0 else ""
@@ -2740,7 +2795,13 @@ def process_url(
     result.skill_9 = padded_skills[8]
     result.skill_10 = padded_skills[9]
 
-    note_parts = notes + ["ran_relevant_tagging", "formatted_position_name_added", "html_clean_description_added"]
+    note_parts = notes + [
+        "ran_relevant_tagging",
+        "formatted_position_name_added",
+        "html_clean_description_added",
+        "remote_days_rule_updated",
+        "seniority_rule_updated",
+    ]
     if len(job_titles) == 0:
         note_parts.append("job_titles_empty")
     else:
