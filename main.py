@@ -1880,7 +1880,6 @@ Input description:
             "role_relevance_reason": f"AI error: {e}",
         }
 
-
 def ai_tag_relevant_job(
     job_title: str,
     header_text: str,
@@ -1923,7 +1922,7 @@ def ai_tag_relevant_job(
 
     prompt = f"""
 You will receive:
-1. job title
+1. position name
 2. header/meta text
 3. role description text
 
@@ -1996,14 +1995,28 @@ Rules for job_description:
 - Do not shorten to one paragraph if multiple role sections are clearly present.
 
 Rules for job_titles:
-- You may return more than one job title if clearly supported.
-- Analyze job title and role description together.
-- Return up to 3 exact strings from the predefined list.
-- Prefer the real job function over buzzwords.
-- Do NOT return leadership titles like Head of Engineering unless the role is explicitly that level.
-- For account-management style roles, prefer CSM/Account Manager when the function is relationship/account ownership rather than net-new sales.
-- For customer-facing technical roles, Solutions Engineer can coexist with another technical title when clearly supported.
-- For AI Solution Architect, prefer Technical Architect / AI Engineer style tags, not Head of Engineering.
+- Analyze both the position name and the role description together.
+- Use ONLY job titles from the predefined list.
+- Return job_titles as a JSON array of up to 3 exact strings from the predefined list.
+- If the position name exactly matches one predefined job title, return only that single title.
+- If the position name is unclear, broader than the predefined list, or does not exactly match the predefined list, choose up to the top 3 most appropriate job titles from the predefined list based on both title and description.
+- Order job_titles from most appropriate to least appropriate.
+- If fewer than 3 suitable titles exist, return only those.
+- If no suitable title exists, return an empty array.
+- Prefer functional fit over literal wording.
+- Never invent a title outside the predefined list.
+- Do NOT leave job_titles empty if there is a clear best-fit title in the predefined list.
+- Examples:
+  - "People Operations Manager" -> ["People Ops"]
+  - "Software Development Engineer" -> choose the closest engineering title(s) supported by the description, such as ["Back End"] or ["Full Stack"]
+  - "National Account Manager - Wholesale" -> choose the best account/client-facing title from the predefined list based on responsibilities
+  - "Sr. Engineer, Systems" -> ["System Engineer"] or ["System Administrator"] depending on the description
+  - "DTN Software engineer" -> choose the closest software/infrastructure engineering title(s) from the predefined list supported by the description
+- For account-management style roles, prefer "CSM/Account Manager" when the function is relationship/account ownership rather than net-new sales.
+- For customer-facing technical roles, "Solutions Engineer" can coexist with another technical title when clearly supported.
+- For AI Solution Architect, prefer "Technical Architect" / "AI Engineer" style tags, not Head of Engineering.
+- For People/HR roles, map to "People Ops", "Human Resources", or "Talent Acquisition" based on the real function.
+- For data/analytics roles, map to the closest valid title such as "Data/Insight Analyst", "Data Scientist", "Data Engineer", etc., based on duties rather than title wording alone.
 
 Rules for seniorities:
 - Allowed only: entry, junior, mid, senior, lead, leadership
@@ -2023,7 +2036,7 @@ Allowed salaries reference list (do not round to these; use only as background c
 Predefined job titles:
 {job_titles_text}
 
-Input job title:
+Input position name:
 {job_title}
 
 Header/meta text:
@@ -2065,6 +2078,7 @@ Role description:
         raw_titles = data.get("job_titles", [])
         if not isinstance(raw_titles, list):
             raw_titles = []
+
         normalized_titles = []
         for t in raw_titles:
             exact = normalize_job_title_from_list(str(t), allowed_job_titles)
@@ -2109,7 +2123,6 @@ Role description:
             "seniorities": [],
             "_ai_error": str(e),
         }
-
 
 # -------------------------
 # Skills tagging
