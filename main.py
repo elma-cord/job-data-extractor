@@ -1407,12 +1407,10 @@ def detect_remote_preferences_rule_based(text: str) -> str:
 
 def _extract_remote_days_from_text(text: str) -> str:
     low = normalize_quotes(text).lower()
-
     low = low.replace("approximately", "approx")
     low = low.replace("a week", "per week")
     low = re.sub(r"\s+", " ", low)
 
-    # fully remote / remote-only cases -> blank
     if re.search(r"\bfully remote\b", low):
         return ""
     if re.search(r"\bremote working within the united kingdom\b", low):
@@ -1639,7 +1637,6 @@ def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
     if any(x in title_low for x in ["head of", "director", "vp ", "vice president", "chief ", "cfo", "cto", "cio", "coo", "cmo", "cro", "cpo", "cso"]):
         return ["leadership"]
 
-    # NEW RULE: manager-level roles should push to lead, but not leadership
     if re.search(r"\bmanager\b", title_low):
         return ["lead"]
 
@@ -1655,7 +1652,6 @@ def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
     if any(x in title_low for x in ["associate", "mid weight", "mid-weight"]):
         return ["mid"]
 
-    # NEW RULE: managerial responsibility signals
     lead_signals = [
         r"\bmanage(?:s|d|ing)? team\b",
         r"\bmanage(?:s|d|ing)? team members\b",
@@ -1693,6 +1689,48 @@ def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
             return ["senior", "lead"]
 
     return []
+
+
+def refine_seniorities_rule_based(job_title: str, role_text: str, seniorities: List[str]) -> List[str]:
+    title_low = (job_title or "").lower()
+    text_low = (role_text or "").lower()
+    current = normalize_seniority_list(seniorities)
+
+    leadership_title = bool(re.search(r"\b(head of|director|vp|vice president|chief)\b", title_low))
+    manager_title = bool(re.search(r"\bmanager\b", title_low))
+    junior_signal = bool(re.search(r"\b(junior|jr|associate|assistant|entry)\b", title_low))
+
+    people_management_signal = any(re.search(p, text_low) for p in [
+        r"\bmanage(?:s|d|ing)? team\b",
+        r"\bmanage(?:s|d|ing)? team members\b",
+        r"\bcoaching team members\b",
+        r"\bmanage and coach\b",
+        r"\blead end-to-end\b",
+        r"\bescalation point\b",
+        r"\bline manager\b",
+        r"\bdirect report\b",
+        r"\bpeople management\b",
+        r"\bteam management\b",
+        r"\bmanage(?:s|d|ing)? a third-party provider\b",
+        r"\bact as an escalation point\b",
+    ])
+
+    if leadership_title:
+        return ["leadership"]
+
+    if manager_title or people_management_signal:
+        current = [s for s in current if s != "mid"]
+        if "lead" not in current:
+            current.append("lead")
+
+        if not junior_signal:
+            current = [s for s in current if s not in {"entry", "junior", "mid"}]
+
+        current = normalize_seniority_list(current)
+        if not current:
+            return ["lead"]
+
+    return normalize_seniority_list(current)
 
 
 def is_tp_by_rules(job_title: str, role_text: str) -> bool:
@@ -2727,7 +2765,15 @@ def process_url(
 
     result.job_location = normalize_location_rule_based(hard_evidence_text, allowed_locations) or result.job_location
     result.remote_preferences = detect_remote_preferences_rule_based(hard_evidence_text) or result.remote_preferences
-    result.remote_days = detect_remote_days_rule_based(hard_evidence_text, result.remote_preferences) or result.remote_days
+
+    remote_days_candidates = [
+        detect_remote_days_rule_based(header_text, result.remote_preferences),
+        detect_remote_days_rule_based(role_body_text, result.remote_preferences),
+        detect_remote_days_rule_based(strip_html(result.job_description), result.remote_preferences),
+        detect_remote_days_rule_based(hard_evidence_text, result.remote_preferences),
+        result.remote_days,
+    ]
+    result.remote_days = next((x for x in remote_days_candidates if x), "")
 
     explicit_salary_check = parse_explicit_salary(hard_evidence_text, allowed_salaries)
     if explicit_salary_check == ("", "", "", ""):
@@ -2758,6 +2804,12 @@ def process_url(
         )
     if not seniorities:
         seniorities = fallback_seniorities(clean_title, strip_html(result.job_description) or role_body_text)
+
+    seniorities = refine_seniorities_rule_based(
+        formatted_position_name or clean_title,
+        strip_html(result.job_description) or role_body_text,
+        seniorities
+    )
     seniorities = normalize_seniority_list(seniorities)
 
     result.seniority_1 = seniorities[0] if len(seniorities) > 0 else ""
