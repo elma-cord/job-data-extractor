@@ -167,6 +167,11 @@ def canonical_label(text: str) -> str:
     return s
 
 
+def has_pattern(text: str, patterns: List[str]) -> bool:
+    low = normalize_quotes(text or "").lower()
+    return any(re.search(p, low, flags=re.I) for p in patterns)
+
+
 # -------------------------
 # File loaders
 # -------------------------
@@ -903,11 +908,13 @@ def extract_header_candidates(soup: BeautifulSoup, root, structured: Dict[str, A
                 "position role type",
                 "work location",
                 "right to work",
+                "office attendance",
+                "office based",
             ]
         ):
             out.append(txt)
 
-    return dedupe_keep_order(out)[:120]
+    return dedupe_keep_order(out)[:140]
 
 
 def clean_job_description(text: str) -> str:
@@ -1036,6 +1043,7 @@ def job_text_score(text: str) -> int:
         "rust",
         "grpc",
         "protocol buffers",
+        "office attendance requirement",
     ]
     for term in strong_terms:
         if term in low:
@@ -1281,21 +1289,25 @@ def gather_location_lines(text: str) -> List[str]:
         r"\bterritories available\b",
         r"\bremote in\b",
         r"\bright to work in the\b",
+        r"\boffice attendance\b",
+        r"\boffice based\b",
+        r"\bworking week must be office based\b",
     ]
     soft_tokens = [
         " hybrid", " remote", " onsite", " on-site", " home based", " from home",
-        " united kingdom", " office attendance", " days per week", " remote-enabled"
+        " united kingdom", " office attendance", " days per week", " remote-enabled",
+        " office based", "% of your working week"
     ]
 
-    for idx, line in enumerate(lines[:300]):
+    for idx, line in enumerate(lines[:320]):
         low = f" {normalize_quotes(line).lower()} "
         if any(re.search(p, low, flags=re.I) for p in strong_patterns):
             out.append(line)
             continue
-        if idx < 80 and any(tok in low for tok in soft_tokens):
+        if idx < 100 and any(tok in low for tok in soft_tokens):
             out.append(line)
 
-    out.extend(lines[:30])
+    out.extend(lines[:40])
     return dedupe_keep_order(out)
 
 
@@ -1391,17 +1403,38 @@ def detect_remote_preferences_rule_based(text: str) -> str:
     low = normalize_quotes("\n".join(lines)).lower()
     found = []
 
-    if re.search(r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote\b|\bremote enabled\b|\bremote-enabled\b|\bremote working\b", low):
+    remote_signal = bool(re.search(
+        r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote\b|\bremote enabled\b|\bremote-enabled\b|\bremote working\b|\bwork from home\b|\bwfh\b",
+        low
+    ))
+    hybrid_signal = bool(re.search(
+        r"\bhybrid\b|\bagile working\b|\boffice attendance requirement\b|\b\d+\s*-\s*\d+\s+days?\s+per week\b.*\boffice\b|\b\d+\s+days?\s+per week\b.*\boffice\b",
+        low
+    ))
+    onsite_signal = bool(re.search(r"\bonsite\b|\bon-site\b|\bon site\b|\bin office\b|\bin-office\b", low))
+
+    pct_match = re.search(r"\b(\d{1,3})%\s+of your working week must be office based\b", low)
+    if pct_match:
+        pct = int(pct_match.group(1))
+        if pct >= 100:
+            onsite_signal = True
+        elif pct > 0:
+            hybrid_signal = True
+
+    if remote_signal:
         found.append("remote")
-    if re.search(r"\bhybrid\b|\bagile working\b", low):
+    if hybrid_signal:
         found.append("hybrid")
-    if re.search(r"\bonsite\b|\bon-site\b|\bon site\b|\bin office\b|\bin-office\b", low):
+    if onsite_signal:
         found.append("onsite")
 
     if re.search(r"\bwork location\b.*\bremote\b", low) or re.search(r"\bremote working within the united kingdom\b", low):
         return "remote"
 
     ordered = [x for x in ["onsite", "hybrid", "remote"] if x in found]
+
+    if "hybrid" in ordered and "remote" in ordered:
+        return "hybrid, remote"
     return ", ".join(ordered)
 
 
@@ -1427,6 +1460,8 @@ def _extract_remote_days_from_text(text: str) -> str:
         r"\bthis role has .*?office attendance requirement .*?(\d)\s+days?\s+per week\b",
         r"\b(\d)\s*-\s*(\d)\s+days?\s+per week\b.*?\boffice\b",
         r"\b(\d)\s+days?\s+per week\b.*?\boffice\b",
+        r"\b(\d)\s*-\s*(\d)\s+days?\s+a week\b.*?\boffice\b",
+        r"\b(\d)\s+days?\s+a week\b.*?\boffice\b",
     ]
 
     for pat in office_patterns:
@@ -1435,10 +1470,18 @@ def _extract_remote_days_from_text(text: str) -> str:
             continue
         groups = [int(g) for g in m.groups() if g is not None]
         if len(groups) == 2:
-            remote_options = [max(0, 5 - groups[0]), max(0, 5 - groups[1])]
-            return str(min(remote_options))
+            office_max = max(groups)
+            return str(max(0, 5 - office_max))
         if len(groups) == 1:
             return str(max(0, 5 - groups[0]))
+
+    pct_match = re.search(r"\b(\d{1,3})%\s+of your working week must be office based\b", low)
+    if pct_match:
+        pct = int(pct_match.group(1))
+        if 0 < pct < 100:
+            office_days = round((pct / 100.0) * 5)
+            office_days = max(1, min(5, office_days))
+            return str(max(0, 5 - office_days))
 
     remote_patterns = [
         r"\b(\d)\s*-\s*(\d)\s+days?\s+(?:per week\s+)?(?:from home|remote|wfh)\b",
@@ -1452,23 +1495,28 @@ def _extract_remote_days_from_text(text: str) -> str:
             continue
         groups = [int(g) for g in m.groups() if g is not None]
         if len(groups) == 2:
-            return str(max(groups))
+            return str(min(groups))
         if len(groups) == 1:
             return str(groups[0])
 
     return ""
 
 
-def detect_remote_days_rule_based(text: str, remote_prefs: str) -> str:
-    if "hybrid" not in remote_prefs and "remote" not in remote_prefs:
-        return ""
-
+def detect_remote_days_rule_based(text: str, remote_prefs: str = "") -> str:
     candidate_text = "\n".join([
         "\n".join(gather_location_lines(text)),
         normalize_common_location_aliases(text),
     ])
 
-    return _extract_remote_days_from_text(candidate_text)
+    days = _extract_remote_days_from_text(candidate_text)
+    if days:
+        return days
+
+    prefs_low = (remote_prefs or "").lower()
+    if prefs_low == "onsite":
+        return ""
+
+    return ""
 
 
 def normalize_currency_symbol(sym: str) -> str:
@@ -1571,7 +1619,7 @@ def parse_money_range_from_line(line: str) -> Tuple[str, str, str, str]:
 
 def parse_explicit_salary(text: str, _allowed_salaries_unused: List[int]) -> Tuple[str, str, str, str]:
     lines = split_lines(text)
-    candidate_lines = [line for line in lines[:160] if line_has_compensation_anchor(line)]
+    candidate_lines = [line for line in lines[:200] if line_has_compensation_anchor(line)]
 
     for line in candidate_lines:
         parsed = parse_money_range_from_line(line)
@@ -1630,29 +1678,29 @@ def detect_job_type_rule_based(text: str, structured_employment_type: str = "") 
     return ""
 
 
-def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
-    title_low = (job_title or "").lower()
-    text_low = (role_text or "").lower()
+def _extract_years(text_low: str) -> List[int]:
+    years = []
+    for m in re.finditer(r"\b(\d)\s*-\s*(\d)\s+years?\b", text_low):
+        years.extend([int(m.group(1)), int(m.group(2))])
+    for m in re.finditer(r"\b(\d)\+?\s+years?\b", text_low):
+        years.append(int(m.group(1)))
+    return years
 
-    if any(x in title_low for x in ["head of", "director", "vp ", "vice president", "chief ", "cfo", "cto", "cio", "coo", "cmo", "cro", "cpo", "cso"]):
-        return ["leadership"]
 
-    if re.search(r"\bmanager\b", title_low):
-        return ["lead"]
+def _manager_like_title(title_low: str) -> bool:
+    return bool(re.search(r"\b(manager|mgr)\b", title_low))
 
-    if any(x in title_low for x in ["senior", "sr ", "sr."]):
-        return ["senior", "lead"]
 
-    if any(x in title_low for x in ["lead ", "principal"]):
-        return ["lead"]
+def _leadership_title(title_low: str) -> bool:
+    return bool(re.search(r"\b(head of|director|vp|vice president|chief|cfo|cto|cio|coo|cmo|cro|cpo|cso)\b", title_low))
 
-    if any(x in title_low for x in ["junior", "jr "]):
-        return ["junior", "mid"]
 
-    if any(x in title_low for x in ["associate", "mid weight", "mid-weight"]):
-        return ["mid"]
+def _juniorish_title(title_low: str) -> bool:
+    return bool(re.search(r"\b(junior|jr|assistant|associate|entry)\b", title_low))
 
-    lead_signals = [
+
+def _strong_lead_signals(text_low: str) -> bool:
+    patterns = [
         r"\bmanage(?:s|d|ing)? team\b",
         r"\bmanage(?:s|d|ing)? team members\b",
         r"\bcoaching team members\b",
@@ -1667,16 +1715,88 @@ def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
         r"\bmanage(?:s|d|ing)? a third-party provider\b",
         r"\bown(?:s|ing)? end-to-end\b",
         r"\blead .* delivery\b",
+        r"\blead .* team\b",
+        r"\bprogramme governance\b",
+        r"\bprogram governance\b",
+        r"\bgovernance reviews\b",
+        r"\bstakeholder management\b",
+        r"\bresource management\b",
+        r"\bplanning and forecasting\b",
+        r"\bplanning & forecasting\b",
+        r"\boversight and reporting\b",
+        r"\bfull contract lifecycle\b",
+        r"\bfull project lifecycle\b",
     ]
-    if any(re.search(p, text_low) for p in lead_signals):
+    return any(re.search(p, text_low) for p in patterns)
+
+
+def _strategic_senior_signals(title_low: str, text_low: str) -> bool:
+    title_patterns = [
+        r"\bpmo manager\b",
+        r"\bprogramme manager\b",
+        r"\bprogram manager\b",
+        r"\bproject manager\b",
+        r"\baccount manager\b",
+        r"\bnational account manager\b",
+        r"\bkey account manager\b",
+        r"\boperations manager\b",
+        r"\bproduct manager\b",
+    ]
+    text_patterns = [
+        r"\bfull contract lifecycle\b",
+        r"\bfull project lifecycle\b",
+        r"\bbidding\b",
+        r"\binitiating\b",
+        r"\bexecuting\b",
+        r"\bmonitoring/?controlling\b",
+        r"\bclosing\b",
+        r"\bprogramme governance\b",
+        r"\bgovernance aware culture\b",
+        r"\bkey stakeholders\b",
+        r"\bcommunicating complex information\b",
+        r"\bresource management\b",
+        r"\bplanning and forecasting\b",
+        r"\bearned value\b",
+        r"\brisk management\b",
+        r"\bcost control\b",
+        r"\bconfiguration control\b",
+        r"\bkpis\b",
+        r"\boversight\b",
+        r"\bteam assigned to projects\b",
+    ]
+    return any(re.search(p, title_low) for p in title_patterns) or any(re.search(p, text_low) for p in text_patterns)
+
+
+def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
+    title_low = (job_title or "").lower()
+    text_low = (role_text or "").lower()
+
+    if _leadership_title(title_low):
+        return ["leadership"]
+
+    if _manager_like_title(title_low):
+        if _juniorish_title(title_low):
+            return ["mid", "lead"]
+        if _strategic_senior_signals(title_low, text_low) or _strong_lead_signals(text_low):
+            return ["senior", "lead"]
+        return ["senior", "lead"]
+
+    if any(x in title_low for x in ["senior", "sr ", "sr."]):
+        return ["senior"]
+
+    if any(x in title_low for x in ["lead ", "principal"]):
         return ["lead"]
 
-    years = []
-    for m in re.finditer(r"\b(\d)\s*-\s*(\d)\s+years?\b", text_low):
-        years.extend([int(m.group(1)), int(m.group(2))])
-    for m in re.finditer(r"\b(\d)\+?\s+years?\b", text_low):
-        years.append(int(m.group(1)))
+    if any(x in title_low for x in ["junior", "jr "]):
+        return ["junior", "mid"]
 
+    if any(x in title_low for x in ["associate", "mid weight", "mid-weight"]):
+        return ["mid"]
+
+    if _strong_lead_signals(text_low):
+        return ["lead"]
+
+    years = _extract_years(text_low)
     if years:
         max_y = max(years)
         if max_y <= 1:
@@ -1696,39 +1816,34 @@ def refine_seniorities_rule_based(job_title: str, role_text: str, seniorities: L
     text_low = (role_text or "").lower()
     current = normalize_seniority_list(seniorities)
 
-    leadership_title = bool(re.search(r"\b(head of|director|vp|vice president|chief)\b", title_low))
-    manager_title = bool(re.search(r"\bmanager\b", title_low))
-    junior_signal = bool(re.search(r"\b(junior|jr|associate|assistant|entry)\b", title_low))
-
-    people_management_signal = any(re.search(p, text_low) for p in [
-        r"\bmanage(?:s|d|ing)? team\b",
-        r"\bmanage(?:s|d|ing)? team members\b",
-        r"\bcoaching team members\b",
-        r"\bmanage and coach\b",
-        r"\blead end-to-end\b",
-        r"\bescalation point\b",
-        r"\bline manager\b",
-        r"\bdirect report\b",
-        r"\bpeople management\b",
-        r"\bteam management\b",
-        r"\bmanage(?:s|d|ing)? a third-party provider\b",
-        r"\bact as an escalation point\b",
-    ])
+    leadership_title = _leadership_title(title_low)
+    manager_title = _manager_like_title(title_low)
+    junior_signal = _juniorish_title(title_low)
+    strong_lead = _strong_lead_signals(text_low)
+    strategic_senior = _strategic_senior_signals(title_low, text_low)
 
     if leadership_title:
         return ["leadership"]
 
-    if manager_title or people_management_signal:
-        current = [s for s in current if s != "mid"]
+    if manager_title:
+        current = [s for s in current if s not in {"entry", "junior", "mid"}]
+        if "senior" not in current and not junior_signal:
+            current.append("senior")
         if "lead" not in current:
             current.append("lead")
+        return normalize_seniority_list(current)
 
-        if not junior_signal:
-            current = [s for s in current if s not in {"entry", "junior", "mid"}]
+    if strong_lead:
+        current = [s for s in current if s != "mid"]
+        if strategic_senior and "senior" not in current:
+            current.append("senior")
+        if "lead" not in current:
+            current.append("lead")
+        return normalize_seniority_list(current)
 
-        current = normalize_seniority_list(current)
-        if not current:
-            return ["lead"]
+    years = _extract_years(text_low)
+    if years and max(years) >= 5 and "mid" in current and "senior" in current:
+        current = [s for s in current if s != "mid"]
 
     return normalize_seniority_list(current)
 
@@ -1906,6 +2021,62 @@ def normalize_seniority_list(values: List[str]) -> List[str]:
     return [x for x in order if x in found][:3]
 
 
+def find_allowed_title_case_insensitive(target: str, allowed_job_titles: List[str]) -> str:
+    for jt in allowed_job_titles:
+        if jt.strip().lower() == target.strip().lower():
+            return jt
+    return ""
+
+
+def postprocess_job_titles(job_title: str, description: str, predicted_titles: List[str], allowed_job_titles: List[str]) -> List[str]:
+    title_low = normalize_quotes(job_title or "").lower()
+    desc_low = normalize_quotes(description or "").lower()
+
+    out = []
+    for t in predicted_titles:
+        exact = normalize_job_title_from_list(t, allowed_job_titles)
+        if exact and exact not in out:
+            out.append(exact)
+
+    csm_account_manager = find_allowed_title_case_insensitive("CSM / Account Manager", allowed_job_titles)
+    account_executive = find_allowed_title_case_insensitive("Account Executive", allowed_job_titles)
+
+    account_manager_signals = [
+        r"\bnational account manager\b",
+        r"\bkey account manager\b",
+        r"\baccount manager\b",
+        r"\bcustomer success manager\b",
+        r"\bcustomer success\b",
+        r"\bcsm\b",
+        r"\bclient success manager\b",
+        r"\brenewals manager\b",
+    ]
+
+    account_exec_signals = [
+        r"\baccount executive\b",
+        r"\bnew business\b",
+        r"\bhunter\b",
+        r"\bpipeline generation\b",
+        r"\bprospecting\b",
+        r"\bquota\b",
+    ]
+
+    if csm_account_manager and any(re.search(p, title_low) for p in account_manager_signals):
+        if csm_account_manager not in out:
+            out.insert(0, csm_account_manager)
+
+    if csm_account_manager and not any(re.search(p, title_low) for p in account_manager_signals):
+        if any(re.search(p, desc_low) for p in [r"\baccount management\b", r"\bcustomer success\b", r"\bclient relationships\b", r"\brenewals\b"]):
+            if csm_account_manager not in out:
+                out.append(csm_account_manager)
+
+    if account_executive and any(re.search(p, title_low) for p in account_exec_signals):
+        if account_executive not in out:
+            out.append(account_executive)
+
+    return dedupe_keep_order(out)[:3]
+
+
 def ai_format_position_name(raw_position_name: str) -> str:
     if not raw_position_name:
         return ""
@@ -1955,6 +2126,9 @@ Rules:
 - Use ONLY job titles from the predefined list.
 - If the position name exactly matches one predefined job title, return only that single title.
 - If the position name is unclear or broader than the predefined list, choose up to the top 3 most appropriate job titles from the predefined list.
+- Important mapping rule:
+  - National Account Manager / Key Account Manager / Account Manager / Customer Success Manager style roles should include "CSM / Account Manager" when that exists in the predefined list.
+  - Do not force "Account Executive" unless the role clearly looks AE / sales-hunter / new-business focused.
 - Return a JSON object with one key only:
   "job_titles": ["...", "..."]
 - job_titles must contain exact strings from the predefined list only.
@@ -1984,6 +2158,7 @@ Description:
             exact = normalize_job_title_from_list(str(t), allowed_job_titles)
             if exact and exact not in out:
                 out.append(exact)
+
         return out[:3]
     except Exception:
         return []
@@ -2002,21 +2177,26 @@ entry, junior, mid, senior, lead, leadership
 Rules:
 1. First analyze the position name.
 2. If title includes leadership indicators such as "head of", "director", "engineering manager", "vp", "chief", return leadership only.
-3. Plain manager titles usually indicate lead, not leadership.
-4. If the title clearly contains seniority like junior, senior, lead, return the appropriate value(s).
-5. If ambiguous, analyze both title and description together and return up to 3 most appropriate seniority levels.
-6. Output must be JSON with one key only:
+3. Plain manager titles usually indicate senior and/or lead, not mid.
+4. For manager titles such as PMO Manager, Programme Manager, Project Manager, Operations Manager, Account Manager:
+   - do NOT include mid unless the title/description clearly indicates junior/associate/assistant level.
+   - include lead when ownership / stakeholder management / coordination / governance / team leadership is present.
+   - include senior when the role spans broad ownership, full lifecycle responsibility, governance, forecasting, oversight, or complex stakeholder management.
+5. If the title clearly contains seniority like junior, senior, lead, return the appropriate value(s).
+6. If ambiguous, analyze both title and description together and return up to 3 most appropriate seniority levels.
+7. Output must be JSON with one key only:
    "seniorities": ["...", "..."]
-7. Use only these exact lowercase values:
+8. Use only these exact lowercase values:
    entry, junior, mid, senior, lead, leadership
-8. Keep order exactly:
+9. Keep order exactly:
    entry, junior, mid, senior, lead, leadership
-9. If experience is a range, include all applicable seniorities across the range:
+10. If experience is a range, include all applicable seniorities across the range:
    - 0-1 years -> entry, junior
    - 2 years -> junior, mid
-   - 3-5 years -> senior, lead
-10. If managerial/team-management/coaching/escalation-point/ownership responsibilities are clearly present, include lead.
-11. If nothing suitable is identified, return an empty array.
+   - 3-5 years -> senior
+   - 5+ years -> senior, lead
+11. If managerial/team-management/coaching/escalation-point/ownership responsibilities are clearly present, include lead.
+12. If nothing suitable is identified, return an empty array.
 
 Position name:
 {position_name}
@@ -2049,6 +2229,7 @@ Include
 1. Purpose and responsibilities (About the Role, Responsibilities, Key Duties).
 2. Candidate requirements, qualifications, skills, experience (About You, Requirements, Ideally You Will Have).
 3. Any text that directly explains what the job involves or what the candidate should bring.
+4. Role-specific working arrangement lines when they affect output fields, such as remote/hybrid/office attendance requirements.
 
 Exclude
 1. Company background
@@ -2149,6 +2330,7 @@ Important allow rules:
 - Recruitment roles are relevant when they are internal/corporate talent acquisition, recruiting, people, HR, or employer-branding functions.
 - IT support / infrastructure / support engineering roles ARE relevant and should not be excluded just because they are support-oriented or customer-facing.
 - Business/program/change/transformation/PMO/operations roles can be relevant under Business Operations / Project Manager / Operations families.
+- National Account Manager / Key Account Manager / Account Manager / Customer Success Manager style roles can be relevant under CSM / Account Manager.
 
 Reject only when the role is clearly outside allowed business/tech functions, such as:
 teacher, nurse, waiter, chef, construction worker, civil engineer, electrician, mechanical engineer in manufacturing/plant context, manufacturing operator, maritime crew, microbiology lab role, beauty retail staff, injection molding technician, warehouse operative, driver, cleaner.
@@ -2287,12 +2469,14 @@ Rules for remote_preferences:
 - home based counts as remote.
 - daily field travel does NOT mean onsite only.
 - Do not let generic company-wide smart-working text override a clearer role-specific line.
+- Wording like “office attendance requirement”, “1-2 days per week in office”, or “60% office based” means the role is hybrid unless the role also clearly says fully onsite.
 - If the role-specific line says remote in UK / remote working within the UK, return remote only.
 
 Rules for remote_days:
 - Return only a single number or ""
 - Only return a number when explicit days are stated.
-- For office ranges such as 1-2 days in office per week, return the conservative remote-days value.
+- For office ranges such as 1-2 days in office per week, return the minimum guaranteed remote-days value, which is 3.
+- For office percentages like 60% office based, convert approximately to a 5-day week and return the remote-day remainder.
 - Never infer a number from the word "hybrid" alone.
 - Do not infer from company-wide smart-working statements unless they are explicitly role-specific.
 
@@ -2319,6 +2503,7 @@ Rules for job_description:
 - Keep the main role content only.
 - Preserve useful sections such as:
   responsibilities, required, essential, desirable, qualifications, what to bring, key relationships, success measures, minimum qualifications, preferred qualifications, summary, activities, landscape, about you, requirements.
+- Keep role-specific working pattern text if it affects remote/office interpretation.
 - Remove company marketing, benefits, footer, privacy, legal, ATS boilerplate, follow-us, equal-opportunity sections.
 - Do not shorten to one paragraph if multiple role sections are clearly present.
 
@@ -2334,13 +2519,20 @@ Rules for job_titles:
 - Prefer functional fit over literal wording.
 - Never invent a title outside the predefined list.
 - Do NOT leave job_titles empty if there is a clear best-fit title in the predefined list.
+- Important mapping:
+  - National Account Manager / Key Account Manager / Account Manager / Customer Success Manager style roles should include "CSM / Account Manager" when that exists in the predefined list.
+  - Do not force "Account Executive" unless the role is clearly AE / new-business sales led.
 
 Rules for seniorities:
 - Allowed only: entry, junior, mid, senior, lead, leadership
 - Must be lowercase
 - Return as JSON array in this order only: entry, junior, mid, senior, lead, leadership
 - If title includes explicit org-leadership indicators like "head of", "director", "vp", "chief", return leadership when appropriate.
-- Plain manager titles usually indicate lead, not leadership.
+- Plain manager titles usually indicate senior and/or lead, not mid.
+- For manager titles such as PMO Manager / Programme Manager / Project Manager / Operations Manager / Account Manager:
+  - do NOT include mid unless the role clearly indicates junior/associate/assistant level.
+  - include lead when ownership / coordination / stakeholder management / governance / team leadership is present.
+  - include senior when the role spans broad ownership, full lifecycle responsibility, governance, forecasting, oversight, or complex stakeholder management.
 - Do NOT use leadership only because the role has technical authority or architectural ownership.
 - If title says senior, include senior.
 - If managerial/team-management/coaching/escalation-point/ownership responsibilities are clearly present, include lead.
@@ -2392,7 +2584,10 @@ Role description:
             parts = [p.strip() for p in remote_preferences.split(",") if p.strip()]
             valid_order = ["onsite", "hybrid", "remote"]
             parts = [p for p in valid_order if p in parts]
-            remote_preferences = ", ".join(parts)
+            if "hybrid" in parts and "remote" in parts:
+                remote_preferences = "hybrid, remote"
+            else:
+                remote_preferences = ", ".join(parts)
 
         raw_titles = data.get("job_titles", [])
         if not isinstance(raw_titles, list):
@@ -2747,7 +2942,6 @@ def process_url(
         result.job_location = fallback_location
 
     result.remote_preferences = tagged.get("remote_preferences", "") or fallback_remote_preferences
-    result.remote_days = tagged.get("remote_days", "") or fallback_remote_days
     result.salary_min = tagged.get("salary_min", "") or fallback_salary_min
     result.salary_max = tagged.get("salary_max", "") or fallback_salary_max
     result.salary_currency = tagged.get("salary_currency", "") or fallback_salary_currency
@@ -2767,13 +2961,14 @@ def process_url(
     result.remote_preferences = detect_remote_preferences_rule_based(hard_evidence_text) or result.remote_preferences
 
     remote_days_candidates = [
+        tagged.get("remote_days", "") or "",
         detect_remote_days_rule_based(header_text, result.remote_preferences),
         detect_remote_days_rule_based(role_body_text, result.remote_preferences),
         detect_remote_days_rule_based(strip_html(result.job_description), result.remote_preferences),
         detect_remote_days_rule_based(hard_evidence_text, result.remote_preferences),
-        result.remote_days,
+        fallback_remote_days,
     ]
-    result.remote_days = next((x for x in remote_days_candidates if x), "")
+    result.remote_days = next((x for x in remote_days_candidates if str(x).strip() != ""), "")
 
     explicit_salary_check = parse_explicit_salary(hard_evidence_text, allowed_salaries)
     if explicit_salary_check == ("", "", "", ""):
@@ -2791,6 +2986,13 @@ def process_url(
             description=strip_html(result.job_description) or role_body_text,
             allowed_job_titles=allowed_job_titles,
         )
+
+    job_titles = postprocess_job_titles(
+        job_title=formatted_position_name or clean_title,
+        description=strip_html(result.job_description) or role_body_text,
+        predicted_titles=job_titles,
+        allowed_job_titles=allowed_job_titles,
+    )
 
     result.job_title_tag_1 = job_titles[0] if len(job_titles) > 0 else ""
     result.job_title_tag_2 = job_titles[1] if len(job_titles) > 1 else ""
@@ -2851,8 +3053,9 @@ def process_url(
         "ran_relevant_tagging",
         "formatted_position_name_added",
         "html_clean_description_added",
-        "remote_days_rule_updated",
-        "seniority_rule_updated",
+        "remote_days_rule_updated_v2",
+        "seniority_rule_updated_v2",
+        "job_title_postprocess_updated_v2",
     ]
     if len(job_titles) == 0:
         note_parts.append("job_titles_empty")
