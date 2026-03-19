@@ -59,17 +59,13 @@ Input description:
 """.strip()
 
 
-def build_tag_relevant_job_prompt(
+def build_core_fields_prompt(
     job_title: str,
     header_text: str,
     role_body_text: str,
     allowed_locations: list[str],
-    allowed_salaries: list[int],
-    allowed_job_titles: list[str],
 ) -> str:
     location_list_text = "\n".join(allowed_locations[:3000])
-    salary_list_text = ", ".join(str(x) for x in allowed_salaries[:3000])
-    job_titles_text = ", ".join(allowed_job_titles[:3000])
 
     return f"""
 You will receive:
@@ -82,15 +78,8 @@ job_category
 job_location
 remote_preferences
 remote_days
-salary_min
-salary_max
-salary_currency
-salary_period
 visa_sponsorship
 job_type
-job_description
-job_titles
-seniorities
 
 Rules for job_category:
 - Output exactly one of: "T&P", "NonT&P"
@@ -103,11 +92,11 @@ Rules for job_location:
 - Prefer the most specific visible location over a broad country fallback.
 - If multiple valid locations are listed, choose the most specific clear normalized location from the allowed list.
 - If the page says “Remote working within the UK”, “UK remote”, or similar, return the correct UK location from the allowed list, not blank.
-- Only return "Unknown" if there is truly no clear location evidence.
+- Only return "" if there is truly no clear location evidence.
 - Prefer true header/location labels over incidental mentions elsewhere in the body.
 
 Rules for remote_preferences:
-- Allowed values only: onsite, hybrid, remote
+- Allowed values only: onsite, hybrid, remote, or ""
 - Use role-specific/header evidence first.
 - home based counts as remote.
 - daily field travel does NOT mean onsite only.
@@ -116,18 +105,12 @@ Rules for remote_preferences:
 - If the role-specific line says remote in UK / remote working within the UK, return remote only.
 
 Rules for remote_days:
-- Return only a single number or ""
+- Return only a single number as a string, or ""
 - Only return a number when explicit office/remote day evidence is present.
 - For office ranges such as 1-2 days in office per week, return the minimum guaranteed remote-days value, which is 3.
 - For office percentages like 60% office based, convert approximately to a 5-day week and return the remote-day remainder.
 - Never infer a number from hybrid, flexible working, compressed hours, Friday half-day, or generic work/life balance text.
 - Do not infer from company-wide smart-working statements unless they are explicitly role-specific.
-
-Rules for salary:
-- Only tag salary when compensation/rate is explicitly stated for this role.
-- salary_period must be one of: year, day, hour, month, or ""
-- If a daily rate is stated (e.g. £500-£550 p/d), preserve it as min/max with salary_period=day.
-- Do not invent salary from unrelated numbers, dates, standards, reference ids, years, counts, targets, legislation references, percentages, revenues, or employee counts.
 
 Rules for visa_sponsorship:
 - Return only yes, no, or ""
@@ -141,56 +124,43 @@ Rules for job_type:
   or ""
 - Priority: Permanent > FTC > Part Time > Freelance/Contract
 
-Rules for job_description:
-- Keep the main role content only.
-- Preserve useful sections such as:
-  responsibilities, required, essential, desirable, qualifications, what to bring, key relationships, success measures, minimum qualifications, preferred qualifications, summary, activities, landscape, about you, requirements.
-- Keep role-specific working pattern text if it affects remote/office interpretation.
-- Preserve subsection headings if they exist, such as “Strategic and Growth Focused Activities”, “Recruitment Delivery”, “Recruitment Coordination and Administration”.
-- Remove company marketing, benefits, footer, privacy, legal, ATS boilerplate, follow-us, equal-opportunity sections.
-- Do not shorten to one paragraph if multiple role sections are clearly present.
-
-Rules for job_titles:
-- Analyze both the position name and role description together.
-- Use ONLY job titles from the predefined list.
-- Return job_titles as a JSON array of up to 3 exact strings from the predefined list.
-- If the position name exactly matches one predefined job title, return only that single title.
-- If the position name is unclear, broader than the predefined list, or does not exactly match the predefined list, choose up to the top 3 most appropriate job titles from the predefined list based on both title and description.
-- Order job_titles from most appropriate to least appropriate.
-- If fewer than 3 suitable titles exist, return only those.
-- If no suitable title exists, return an empty array.
-- Prefer functional fit over literal wording.
-- Never invent a title outside the predefined list.
-- Do NOT leave job_titles empty if there is a clear best-fit title in the predefined list.
-- Important mapping:
-  - National Account Manager / Key Account Manager / Account Manager / Customer Success Manager style roles should include "CSM / Account Manager" when that exists in the predefined list.
-  - Systems/infrastructure/virtualisation/Kubernetes/Linux/OpenShift-heavy roles should prefer "System Engineer" over "System Administrator" or "Cloud Engineer" when the title/body points more to engineering and platform operations.
-  - CRM/loyalty/campaign/customer analytics roles should prefer "Marketing Analyst" and/or "Data / Insight Analyst" over "Business Analyst" or "Data Scientist" unless the latter are clearly better fits.
-  - Do not force "Account Executive" unless the role is clearly AE / new-business sales led.
-
-Rules for seniorities:
-- Allowed only: entry, junior, mid, senior, lead, leadership
-- Must be lowercase
-- Return as JSON array in this order only: entry, junior, mid, senior, lead, leadership
-- If title includes explicit org-leadership indicators like "head of", "director", "technical director", "engineering manager", "vp", "chief", return leadership when appropriate.
-- Plain manager titles usually indicate senior and/or lead, not mid.
-- For manager titles such as PMO Manager / Programme Manager / Project Manager / Operations Manager / Account Manager:
-  - do NOT include mid unless the role clearly indicates junior/associate/assistant level.
-  - include lead when ownership / coordination / stakeholder management / governance / team leadership is present.
-  - include senior when the role spans broad ownership, full lifecycle responsibility, governance, forecasting, oversight, or complex stakeholder management.
-- Do NOT use leadership only because the role has technical authority or architectural ownership.
-- If title says senior, include senior.
-- If managerial/team-management/coaching/escalation-point/ownership responsibilities are clearly present, include lead.
-- If role clearly suggests multiple levels, return up to 3.
-
 Allowed normalized locations:
 {location_list_text}
 
-Allowed salaries reference list:
-{salary_list_text}
+Input position name:
+{job_title}
 
-Predefined job titles:
-{job_titles_text}
+Header/meta text:
+{header_text[:6000]}
+
+Role description:
+{role_body_text[:24000]}
+""".strip()
+
+
+def build_salary_prompt(job_title: str, header_text: str, role_body_text: str) -> str:
+    return f"""
+You will receive:
+1. position name
+2. header/meta text
+3. role description text
+
+Return ONLY valid JSON with exactly these keys:
+salary_min
+salary_max
+salary_currency
+salary_period
+
+Rules:
+- Extract salary ONLY when compensation/rate is explicitly stated for this role.
+- salary_period must be exactly one of: year, day, hour, month, or ""
+- If a range is stated, keep both min and max.
+- If only one amount is stated, put the same value in both salary_min and salary_max.
+- Do not invent salary from unrelated numbers.
+- Do not use years of experience, employee counts, dates, percentages, office attendance percentages, standards, ids, revenue, headcount, or benefits.
+- Do not round or normalize the numeric value.
+- Keep only raw explicit salary numbers, without commas if possible.
+- If no clear salary is present, return empty strings for all four keys.
 
 Input position name:
 {job_title}
