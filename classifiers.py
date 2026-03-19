@@ -6,11 +6,12 @@ from typing import Any, Dict, List
 from openai import OpenAI
 
 from prompts import (
+    build_core_fields_prompt,
     build_job_titles_prompt,
     build_relevance_prompt,
+    build_salary_prompt,
     build_seniority_prompt,
     build_skills_prompt,
-    build_tag_relevant_job_prompt,
 )
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -53,7 +54,6 @@ def normalize_quotes(text: str) -> str:
         .replace("\u2013", "-")
         .replace("\u2014", "-")
         .replace("•", "-")
-        .replace("-", "-")
     )
 
 
@@ -140,49 +140,33 @@ def ai_check_relevance(
         }
 
 
-def ai_tag_relevant_job(
+def ai_extract_core_fields(
     job_title: str,
     header_text: str,
     role_body_text: str,
     allowed_locations: List[str],
-    allowed_salaries: List[int],
-    allowed_job_titles: List[str],
     fallback_job_category: str,
     fallback_location: str,
     fallback_remote_preferences: str,
     fallback_remote_days: str,
-    fallback_salary_min: str,
-    fallback_salary_max: str,
-    fallback_salary_currency: str,
-    fallback_salary_period: str,
     fallback_visa: str,
     fallback_job_type: str,
-    fallback_job_description: str,
-) -> Dict[str, Any]:
+) -> Dict[str, str]:
     if not client:
         return {
             "job_category": fallback_job_category,
             "job_location": fallback_location,
             "remote_preferences": fallback_remote_preferences,
             "remote_days": fallback_remote_days,
-            "salary_min": fallback_salary_min,
-            "salary_max": fallback_salary_max,
-            "salary_currency": fallback_salary_currency,
-            "salary_period": fallback_salary_period,
             "visa_sponsorship": fallback_visa,
             "job_type": fallback_job_type,
-            "job_description": fallback_job_description,
-            "job_titles": [],
-            "seniorities": [],
         }
 
-    prompt = build_tag_relevant_job_prompt(
+    prompt = build_core_fields_prompt(
         job_title=job_title,
         header_text=header_text,
         role_body_text=role_body_text,
         allowed_locations=allowed_locations,
-        allowed_salaries=allowed_salaries,
-        allowed_job_titles=allowed_job_titles,
     )
 
     try:
@@ -193,20 +177,13 @@ def ai_tag_relevant_job(
         job_location = str(data.get("job_location", "") or "").strip() or fallback_location
         remote_preferences = str(data.get("remote_preferences", "") or "").strip() or fallback_remote_preferences
         remote_days = str(data.get("remote_days", "") or "").strip() or fallback_remote_days
-        salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
-        salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
-        salary_currency = str(data.get("salary_currency", "") or "").strip() or fallback_salary_currency
-        salary_period = str(data.get("salary_period", "") or "").strip() or fallback_salary_period
         visa_sponsorship = str(data.get("visa_sponsorship", "") or "").strip()
         job_type = str(data.get("job_type", "") or "").strip()
-        job_description = str(data.get("job_description", "") or "").strip() or fallback_job_description
 
         if visa_sponsorship not in {"yes", "no", ""}:
             visa_sponsorship = fallback_visa
         if job_type not in {"Permanent", "FTC", "Part Time", "Freelance/Contract", ""}:
             job_type = fallback_job_type
-        if salary_period not in {"year", "day", "hour", "month", ""}:
-            salary_period = fallback_salary_period
 
         if remote_preferences:
             parts = [p.strip() for p in remote_preferences.split(",") if p.strip()]
@@ -217,52 +194,71 @@ def ai_tag_relevant_job(
             else:
                 remote_preferences = ", ".join(parts)
 
-        raw_titles = data.get("job_titles", [])
-        if not isinstance(raw_titles, list):
-            raw_titles = []
-        normalized_titles = []
-        for t in raw_titles:
-            exact = normalize_job_title_from_list(str(t), allowed_job_titles)
-            if exact and exact not in normalized_titles:
-                normalized_titles.append(exact)
-        normalized_titles = normalized_titles[:3]
-
-        raw_seniorities = data.get("seniorities", [])
-        if not isinstance(raw_seniorities, list):
-            raw_seniorities = []
-        normalized_seniorities = normalize_seniority_list(raw_seniorities)
-
         return {
             "job_category": job_category,
             "job_location": job_location,
             "remote_preferences": remote_preferences,
             "remote_days": remote_days,
-            "salary_min": salary_min,
-            "salary_max": salary_max,
-            "salary_currency": salary_currency,
-            "salary_period": salary_period,
             "visa_sponsorship": visa_sponsorship,
             "job_type": job_type,
-            "job_description": job_description,
-            "job_titles": normalized_titles,
-            "seniorities": normalized_seniorities,
         }
-    except Exception as e:
+    except Exception:
         return {
             "job_category": fallback_job_category,
             "job_location": fallback_location,
             "remote_preferences": fallback_remote_preferences,
             "remote_days": fallback_remote_days,
+            "visa_sponsorship": fallback_visa,
+            "job_type": fallback_job_type,
+        }
+
+
+def ai_extract_salary_only(
+    job_title: str,
+    header_text: str,
+    role_body_text: str,
+    fallback_salary_min: str,
+    fallback_salary_max: str,
+    fallback_salary_currency: str,
+    fallback_salary_period: str,
+) -> Dict[str, str]:
+    if not client:
+        return {
             "salary_min": fallback_salary_min,
             "salary_max": fallback_salary_max,
             "salary_currency": fallback_salary_currency,
             "salary_period": fallback_salary_period,
-            "visa_sponsorship": fallback_visa,
-            "job_type": fallback_job_type,
-            "job_description": fallback_job_description,
-            "job_titles": [],
-            "seniorities": [],
-            "_ai_error": str(e),
+        }
+
+    prompt = build_salary_prompt(job_title, header_text, role_body_text)
+
+    try:
+        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
+        data = safe_json_loads(response.output_text)
+
+        salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
+        salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
+        salary_currency = str(data.get("salary_currency", "") or "").strip() or fallback_salary_currency
+        salary_period = str(data.get("salary_period", "") or "").strip() or fallback_salary_period
+
+        if salary_period not in {"year", "day", "hour", "month", ""}:
+            salary_period = fallback_salary_period
+
+        if salary_currency not in {"GBP", "USD", "EUR", ""}:
+            salary_currency = fallback_salary_currency
+
+        return {
+            "salary_min": salary_min,
+            "salary_max": salary_max,
+            "salary_currency": salary_currency,
+            "salary_period": salary_period,
+        }
+    except Exception:
+        return {
+            "salary_min": fallback_salary_min,
+            "salary_max": fallback_salary_max,
+            "salary_currency": fallback_salary_currency,
+            "salary_period": fallback_salary_period,
         }
 
 
