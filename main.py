@@ -2156,6 +2156,8 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
         r"\bcsm\b",
         r"\bclient success manager\b",
         r"\brenewals manager\b",
+        r"\bsales account management\b",
+        r"\baccount management\b",
     ]
     account_exec_signals = [
         r"\baccount executive\b",
@@ -2166,18 +2168,44 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
         r"\bquota\b",
     ]
 
-    if csm_account_manager and any(re.search(p, title_low) for p in account_manager_signals):
-        if csm_account_manager not in out:
-            out.insert(0, csm_account_manager)
+    sales_account_role_signal = any(re.search(p, title_low) for p in account_manager_signals) or any(
+        re.search(p, desc_low) for p in [
+            r"\bwholesale\b",
+            r"\bbuyers\b",
+            r"\baccounts\b",
+            r"\btrade terms\b",
+            r"\bpromotional plans\b",
+            r"\bretailers\b",
+            r"\bbrands\b",
+            r"\bcommercial conversations\b",
+            r"\bdistributor partners\b",
+            r"\bnetwork development\b",
+            r"\bvalue, gross margin, and volume targets\b",
+        ]
+    )
 
-    if csm_account_manager and not any(re.search(p, title_low) for p in account_manager_signals):
-        if any(re.search(p, desc_low) for p in [r"\baccount management\b", r"\bcustomer success\b", r"\bclient relationships\b", r"\brenewals\b"]):
-            if csm_account_manager not in out:
-                out.append(csm_account_manager)
+    if csm_account_manager and sales_account_role_signal:
+        if csm_account_manager in out:
+            out.remove(csm_account_manager)
+        out.insert(0, csm_account_manager)
 
     if account_executive and any(re.search(p, title_low) for p in account_exec_signals):
         if account_executive not in out:
             out.append(account_executive)
+
+    # hard negative guardrail:
+    # if the role is clearly account-management / wholesale / customer-commercial,
+    # remove impossible technical titles
+    if sales_account_role_signal:
+        technical_titles_to_remove = {
+            system_engineer,
+            system_admin,
+            devops_engineer,
+            solutions_engineer,
+            full_stack,
+            cloud_engineer,
+        }
+        out = [x for x in out if x not in technical_titles_to_remove and x]
 
     # Systems / infra prioritization
     system_engineer_signal = any(re.search(p, title_low) for p in [
@@ -2202,42 +2230,43 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
         r"\bday 2 operations\b",
     ])
 
-    if system_engineer and system_engineer_signal:
-        if system_engineer in out:
-            out.remove(system_engineer)
-        out.insert(0, system_engineer)
-
-    if devops_engineer and any(re.search(p, desc_low) for p in [
-        r"\bkubernetes\b",
-        r"\bopenshift\b",
-        r"\bcontaineri[sz]ing\b",
-        r"\bdistributed system\b",
-        r"\bcloud platforms?\b",
-        r"\baws\b",
-        r"\bgoogle cloud platform\b",
-        r"\bgcp\b",
-        r"\bmicroservice\b",
-        r"\bevent-driven\b",
-        r"\bscalable and distributed\b",
-    ]):
-        if devops_engineer not in out:
-            out.append(devops_engineer)
-
-    if full_stack and full_stack in out:
-        if not any(re.search(p, desc_low) for p in [r"\bfront-end\b", r"\bfrontend\b", r"\breact\b", r"\bjavascript\b", r"\btypescript\b", r"\bui\b"]):
-            out = [x for x in out if x != full_stack]
-
-    if solutions_engineer and solutions_engineer in out:
-        if not any(re.search(p, title_low + "\n" + desc_low) for p in [r"\bsolutions engineer\b", r"\bpre-sales\b", r"\bpresales\b", r"\bsales engineer\b"]):
-            out = [x for x in out if x != solutions_engineer]
-
-    if system_admin and system_admin in out and system_engineer_signal:
-        out = [x for x in out if x != system_admin]
-        if system_engineer and system_engineer not in out:
+    if not sales_account_role_signal:
+        if system_engineer and system_engineer_signal:
+            if system_engineer in out:
+                out.remove(system_engineer)
             out.insert(0, system_engineer)
 
-    if cloud_engineer and cloud_engineer in out and system_engineer_signal and any(re.search(p, title_low) for p in [r"\bsystems engineer\b", r"\bsystem engineer\b"]):
-        out = [x for x in out if x != cloud_engineer]
+        if devops_engineer and any(re.search(p, desc_low) for p in [
+            r"\bkubernetes\b",
+            r"\bopenshift\b",
+            r"\bcontaineri[sz]ing\b",
+            r"\bdistributed system\b",
+            r"\bcloud platforms?\b",
+            r"\baws\b",
+            r"\bgoogle cloud platform\b",
+            r"\bgcp\b",
+            r"\bmicroservice\b",
+            r"\bevent-driven\b",
+            r"\bscalable and distributed\b",
+        ]):
+            if devops_engineer not in out:
+                out.append(devops_engineer)
+
+        if full_stack and full_stack in out:
+            if not any(re.search(p, desc_low) for p in [r"\bfront-end\b", r"\bfrontend\b", r"\breact\b", r"\bjavascript\b", r"\btypescript\b", r"\bui\b"]):
+                out = [x for x in out if x != full_stack]
+
+        if solutions_engineer and solutions_engineer in out:
+            if not any(re.search(p, title_low + "\n" + desc_low) for p in [r"\bsolutions engineer\b", r"\bpre-sales\b", r"\bpresales\b", r"\bsales engineer\b"]):
+                out = [x for x in out if x != solutions_engineer]
+
+        if system_admin and system_admin in out and system_engineer_signal:
+            out = [x for x in out if x != system_admin]
+            if system_engineer and system_engineer not in out:
+                out.insert(0, system_engineer)
+
+        if cloud_engineer and cloud_engineer in out and system_engineer_signal and any(re.search(p, title_low) for p in [r"\bsystems engineer\b", r"\bsystem engineer\b"]):
+            out = [x for x in out if x != cloud_engineer]
 
     # Marketing / CRM analytics prioritization
     marketing_data_signal = any(re.search(p, desc_low) for p in [
