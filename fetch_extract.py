@@ -1,8 +1,11 @@
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -16,8 +19,71 @@ HEADERS = {
     "Accept-Language": "en-GB,en;q=0.9,en-US;q=0.8",
 }
 
-REQUEST_TIMEOUT = 25
-PLAYWRIGHT_TIMEOUT_MS = 45000
+REQUEST_TIMEOUT = 20
+PLAYWRIGHT_TIMEOUT_MS = 20000
+PLAYWRIGHT_NETWORKIDLE_MS = 6000
+PLAYWRIGHT_POST_LOAD_WAIT_MS = 1200
+
+# Domains where raw HTML is usually enough and Playwright is often wasteful
+NEVER_RENDER_DOMAINS = {
+    "boards.greenhouse.io",
+    "job-boards.greenhouse.io",
+    "jobs.ashbyhq.com",
+    "jobs.lever.co",
+    "apply.workable.com",
+    "smartrecruiters.com",
+}
+
+# Domains where JS rendering is more often needed
+LIKELY_RENDER_DOMAINS = {
+    "myworkdayjobs.com",
+    "workday.com",
+    "oraclecloud.com",
+    "successfactors.com",
+    "icims.com",
+    "ultipro.com",
+    "dayforcehcm.com",
+    "recruitee.com",
+    "pinpointhq.com",
+}
+
+STRONG_JOB_SIGNALS = [
+    "responsibilities",
+    "requirements",
+    "qualifications",
+    "job description",
+    "about the role",
+    "about you",
+    "minimum qualifications",
+    "preferred qualifications",
+    "what you'll do",
+    "what you’ll do",
+    "experience",
+    "apply now",
+    "apply for this job",
+    "job title",
+    "location:",
+]
+
+
+# -------------------------
+# Reusable HTTP session
+# -------------------------
+
+_session = requests.Session()
+_retry = Retry(
+    total=2,
+    connect=2,
+    read=2,
+    status=2,
+    status_forcelist=(429, 500, 502, 503, 504),
+    backoff_factor=0.4,
+    allowed_methods=frozenset(["GET", "HEAD"]),
+)
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=100, pool_maxsize=100)
+_session.mount("http://", _adapter)
+_session.mount("https://", _adapter)
+_session.headers.update(HEADERS)
 
 
 # -------------------------
@@ -99,13 +165,24 @@ def normalize_common_location_aliases(text: str) -> str:
     return out
 
 
+def get_domain(url: str) -> str:
+    try:
+        return (urlparse(url).netloc or "").lower()
+    except Exception:
+        return ""
+
+
+def domain_matches(domain: str, candidates: set[str]) -> bool:
+    return any(domain == d or domain.endswith("." + d) for d in candidates)
+
+
 # -------------------------
 # Fetching
 # -------------------------
 
 def fetch_html(url: str) -> Tuple[Optional[str], str]:
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+        resp = _session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
         status = f"http_{resp.status_code}"
         if resp.ok and resp.text:
             return resp.text, status
@@ -117,12 +194,26 @@ def fetch_html(url: str) -> Tuple[Optional[str], str]:
 def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                locale="en-GB",
+                java_script_enabled=True,
+                ignore_https_errors=True,
+            )
+            page = context.new_page()
 
             def route_handler(route):
                 rtype = route.request.resource_type
-                if rtype in {"image", "media", "font"}:
+                if rtype in {"image", "media", "font", "stylesheet"}:
                     try:
                         route.abort()
                     except Exception:
@@ -137,7 +228,7 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
             page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT_MS)
 
             try:
-                page.wait_for_load_state("networkidle", timeout=12000)
+                page.wait_for_load_state("networkidle", timeout=PLAYWRIGHT_NETWORKIDLE_MS)
             except PlaywrightTimeoutError:
                 pass
 
@@ -153,7 +244,7 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
             ]
             for selector in job_like_selectors:
                 try:
-                    page.locator(selector).first.wait_for(timeout=1500)
+                    page.locator(selector).first.wait_for(timeout=800)
                     break
                 except Exception:
                     pass
@@ -161,26 +252,25 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
             try:
                 page.evaluate("""
                     async () => {
-                        await new Promise((resolve) => {
-                            let total = 0;
-                            const step = 1200;
-                            const timer = setInterval(() => {
-                                window.scrollBy(0, step);
-                                total += step;
-                                if (total > 12000) {
-                                    clearInterval(timer);
-                                    resolve();
-                                }
-                            }, 120);
-                        });
-                        await new Promise(r => setTimeout(r, 1200));
+                        const body = document.body;
+                        if (!body) return;
+                        const totalHeight = Math.max(
+                            body.scrollHeight,
+                            document.documentElement ? document.documentElement.scrollHeight : 0
+                        );
+                        if (totalHeight < 2200) return;
+
+                        window.scrollBy(0, 1200);
+                        await new Promise(r => setTimeout(r, 250));
+                        window.scrollBy(0, 1200);
+                        await new Promise(r => setTimeout(r, 250));
                         window.scrollTo(0, 0);
                     }
                 """)
             except Exception:
                 pass
 
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(PLAYWRIGHT_POST_LOAD_WAIT_MS)
 
             frames_html = []
             try:
@@ -189,7 +279,7 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
                         if fr == page.main_frame:
                             continue
                         fr_html = fr.content()
-                        if fr_html and len(fr_html) > 500:
+                        if fr_html and len(fr_html) > 1200:
                             frames_html.append(fr_html)
                     except Exception:
                         pass
@@ -197,6 +287,7 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
                 pass
 
             html = page.content()
+            context.close()
             browser.close()
 
             if frames_html:
@@ -208,24 +299,50 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
 
 
 def looks_like_js_shell(html: str, text: str) -> bool:
-    low_text = (text or "").lower()
+    low_text = normalize_quotes(text or "").lower()
+    compact_text = re.sub(r"\s+", " ", low_text).strip()
+
     shell_signals = [
         "enable javascript",
         "javascript is required",
         "please enable javascript",
         "loading...",
         "please wait while we load",
+        "application error",
+        "access denied",
+        "verify you are human",
+        "captcha",
     ]
-    if any(sig in low_text for sig in shell_signals):
+    if any(sig in compact_text for sig in shell_signals):
         return True
 
-    if len(low_text.strip()) < 350:
+    strong_job_signal_hits = sum(1 for sig in STRONG_JOB_SIGNALS if sig in compact_text)
+    if strong_job_signal_hits >= 2 and len(compact_text) >= 220:
+        return False
+
+    if len(compact_text) < 180:
         return True
 
     body_len = len(re.sub(r"\s+", " ", html or ""))
     text_len = len(re.sub(r"\s+", " ", text or ""))
-    if body_len > 0 and text_len / body_len < 0.03:
+    if body_len > 0 and text_len / body_len < 0.02 and strong_job_signal_hits == 0:
         return True
+
+    return False
+
+
+def should_try_playwright(url: str, html: str, parsed_role_context_text: str) -> bool:
+    domain = get_domain(url)
+
+    if domain_matches(domain, NEVER_RENDER_DOMAINS):
+        return False
+
+    if domain_matches(domain, LIKELY_RENDER_DOMAINS):
+        return True
+
+    if looks_like_js_shell(html, parsed_role_context_text):
+        return True
+
     return False
 
 
