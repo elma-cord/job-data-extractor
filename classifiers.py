@@ -1,7 +1,10 @@
+import hashlib
 import json
 import os
 import re
-from typing import Any, Dict, List
+import threading
+import time
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
@@ -17,7 +20,14 @@ from prompts import (
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
+OPENAI_TIMEOUT_S = float(os.getenv("OPENAI_TIMEOUT_S", "35"))
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
+OPENAI_RETRY_SLEEP_S = float(os.getenv("OPENAI_RETRY_SLEEP_S", "1.2"))
+
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+_cache_lock = threading.Lock()
+_response_cache: Dict[str, Any] = {}
 
 
 def clean_whitespace(text: str) -> str:
@@ -82,8 +92,9 @@ def normalize_job_title_from_list(value: str, allowed_job_titles: List[str]) -> 
     if not value_clean:
         return ""
 
+    value_lower = value_clean.lower()
     for jt in allowed_job_titles:
-        if value_clean.lower() == jt.lower():
+        if value_lower == jt.lower():
             return jt
 
     canon_value = canonical_label(value_clean)
@@ -104,6 +115,52 @@ def normalize_seniority_list(values: List[str]) -> List[str]:
     return [x for x in order if x in found][:3]
 
 
+def _cache_key(namespace: str, payload: str) -> str:
+    return f"{namespace}:{hashlib.sha1(payload.encode('utf-8')).hexdigest()}"
+
+
+def _cache_get(key: str) -> Optional[Any]:
+    with _cache_lock:
+        return _response_cache.get(key)
+
+
+def _cache_set(key: str, value: Any) -> None:
+    with _cache_lock:
+        _response_cache[key] = value
+
+
+def _call_openai_text(prompt: str) -> str:
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    last_err = None
+    for attempt in range(OPENAI_MAX_RETRIES + 1):
+        try:
+            response = client.with_options(timeout=OPENAI_TIMEOUT_S).responses.create(
+                model=OPENAI_MODEL,
+                input=prompt,
+            )
+            return clean_whitespace(response.output_text)
+        except Exception as e:
+            last_err = e
+            if attempt < OPENAI_MAX_RETRIES:
+                time.sleep(OPENAI_RETRY_SLEEP_S * (attempt + 1))
+            else:
+                raise last_err
+
+
+def _call_openai_json_cached(namespace: str, prompt: str) -> Dict[str, Any]:
+    key = _cache_key(namespace, prompt)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    text = _call_openai_text(prompt)
+    data = safe_json_loads(text)
+    _cache_set(key, data)
+    return data
+
+
 def ai_check_relevance(
     job_title: str,
     role_context_text: str,
@@ -119,8 +176,7 @@ def ai_check_relevance(
     prompt = build_relevance_prompt(job_title, role_context_text)
 
     try:
-        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
-        data = safe_json_loads(response.output_text)
+        data = _call_openai_json_cached("relevance", prompt)
         role_relevance = str(data.get("role_relevance", "") or "").strip()
         reason = str(data.get("role_relevance_reason", "") or "").strip()
 
@@ -170,8 +226,7 @@ def ai_extract_core_fields(
     )
 
     try:
-        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
-        data = safe_json_loads(response.output_text)
+        data = _call_openai_json_cached("core_fields", prompt)
 
         job_category = normalize_category_for_skills(str(data.get("job_category", "") or "").strip()) or fallback_job_category
         job_location = str(data.get("job_location", "") or "").strip() or fallback_location
@@ -233,8 +288,7 @@ def ai_extract_salary_only(
     prompt = build_salary_prompt(job_title, header_text, role_body_text)
 
     try:
-        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
-        data = safe_json_loads(response.output_text)
+        data = _call_openai_json_cached("salary_only", prompt)
 
         salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
         salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
@@ -269,8 +323,7 @@ def ai_map_job_titles_only(position_name: str, description: str, allowed_job_tit
     prompt = build_job_titles_prompt(position_name, description, allowed_job_titles)
 
     try:
-        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
-        data = safe_json_loads(response.output_text)
+        data = _call_openai_json_cached("job_titles_only", prompt)
         raw_titles = data.get("job_titles", [])
         if not isinstance(raw_titles, list):
             return []
@@ -293,8 +346,7 @@ def ai_map_seniority_only(position_name: str, description: str) -> List[str]:
     prompt = build_seniority_prompt(position_name, description)
 
     try:
-        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
-        data = safe_json_loads(response.output_text)
+        data = _call_openai_json_cached("seniority_only", prompt)
         raw = data.get("seniorities", [])
         if not isinstance(raw, list):
             return []
@@ -319,8 +371,7 @@ def ai_enrich_skills(
     prompt = build_skills_prompt(role_category, description, exact_skills, allowed_skills)
 
     try:
-        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
-        data = safe_json_loads(response.output_text)
+        data = _call_openai_json_cached("skills_only", prompt)
 
         out_category = normalize_category_for_skills(str(data.get("role_category", "") or "").strip())
         if out_category != role_category:
@@ -330,25 +381,20 @@ def ai_enrich_skills(
         if not isinstance(raw_skills, list):
             return exact_skills[:10]
 
+        allowed_lower = {s.lower(): s for s in allowed_skills}
+
         merged = []
         for sk in exact_skills:
-            exact = next((s for s in allowed_skills if s.lower() == sk.lower()), "")
+            exact = allowed_lower.get(sk.lower())
             if exact and exact not in merged:
                 merged.append(exact)
 
         for sk in raw_skills:
             sk_clean = str(sk).strip()
-            exact = next((s for s in allowed_skills if s.lower() == sk_clean.lower()), "")
+            exact = allowed_lower.get(sk_clean.lower())
             if exact and exact not in merged:
                 merged.append(exact)
 
-        filtered = []
-        allowed_lower = {s.lower(): s for s in allowed_skills}
-        for sk in merged:
-            exact = allowed_lower.get(sk.lower())
-            if exact and exact not in filtered:
-                filtered.append(exact)
-
-        return filtered[:10]
+        return merged[:10]
     except Exception:
         return exact_skills[:10]
