@@ -14,7 +14,8 @@ from prompts import (
     build_relevance_prompt,
     build_salary_prompt,
     build_seniority_prompt,
-    build_skills_prompt,
+    build_skills_additional_prompt,
+    build_skills_full_prompt,
 )
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -115,6 +116,26 @@ def normalize_seniority_list(values: List[str]) -> List[str]:
     return [x for x in order if x in found][:3]
 
 
+def normalize_remote_preferences_value(value: str) -> str:
+    value = clean_whitespace(value)
+    if not value:
+        return ""
+
+    low = normalize_quotes(value).lower()
+    if low in {"not specified", "not_specified"}:
+        return "not specified"
+
+    found = []
+    for pref in ["onsite", "hybrid", "remote"]:
+        if re.search(rf"(?<![a-z]){re.escape(pref)}(?![a-z])", low):
+            found.append(pref)
+
+    if not found:
+        return ""
+
+    return ", ".join(found)
+
+
 def _cache_key(namespace: str, payload: str) -> str:
     return f"{namespace}:{hashlib.sha1(payload.encode('utf-8')).hexdigest()}"
 
@@ -166,10 +187,12 @@ def ai_check_relevance(
     role_context_text: str,
     fallback_role_relevance: str,
     fallback_reason: str,
+    fallback_job_category: str = "",
 ) -> Dict[str, str]:
     if not client:
         return {
             "role_relevance": fallback_role_relevance,
+            "job_category": fallback_job_category,
             "role_relevance_reason": fallback_reason or "OPENAI_API_KEY missing",
         }
 
@@ -179,19 +202,24 @@ def ai_check_relevance(
         data = _call_openai_json_cached("relevance", prompt)
         role_relevance = str(data.get("role_relevance", "") or "").strip()
         reason = str(data.get("role_relevance_reason", "") or "").strip()
+        job_category = normalize_category_for_skills(str(data.get("job_category", "") or "").strip())
 
         if role_relevance not in {"Relevant", "Not relevant"}:
             role_relevance = fallback_role_relevance
         if not reason:
             reason = fallback_reason
+        if not job_category:
+            job_category = fallback_job_category
 
         return {
             "role_relevance": role_relevance,
+            "job_category": job_category,
             "role_relevance_reason": reason,
         }
     except Exception as e:
         return {
             "role_relevance": fallback_role_relevance,
+            "job_category": fallback_job_category,
             "role_relevance_reason": f"AI error: {e}",
         }
 
@@ -205,6 +233,10 @@ def ai_extract_core_fields(
     fallback_location: str,
     fallback_remote_preferences: str,
     fallback_remote_days: str,
+    fallback_salary_min: str,
+    fallback_salary_max: str,
+    fallback_salary_currency: str,
+    fallback_salary_period: str,
     fallback_visa: str,
     fallback_job_type: str,
 ) -> Dict[str, str]:
@@ -214,6 +246,10 @@ def ai_extract_core_fields(
             "job_location": fallback_location,
             "remote_preferences": fallback_remote_preferences,
             "remote_days": fallback_remote_days,
+            "salary_min": fallback_salary_min,
+            "salary_max": fallback_salary_max,
+            "salary_currency": fallback_salary_currency,
+            "salary_period": fallback_salary_period,
             "visa_sponsorship": fallback_visa,
             "job_type": fallback_job_type,
         }
@@ -233,13 +269,22 @@ def ai_extract_core_fields(
             or fallback_job_category
         )
         job_location = str(data.get("job_location", "") or "").strip() or fallback_location
-        remote_preferences = str(data.get("remote_preferences", "") or "").strip() or fallback_remote_preferences
+
+        remote_preferences = normalize_remote_preferences_value(
+            str(data.get("remote_preferences", "") or "").strip()
+        ) or fallback_remote_preferences
+
         remote_days = str(data.get("remote_days", "") or "").strip() or fallback_remote_days
+        if remote_days.lower() == "not specified":
+            remote_days = "not specified"
+
+        salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
+        salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
+        salary_currency = str(data.get("salary_currency", "") or "").strip() or fallback_salary_currency
+        salary_period = str(data.get("salary_period", "") or "").strip() or fallback_salary_period
+
         visa_sponsorship = str(data.get("visa_sponsorship", "") or "").strip()
         job_type = str(data.get("job_type", "") or "").strip()
-
-        if remote_preferences not in {"onsite", "hybrid", "remote", ""}:
-            remote_preferences = fallback_remote_preferences
 
         if visa_sponsorship not in {"yes", "no", ""}:
             visa_sponsorship = fallback_visa
@@ -247,11 +292,21 @@ def ai_extract_core_fields(
         if job_type not in {"Permanent", "FTC", "Part Time", "Freelance/Contract", ""}:
             job_type = fallback_job_type
 
+        if salary_period not in {"year", "day", "hour", "month", ""}:
+            salary_period = fallback_salary_period
+
+        if salary_currency not in {"GBP", "USD", "EUR", "CAD", ""}:
+            salary_currency = fallback_salary_currency
+
         return {
             "job_category": job_category,
             "job_location": job_location,
             "remote_preferences": remote_preferences,
             "remote_days": remote_days,
+            "salary_min": salary_min,
+            "salary_max": salary_max,
+            "salary_currency": salary_currency,
+            "salary_period": salary_period,
             "visa_sponsorship": visa_sponsorship,
             "job_type": job_type,
         }
@@ -261,6 +316,10 @@ def ai_extract_core_fields(
             "job_location": fallback_location,
             "remote_preferences": fallback_remote_preferences,
             "remote_days": fallback_remote_days,
+            "salary_min": fallback_salary_min,
+            "salary_max": fallback_salary_max,
+            "salary_currency": fallback_salary_currency,
+            "salary_period": fallback_salary_period,
             "visa_sponsorship": fallback_visa,
             "job_type": fallback_job_type,
         }
@@ -353,46 +412,91 @@ def ai_map_seniority_only(position_name: str, description: str) -> List[str]:
         return []
 
 
-def ai_enrich_skills(
+def ai_generate_skills_full(
     role_category: str,
     description: str,
-    exact_skills: List[str],
+    candidate_skills: List[str],
     allowed_skills: List[str],
 ) -> List[str]:
     if not client or not role_category or not description or not allowed_skills:
-        return exact_skills[:10]
+        return []
 
     role_category = normalize_category_for_skills(role_category)
     if role_category not in {"T&P", "NonT&P"}:
-        return exact_skills[:10]
+        return []
 
-    prompt = build_skills_prompt(role_category, description, exact_skills, allowed_skills)
+    prompt = build_skills_full_prompt(
+        role_category=role_category,
+        description=description,
+        candidate_skills=candidate_skills,
+        allowed_skills=allowed_skills,
+    )
 
     try:
-        data = _call_openai_json_cached("skills_only", prompt)
+        data = _call_openai_json_cached("skills_full", prompt)
 
         out_category = normalize_category_for_skills(str(data.get("role_category", "") or "").strip())
         if out_category != role_category:
-            return exact_skills[:10]
+            return []
 
         raw_skills = data.get("skills", [])
         if not isinstance(raw_skills, list):
-            return exact_skills[:10]
+            return []
 
         allowed_lower = {s.lower(): s for s in allowed_skills}
-
-        merged = []
-        for sk in exact_skills:
-            exact = allowed_lower.get(sk.lower())
-            if exact and exact not in merged:
-                merged.append(exact)
-
+        out = []
         for sk in raw_skills:
-            sk_clean = str(sk).strip()
-            exact = allowed_lower.get(sk_clean.lower())
-            if exact and exact not in merged:
-                merged.append(exact)
+            exact = allowed_lower.get(str(sk).strip().lower())
+            if exact and exact not in out:
+                out.append(exact)
 
-        return merged[:10]
+        return out[:10]
     except Exception:
-        return exact_skills[:10]
+        return []
+
+
+def ai_generate_additional_skills(
+    role_category: str,
+    description: str,
+    existing_skills: List[str],
+    candidate_skills: List[str],
+    allowed_skills: List[str],
+) -> List[str]:
+    if not client or not role_category or not description or not allowed_skills:
+        return []
+
+    role_category = normalize_category_for_skills(role_category)
+    if role_category not in {"T&P", "NonT&P"}:
+        return []
+
+    prompt = build_skills_additional_prompt(
+        role_category=role_category,
+        description=description,
+        existing_skills=existing_skills,
+        candidate_skills=candidate_skills,
+        allowed_skills=allowed_skills,
+    )
+
+    try:
+        data = _call_openai_json_cached("skills_additional", prompt)
+
+        out_category = normalize_category_for_skills(str(data.get("role_category", "") or "").strip())
+        if out_category != role_category:
+            return []
+
+        raw_skills = data.get("additional_skills", [])
+        if not isinstance(raw_skills, list):
+            return []
+
+        allowed_lower = {s.lower(): s for s in allowed_skills}
+        existing_lower = {s.lower() for s in existing_skills}
+
+        out = []
+        for sk in raw_skills:
+            exact = allowed_lower.get(str(sk).strip().lower())
+            if exact and exact.lower() not in existing_lower and exact not in out:
+                out.append(exact)
+
+        return out[:5]
+    except Exception:
+        return []
