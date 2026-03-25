@@ -20,9 +20,9 @@ HEADERS = {
 }
 
 REQUEST_TIMEOUT = 20
-PLAYWRIGHT_TIMEOUT_MS = 20000
-PLAYWRIGHT_NETWORKIDLE_MS = 6000
-PLAYWRIGHT_POST_LOAD_WAIT_MS = 1200
+PLAYWRIGHT_TIMEOUT_MS = 18000
+PLAYWRIGHT_NETWORKIDLE_MS = 4500
+PLAYWRIGHT_POST_LOAD_WAIT_MS = 900
 
 # Domains where raw HTML is usually enough and Playwright is often wasteful
 NEVER_RENDER_DOMAINS = {
@@ -138,7 +138,6 @@ def normalize_quotes(text: str) -> str:
         .replace("\u2013", "-")
         .replace("\u2014", "-")
         .replace("•", "-")
-        .replace("-", "-")
     )
 
 
@@ -244,13 +243,14 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
             ]
             for selector in job_like_selectors:
                 try:
-                    page.locator(selector).first.wait_for(timeout=800)
+                    page.locator(selector).first.wait_for(timeout=600)
                     break
                 except Exception:
                     pass
 
             try:
-                page.evaluate("""
+                page.evaluate(
+                    """
                     async () => {
                         const body = document.body;
                         if (!body) return;
@@ -261,12 +261,13 @@ def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
                         if (totalHeight < 2200) return;
 
                         window.scrollBy(0, 1200);
-                        await new Promise(r => setTimeout(r, 250));
+                        await new Promise(r => setTimeout(r, 220));
                         window.scrollBy(0, 1200);
-                        await new Promise(r => setTimeout(r, 250));
+                        await new Promise(r => setTimeout(r, 220));
                         window.scrollTo(0, 0);
                     }
-                """)
+                    """
+                )
             except Exception:
                 pass
 
@@ -312,6 +313,9 @@ def looks_like_js_shell(html: str, text: str) -> bool:
         "access denied",
         "verify you are human",
         "captcha",
+        "checking your browser",
+        "cf-challenge",
+        "cloudflare",
     ]
     if any(sig in compact_text for sig in shell_signals):
         return True
@@ -491,13 +495,17 @@ def extract_structured_fields(soup: BeautifulSoup) -> Dict[str, Any]:
                 if isinstance(item, dict):
                     addr = item.get("address", {})
                     if isinstance(addr, dict):
-                        piece = ", ".join([
-                            p for p in [
-                                first_nonempty(addr.get("addressLocality")),
-                                first_nonempty(addr.get("addressRegion")),
-                                first_nonempty(addr.get("addressCountry")),
-                            ] if p
-                        ])
+                        piece = ", ".join(
+                            [
+                                p
+                                for p in [
+                                    first_nonempty(addr.get("addressLocality")),
+                                    first_nonempty(addr.get("addressRegion")),
+                                    first_nonempty(addr.get("addressCountry")),
+                                ]
+                                if p
+                            ]
+                        )
                         if piece:
                             parts.append(piece)
             data["location_raw"] = ", ".join(parts)
@@ -1152,15 +1160,19 @@ def extract_best_content(html: str) -> Dict[str, Any]:
     role_body_text = normalize_common_location_aliases(role_body_text)
 
     role_context_text = clean_whitespace("\n".join([header_text, role_body_text]))
-    all_page_text = clean_whitespace("\n".join([
-        title_tag_text,
-        structured.get("title", ""),
-        structured.get("company_name", ""),
-        structured.get("location_raw", ""),
-        structured_description_text,
-        json_blob_text,
-        visible_text,
-    ]))
+    all_page_text = clean_whitespace(
+        "\n".join(
+            [
+                title_tag_text,
+                structured.get("title", ""),
+                structured.get("company_name", ""),
+                structured.get("location_raw", ""),
+                structured_description_text,
+                json_blob_text,
+                visible_text,
+            ]
+        )
+    )
     all_page_text = normalize_common_location_aliases(all_page_text)
 
     return {
