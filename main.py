@@ -50,7 +50,6 @@ from validators import (
     snap_salary_value,
 )
 
-
 INPUT_URLS_FILE = "job_urls.txt"
 OUTPUT_CSV_FILE = "results.csv"
 
@@ -60,9 +59,6 @@ TP_SKILLS_CSV = "predefined_tp_skills.csv"
 NONTP_SKILLS_CSV = "predefined_nontp_skills.csv"
 JOB_TITLES_CSV = "predefined_job_titles.csv"
 
-# -------------------------
-# Speed settings
-# -------------------------
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "6"))
 FAST_MODE = os.getenv("FAST_MODE", "1").strip().lower() in {"1", "true", "yes", "y"}
 MIN_EXACT_SKILLS_TO_SKIP_AI = int(os.getenv("MIN_EXACT_SKILLS_TO_SKIP_AI", "3"))
@@ -70,8 +66,6 @@ MIN_EXACT_SKILLS_TO_SKIP_AI = int(os.getenv("MIN_EXACT_SKILLS_TO_SKIP_AI", "3"))
 
 @dataclass
 class JobResult:
-    job_url: str = ""
-    job_title: str = ""
     role_relevance: str = ""
     role_relevance_reason: str = ""
     job_category: str = ""
@@ -104,10 +98,6 @@ class JobResult:
     skill_8: str = ""
     skill_9: str = ""
     skill_10: str = ""
-
-    source_method: str = ""
-    status: str = ""
-    notes: str = ""
 
 
 def clean_whitespace(text: str) -> str:
@@ -209,7 +199,13 @@ def clean_job_title(raw_title: str) -> str:
     return clean_whitespace(title)
 
 
-def extract_best_title_candidate(soup: BeautifulSoup, structured_title: str, title_tag_text: str, header_text: str, role_body_text: str) -> str:
+def extract_best_title_candidate(
+    soup: BeautifulSoup,
+    structured_title: str,
+    title_tag_text: str,
+    header_text: str,
+    role_body_text: str,
+) -> str:
     candidates: List[str] = []
 
     if structured_title:
@@ -317,6 +313,13 @@ def should_run_seniority_ai(clean_title: str, role_text: str) -> bool:
     return len(fallback) == 0
 
 
+def blank_result_with_relevance(role_relevance: str, reason: str) -> JobResult:
+    return JobResult(
+        role_relevance=role_relevance,
+        role_relevance_reason=reason,
+    )
+
+
 def process_url(
     url: str,
     allowed_locations: List[str],
@@ -325,8 +328,6 @@ def process_url(
     nontp_skills: List[str],
     allowed_job_titles: List[str],
 ) -> JobResult:
-    result = JobResult(job_url=url)
-
     html, status = fetch_html(url)
     source_method = "html"
     notes = [status]
@@ -344,10 +345,10 @@ def process_url(
         pw_html, pw_status = fetch_with_playwright(url)
         notes.append(pw_status)
         if not pw_html:
-            result.status = "failed"
-            result.source_method = "none"
-            result.notes = " | ".join(notes)
-            return result
+            return blank_result_with_relevance(
+                role_relevance="Not relevant",
+                reason="Could not fetch or extract job content.",
+            )
         html = pw_html
         source_method = "playwright"
         parsed = extract_best_content(html)
@@ -381,14 +382,17 @@ def process_url(
     fallback_description = clean_whitespace(role_body_text)
 
     substantial_role_text = len(clean_whitespace(role_body_text)) >= 700
-    fallback_role_relevance = "Relevant" if ((clean_title and is_relevant_by_rules(clean_title, role_body_text, header_text)) or substantial_role_text) else "Not relevant"
+    fallback_role_relevance = (
+        "Relevant"
+        if ((clean_title and is_relevant_by_rules(clean_title, role_body_text, header_text)) or substantial_role_text)
+        else "Not relevant"
+    )
     fallback_reason = "Fallback classification based on extracted title and role text."
 
     skip_rel_ai, rel_value, rel_reason = should_skip_relevance_ai(clean_title, role_body_text, header_text)
     if skip_rel_ai:
-        result.role_relevance = rel_value
-        result.role_relevance_reason = rel_reason
-        notes.append("relevance_ai_skipped_rule_clear")
+        role_relevance = rel_value
+        role_relevance_reason = rel_reason
     else:
         relevance = ai_check_relevance(
             job_title=clean_title,
@@ -396,24 +400,19 @@ def process_url(
             fallback_role_relevance=fallback_role_relevance,
             fallback_reason=fallback_reason,
         )
-        result.role_relevance = relevance.get("role_relevance", "") or fallback_role_relevance
-        result.role_relevance_reason = relevance.get("role_relevance_reason", "") or fallback_reason
-        notes.append("relevance_ai_called")
+        role_relevance = relevance.get("role_relevance", "") or fallback_role_relevance
+        role_relevance_reason = relevance.get("role_relevance_reason", "") or fallback_reason
 
-    result.job_title = clean_title
-    result.source_method = source_method
-    result.status = "ok"
+    if role_relevance == "Not relevant":
+        return blank_result_with_relevance(
+            role_relevance=role_relevance,
+            reason=role_relevance_reason,
+        )
 
-    if result.role_relevance == "Not relevant" and substantial_role_text and (
-        is_relevant_by_rules(clean_title, role_body_text, header_text) or is_relevant_by_rules(role_body_text[:300], role_body_text, header_text)
-    ):
-        result.role_relevance = "Relevant"
-        result.role_relevance_reason = "Rule-based override: extracted title and role description indicate an allowed relevant role."
-        notes.append("relevance_rule_override")
-
-    if result.role_relevance == "Not relevant":
-        result.notes = " | ".join(notes + ["stopped_after_relevance"])
-        return result
+    result = JobResult(
+        role_relevance=role_relevance,
+        role_relevance_reason=role_relevance_reason,
+    )
 
     fallback_job_category = "T&P" if is_tp_by_rules(clean_title, role_body_text) else "NonT&P"
 
@@ -436,7 +435,6 @@ def process_url(
             fallback_visa=fallback_visa,
             fallback_job_type=fallback_job_type,
         )
-        notes.append("core_fields_ai_called")
     else:
         core_fields = {
             "job_category": fallback_job_category,
@@ -446,7 +444,6 @@ def process_url(
             "visa_sponsorship": fallback_visa,
             "job_type": fallback_job_type,
         }
-        notes.append("core_fields_ai_skipped_rule_strong")
 
     result.job_category = normalize_category_for_skills(core_fields.get("job_category", "")) or fallback_job_category
 
@@ -477,7 +474,6 @@ def process_url(
             fallback_salary_currency=fallback_salary_currency,
             fallback_salary_period=fallback_salary_period,
         )
-        notes.append("salary_ai_called")
     else:
         salary_fields = {
             "salary_min": fallback_salary_min,
@@ -485,7 +481,6 @@ def process_url(
             "salary_currency": fallback_salary_currency,
             "salary_period": fallback_salary_period,
         }
-        notes.append("salary_ai_skipped_no_anchor")
 
     result.salary_min = salary_fields.get("salary_min", "") or fallback_salary_min
     result.salary_max = salary_fields.get("salary_max", "") or fallback_salary_max
@@ -531,11 +526,9 @@ def process_url(
             description=strip_html(result.job_description) or role_body_text,
             allowed_job_titles=allowed_job_titles,
         )
-        notes.append("titles_ai_called")
     else:
         exact_title = normalize_job_title_from_list(clean_title, allowed_job_titles)
         job_titles = [exact_title] if exact_title else []
-        notes.append("titles_ai_skipped_exact_title")
 
     job_titles = postprocess_job_titles(
         job_title=clean_title,
@@ -554,10 +547,8 @@ def process_url(
             position_name=clean_title,
             description=role_text_for_seniority,
         )
-        notes.append("seniority_ai_called")
     else:
         seniorities = fallback_seniorities(clean_title, role_text_for_seniority)
-        notes.append("seniority_ai_skipped_title_clear")
 
     if not seniorities:
         seniorities = fallback_seniorities(clean_title, role_text_for_seniority)
@@ -580,7 +571,6 @@ def process_url(
 
     if FAST_MODE and len(exact_skills) >= MIN_EXACT_SKILLS_TO_SKIP_AI:
         final_skills = exact_skills[:10]
-        notes.append("skills_ai_skipped_exact_skills_strong")
     else:
         final_skills = ai_enrich_skills(
             role_category=result.job_category,
@@ -588,7 +578,6 @@ def process_url(
             exact_skills=exact_skills,
             allowed_skills=skill_list,
         )
-        notes.append("skills_ai_called")
 
     allowed_lower = {s.lower(): s for s in skill_list}
     final_skills = [
@@ -609,24 +598,6 @@ def process_url(
     result.skill_8 = padded_skills[7]
     result.skill_9 = padded_skills[8]
     result.skill_10 = padded_skills[9]
-
-    note_parts = notes + [
-        "fast_mode_on" if FAST_MODE else "fast_mode_off",
-        f"max_workers_{MAX_WORKERS}",
-        "parallel_processing_enabled",
-        "conditional_ai_calls_enabled",
-        "salary_snapped_to_closest_allowed_value",
-        "remote_days_explicit_evidence_only",
-    ]
-    if len(job_titles) == 0:
-        note_parts.append("job_titles_empty")
-    else:
-        note_parts.append("job_titles_present")
-    if len(exact_skills) > 0:
-        note_parts.append("skills_exact_found")
-    else:
-        note_parts.append("skills_exact_none")
-    result.notes = " | ".join(note_parts)
 
     return result
 
@@ -687,12 +658,11 @@ def main() -> None:
                 row = future.result()
             except Exception as e:
                 row = JobResult(
-                    job_url=urls[idx - 1],
-                    status="failed",
-                    notes=f"unhandled_error: {e}"
+                    role_relevance="Not relevant",
+                    role_relevance_reason=f"Unhandled error: {e}",
                 )
             results_map[idx] = row
-            print(f"[{done_count}/{len(urls)}] Finished index {idx}: {row.job_url}")
+            print(f"[{done_count}/{len(urls)}] Finished index {idx}")
 
     results = [results_map[i] for i in sorted(results_map.keys())]
     write_results(results, OUTPUT_CSV_FILE)
