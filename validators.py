@@ -61,6 +61,26 @@ def normalize_category_for_skills(job_category: str) -> str:
     return ""
 
 
+def normalize_remote_preferences_value(value: str) -> str:
+    value = clean_whitespace(value)
+    if not value:
+        return ""
+
+    low = normalize_quotes(value).lower()
+    if low in {"not specified", "not_specified"}:
+        return "not specified"
+
+    found = []
+    for pref in ["onsite", "hybrid", "remote"]:
+        if re.search(rf"(?<![a-z]){re.escape(pref)}(?![a-z])", low):
+            found.append(pref)
+
+    if not found:
+        return ""
+
+    return ", ".join(found)
+
+
 def build_location_lookup(allowed_locations: List[str]) -> Dict[str, str]:
     city_lookup = {}
     for loc in allowed_locations:
@@ -232,18 +252,18 @@ def detect_remote_preferences_rule_based(text: str) -> str:
     low = normalize_quotes("\n".join(lines)).lower()
 
     if not low.strip():
-        return ""
+        return "not specified"
 
     remote_signal = bool(re.search(
-        r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote enabled\b|\bremote-enabled\b|\bremote working\b|\bwork from home\b|\bwfh\b|\bremote uk\b|\bwork location\b.*\bremote\b",
+        r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote enabled\b|\bremote-enabled\b|\bremote working\b|\bwork from home\b|\bwfh\b|\bremote uk\b|\bwork location\b.*\bremote\b|\bremote first\b|\bremote-first\b",
         low
     ))
     hybrid_signal = bool(re.search(
-        r"\bhybrid\b|\bagile working\b|\boffice attendance requirement\b|\b\d+\s*-\s*\d+\s+days?\s+per week\b.*\boffice\b|\b\d+\s+days?\s+per week\b.*\boffice\b|\b\d{1,3}%\s+of your working week must be office based\b|\bpartly remote\b|\bpartially remote\b",
+        r"\bhybrid\b|\bagile working\b|\boffice attendance requirement\b|\b\d+\s*-\s*\d+\s+days?\s+per week\b.*\boffice\b|\b\d+\s+days?\s+per week\b.*\boffice\b|\b\d{1,3}%\s+of your working week must be office based\b|\bpartly remote\b|\bpartially remote\b|\bsplit between home and office\b",
         low
     ))
     onsite_signal = bool(re.search(
-        r"\bonsite\b|\bon-site\b|\bon site\b|\bin office\b|\bin-office\b|\boffice based\b|\boffice-based\b",
+        r"\bonsite\b|\bon-site\b|\bon site\b|\bin office\b|\bin-office\b|\boffice based\b|\boffice-based\b|\bsite based\b|\bon client site\b",
         low
     ))
 
@@ -257,19 +277,18 @@ def detect_remote_preferences_rule_based(text: str) -> str:
         elif pct > 0:
             hybrid_signal = True
 
-    if re.search(r"\bremote working within the united kingdom\b", low):
-        return "remote"
-
+    found = []
+    if onsite_signal:
+        found.append("onsite")
     if hybrid_signal:
-        return "hybrid"
-    if remote_signal and not onsite_signal:
-        return "remote"
-    if onsite_signal and not remote_signal:
-        return "onsite"
-    if onsite_signal and remote_signal:
-        return "hybrid"
+        found.append("hybrid")
+    if remote_signal:
+        found.append("remote")
 
-    return ""
+    if not found:
+        return "not specified"
+
+    return ", ".join(found)
 
 
 def has_explicit_remote_days_evidence(text: str) -> bool:
@@ -297,11 +316,11 @@ def _extract_remote_days_from_text(text: str) -> str:
     low = re.sub(r"\s+", " ", low)
 
     if re.search(r"\bfully remote\b", low):
-        return ""
+        return "not specified"
     if re.search(r"\bremote working within the united kingdom\b", low):
-        return ""
+        return "not specified"
     if re.search(r"\buk remote\b", low):
-        return ""
+        return "not specified"
 
     office_patterns = [
         r"\boffice attendance requirement(?: of)?(?: approx\.?)?\s*(\d)\s*-\s*(\d)\s+days?\s+per week\b",
@@ -320,8 +339,8 @@ def _extract_remote_days_from_text(text: str) -> str:
             continue
         groups = [int(g) for g in m.groups() if g is not None]
         if len(groups) == 2:
-            office_max = max(groups)
-            return str(max(0, 5 - office_max))
+            office_min = min(groups)
+            return str(max(0, 5 - office_min))
         if len(groups) == 1:
             return str(max(0, 5 - groups[0]))
 
@@ -332,6 +351,7 @@ def _extract_remote_days_from_text(text: str) -> str:
             office_days = round((pct / 100.0) * 5)
             office_days = max(1, min(5, office_days))
             return str(max(0, 5 - office_days))
+        return "not specified"
 
     remote_patterns = [
         r"\b(\d)\s*-\s*(\d)\s+days?\s+(?:per week\s+)?(?:from home|remote|wfh)\b",
@@ -345,7 +365,7 @@ def _extract_remote_days_from_text(text: str) -> str:
             continue
         groups = [int(g) for g in m.groups() if g is not None]
         if len(groups) == 2:
-            return str(min(groups))
+            return str(max(groups))
         if len(groups) == 1:
             return str(groups[0])
 
@@ -359,17 +379,20 @@ def detect_remote_days_rule_based(text: str, remote_prefs: str = "") -> str:
     ])
 
     if not has_explicit_remote_days_evidence(candidate_text):
+        prefs_low = normalize_quotes(remote_prefs or "").lower()
+        if prefs_low == "onsite":
+            return "not specified"
         return ""
 
     days = _extract_remote_days_from_text(candidate_text)
     if days:
         return days
 
-    prefs_low = (remote_prefs or "").lower()
-    if prefs_low == "onsite":
-        return ""
+    prefs_low = normalize_quotes(remote_prefs or "").lower()
+    if "onsite" in prefs_low and "remote" not in prefs_low and "hybrid" not in prefs_low:
+        return "not specified"
 
-    return ""
+    return "not specified"
 
 
 def normalize_currency_symbol(sym: str) -> str:
@@ -784,25 +807,20 @@ def _requires_non_english_language(text: str) -> bool:
 def _location_rules_allow(text: str) -> bool:
     low = normalize_quotes(text).lower()
 
-    # strong disallowed remote-region signals
     if re.search(r"\b(remote apac|apac only|latam only|remote latam|north america|usa only|us only|canada only)\b", low):
         return False
 
-    # global remote may be allowed if not region-restricted
     if re.search(r"\b(worldwide|global remote|remote worldwide|anywhere in the world)\b", low):
         return True
 
-    # remote europe / emea allowed
     if re.search(r"\bremote europe\b|\bremote emea\b|\bemea remote\b|\beurope remote\b", low):
         return True
 
-    # ireland only if remote
     ireland_present = bool(re.search(r"\bireland\b|\bdublin\b|\bcork\b|\bgalway\b", low))
     if ireland_present:
         prefs = detect_remote_preferences_rule_based(text)
-        return prefs == "remote"
+        return "remote" in prefs.lower()
 
-    # specific continental europe countries are not allowed unless remote europe/emEA already matched above
     europe_country_patterns = [
         r"\bgermany\b", r"\bfrance\b", r"\bspain\b", r"\bitaly\b", r"\bnetherlands\b",
         r"\bbelgium\b", r"\bportugal\b", r"\bpoland\b", r"\bsweden\b", r"\bdenmark\b",
@@ -812,7 +830,6 @@ def _location_rules_allow(text: str) -> bool:
     if any(re.search(p, low) for p in europe_country_patterns):
         return False
 
-    # usa/canada/non-allowed explicit regions
     non_allowed_patterns = [
         r"\busa\b", r"\bunited states\b", r"\bus-based\b", r"\bcanada\b",
         r"\bnorth america\b", r"\bnew york\b", r"\bcalifornia\b", r"\btoronto\b",
@@ -822,7 +839,6 @@ def _location_rules_allow(text: str) -> bool:
     if any(re.search(p, low) for p in non_allowed_patterns):
         return False
 
-    # UK accepted
     uk_patterns = [
         r"\buk\b", r"\bunited kingdom\b", r"\bgreat britain\b", r"\bengland\b",
         r"\bscotland\b", r"\bwales\b", r"\bnorthern ireland\b", r"\blondon\b",
@@ -832,9 +848,8 @@ def _location_rules_allow(text: str) -> bool:
     if any(re.search(p, low) for p in uk_patterns):
         return True
 
-    # pure remote with no excluded-region evidence can pass
     prefs = detect_remote_preferences_rule_based(text)
-    if prefs == "remote" and not any(re.search(p, low) for p in non_allowed_patterns):
+    if "remote" in prefs.lower() and not any(re.search(p, low) for p in non_allowed_patterns):
         return True
 
     return False
@@ -862,27 +877,21 @@ def is_relevant_by_rules(job_title: str, role_text: str, header_text: str = "") 
         return False
 
     allowed_patterns = [
-        # HR / talent / people
         r"\btalent acquisition\b", r"\brecruiter\b", r"\brecruitment\b",
         r"\bhuman resources\b", r"\bhead of hr\b", r"\bhr manager\b",
         r"\bpeople ops\b", r"\bpeople operations\b", r"\bpeople partner\b",
-        # account / customer
         r"\baccount manager\b", r"\baccount executive\b", r"\baccount director\b",
         r"\bcustomer success\b", r"\bcustomer success manager\b", r"\bcsm\b",
         r"\brenewals\b", r"\bclient services\b", r"\bcustomer operations\b",
         r"\bcustomer support\b", r"\bimplementation manager\b", r"\bpartnerships\b",
-        # business / ops / PMO
         r"\bbusiness analyst\b", r"\bbusiness operations\b", r"\boperations\b",
         r"\bchange manager\b", r"\btransformation\b", r"\bpmo\b",
         r"\bprogramme manager\b", r"\bprogram manager\b", r"\bproject manager\b",
         r"\bscrum master\b", r"\bchief of staff\b", r"\bexecutive assistant\b",
-        # finance / legal / risk
         r"\brisk\b", r"\bcompliance\b", r"\blegal\b", r"\bfinance\b",
         r"\baccounting\b", r"\bfp&a\b", r"\brevops\b", r"\bsales operations\b",
-        # marketing
         r"\bmarketing\b", r"\bseo\b", r"\bpr\b", r"\bcommunications\b",
         r"\bproduct marketing\b", r"\bgrowth marketing\b", r"\bperformance marketing\b",
-        # technical
         r"\bengineer\b", r"\bdeveloper\b", r"\barchitect\b", r"\bdevops\b",
         r"\bqa\b", r"\bproduct manager\b", r"\bproduct owner\b",
         r"\bdesigner\b", r"\bux\b", r"\bui\b", r"\bdata\b",
