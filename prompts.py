@@ -3,24 +3,31 @@ def build_relevance_prompt(job_title: str, role_context_text: str) -> str:
 Return valid JSON only:
 {{
   "role_relevance": "Relevant" or "Not relevant",
+  "job_category": "T&P" or "NonT&P",
   "role_relevance_reason": "short reason"
 }}
 
-You are classifying whether a job should be kept for further processing.
+You are the FIRST screening step for a recruiting workflow.
 
-Your decision must be strict, accurate, and grounded in the actual job title + job description.
+You will receive:
+1. a job title
+2. a job description / role context
+
+Your tasks:
+1. Decide whether the role is Relevant or Not relevant
+2. Decide whether the role is T&P or NonT&P
+3. Give a concise reason
 
 IMPORTANT:
-- This is the FIRST screening step.
-- Decide only whether the job is Relevant or Not relevant.
-- If uncertain, prefer the most evidence-based decision from the title and description.
-- Do not guess based on company type alone.
-- Do not use footer text, navigation text, legal text, cookie text, or unrelated company marketing text.
+- If a role is Not relevant, the workflow will stop after this step.
+- Be strict, accurate, and grounded in the actual title + description.
+- Ignore cookie banners, footers, legal boilerplate, privacy text, marketing text, navigation text, partner lists, and unrelated company text.
+- Do not guess from company name alone.
 
-RELEVANT ROLES
-Relevant roles match any in this list or close synonyms/specializations:
+RELEVANT ROLE FAMILIES
+Relevant roles include these exact families and close synonyms/specialisations:
 
-Account Director, Account Executive, AI Engineer, Automation Engineer, Back End, BI Developer, Big Data Engineer, Brand Marketing, Business Analyst, Business Development Manager, Business Operations, CDO, CFO, Chief of Staff, CIO, CLO, Cloud Engineer, CMO, Computer Vision Engineer, Content Marketing, COO, Copywriting, CPO, CRM Developer, CRM Manager, CRO, CSM / Account Manager, CSO, CTO, Customer Operations, Customer Service Rep, Customer Support, Data Architect, Data Engineer, Data Scientist, Data / Insight Analyst, Database Engineer, Deep Learning Engineer, Demand / Lead Generation, Developer in Test, DevOps Engineer, Digital Marketing, Embedded Developer, Engineering Manager, Events & Community, Executive Assistant, Finance / Accounting, Founder, FP&A, Front End, Full Stack, Games Designer, Games Developer, Generalist Marketing, Graphic Designer, Graphics Developer, Growth Marketing, Head of Customer, Head of Data, Head of Design, Head of Engineering, Head of Finance, Head of HR, Head of Infrastructure, Head of Marketing, Head of Operations, Head of Product, Head of QA, Head of Sales, Human Resources, Implementation Manager, Integration Developer, Legal, Machine Learning Engineer, Marketing Analyst, Mobile Developer, Network Engineer, Operations, Partnerships, Penetration Tester, People Ops, Performance Marketing, PR / Communications, Product Manager, Product Marketing, Product Owner, Project Manager, QA Automation Tester, QA Manual Tester, Quality Assurance, Quantitative Developer, Renewals Manager, Research Engineer, RevOps, Risk & Compliance, Sales Engineer, Sales Operations, Scrum Master, SDR / BDR, Security, Security Engineer, SEO Marketing, Site Reliability Engineer, Social Media Marketing, Solutions Engineer, Support Engineer, System Administrator, System Engineer, Talent Acquisition, Technical Architect, Technical Director, Technical Writer, Testing Manager, UI Designer, UI/UX Designer, UX Designer, UX Researcher, Videography, VP of Engineering.
+Account Director, Account Executive, AI Engineer, Automation Engineer, Back End, BI Developer, Big Data Engineer, Brand Marketing, Business Analyst, Business Development Manager, Business Operations, CDO, CFO, Chief of Staff, CIO, CLO, Cloud Engineer, CMO, Computer Vision Engineer, Content Marketing, COO, Copywriting, CPO, CRM Developer, CRM Manager, CRO, CSM / Account Manager, CSO, CTO, Customer Operations, Customer Service Representative, Customer Support, Data Architect, Data Engineer, Data Scientist, Data / Insight Analyst, Database Engineer, Deep Learning Engineer, Demand / Lead Generation, Developer in Test, DevOps Engineer, Digital Marketing, Embedded Developer, Engineering Manager, Events and Community, Executive Assistant, Finance / Accounting, Founder, FP&A, Front End, Full Stack, Games Designer, Games Developer, Generalist Marketing, Graphic Designer, Graphics Developer, Growth Marketing, Head of Customer, Head of Data, Head of Design, Head of Engineering, Head of Finance, Head of HR, Head of Infrastructure, Head of Marketing, Head of Operations, Head of Product, Head of QA, Head of Sales, Human Resources, Implementation Manager, Integration Developer, Legal, Machine Learning Engineer, Marketing Analyst, Mobile Developer, Network Engineer, Operations, Partnerships, Penetration Tester, People Ops, Performance Marketing, PR / Communications, Product Manager, Product Marketing, Product Owner, Project Manager, QA Automation Tester, QA Manual Tester, Quality Assurance, Quantitative Developer, Renewals Manager, Research Engineer, RevOps, Risk and Compliance, Sales Engineer, Sales Operations, Scrum Master, SDR / BDR, Security, Security Engineer, SEO Marketing, Site Reliability Engineer, Social Media Marketing, Solutions Engineer, Support Engineer, System Administrator, System Engineer, Talent Acquisition, Technical Architect, Technical Director, Technical Writer, Testing Manager, UI Designer, UI/UX Designer, UX Designer, UX Researcher, Videography, VP of Engineering.
 
 ALSO TREAT THESE AS RELEVANT
 - Internal recruitment / TA / HR / People roles
@@ -73,12 +80,17 @@ LANGUAGE RULE
 - Jobs requiring English only, or not mentioning another mandatory language, can still be Relevant.
 - Do not reject a job just because another language is described as a bonus/preferred unless it is clearly required.
 
+T&P VS NonT&P
+- T&P includes software development, engineering, product management, data science, data engineering, IT, UX/UI, QA, DevOps, infrastructure, network, security, support engineering, cloud, systems, solutions engineering, technical architecture, and closely related technical/product roles.
+- NonT&P includes other relevant business roles such as HR, talent, people, operations, PMO, programme, project, transformation, finance, accounting, legal, risk, compliance, marketing, partnerships, executive assistant, chief of staff, account / customer / renewals / implementation roles.
+
 DECISION ORDER
 1. Identify likely role family from title and description.
 2. Identify location and remote setup from the description.
 3. Apply the location rules.
 4. Apply the language rule.
-5. Return final relevance result.
+5. If Relevant, classify T&P or NonT&P.
+6. Return final result.
 
 REASON RULES
 - Keep the reason short and concrete.
@@ -94,7 +106,7 @@ Position name:
 {job_title}
 
 Description:
-{role_context_text[:14000]}
+{role_context_text[:16000]}
 """.strip()
 
 
@@ -104,78 +116,165 @@ def build_core_fields_prompt(
     role_body_text: str,
     allowed_locations: list[str],
 ) -> str:
-    location_list_text = "\n".join(allowed_locations[:2000])
+    location_list_text = "\n".join(allowed_locations[:2500])
 
     return f"""
 Return valid JSON only:
 {{
-  "job_category": "T&P" or "NonT&P",
+  "job_category": "T&P" or "NonT&P" or "",
   "job_location": "",
-  "remote_preferences": "onsite|hybrid|remote|",
+  "remote_preferences": "",
   "remote_days": "",
+  "salary_min": "",
+  "salary_max": "",
+  "salary_currency": "",
+  "salary_period": "",
   "visa_sponsorship": "yes|no|",
   "job_type": "Permanent|FTC|Part Time|Freelance/Contract|"
 }}
 
-You will receive a relevant job only. Extract the core structured fields carefully.
+You will receive a relevant job only.
+
+Perform the following tasks carefully.
+
+1. Position Location
+a) Read the entire description to find the job’s work location.
+b) Focus on locations near keywords like: "location:", "based in", "office in", "work location", "remote in", "country", "city", "based at".
+c) If multiple locations appear, select the most specific one (city/town over region/country).
+d) Match exactly one entry from the provided list of acceptable normalized locations where possible.
+e) If the extracted location does not exactly exist in the list, select the closest broader location.
+f) If no match is found, return "".
+
+2. Position Remote Preferences
+a) Extract all remote working preferences anywhere in the description.
+b) Normalize all variants of onsite as exactly onsite.
+c) Normalize all hybrid variants as exactly hybrid.
+d) Normalize all remote variants as exactly remote.
+e) List extracted preferences in this order only: onsite, hybrid, remote.
+f) Separate multiple preferences with comma + space.
+g) If none of these appear, return "not specified".
+h) It is valid to return combinations such as:
+   - onsite, hybrid
+   - hybrid, remote
+   - onsite, remote
+   - onsite, hybrid, remote
+i) Do not collapse multiple clearly supported preferences into one.
+
+3. Remote Days
+Return only:
+- the highest number of remote work days in a 5-day week, as a string number, or
+- "not specified"
 
 Rules:
+a) Return a number only if remote/office days are explicitly stated.
+b) If a range is given for remote days, return the highest number.
+c) If office days are stated, calculate remote days as 5 - office days. For a range, return the highest possible remote days.
+d) If text says fully remote / remote every day, return "not specified".
+e) If no remote work is allowed, return "not specified".
+f) If days are mentioned but unclear whether they are remote or office days, return "not specified".
+g) Examples:
+   - 2 days in office => 3
+   - 1-2 days in office => 4
+   - 2-3 remote days => 3
+   - 60% office based => 2
 
-1. job_category
-- T&P = software, engineering, data, AI, ML, IT, infrastructure, cloud, network, devops, security, QA, product, UX/UI, systems, technical support, solutions engineering, technical architecture
-- NonT&P = other relevant business roles such as HR, people, talent, operations, finance, accounting, legal, risk, compliance, marketing, partnerships, customer/account roles, PMO/project/programme/change roles, executive assistant, chief of staff
-- IT support / infrastructure / support engineering roles should be T&P
-- PMO / programme / operations / people / finance / legal / account / customer roles should usually be NonT&P
+4. Salary
+a) Extract minimum and maximum salary numbers anywhere in the description.
+b) If only one salary is present, treat it as both min and max.
+c) Identify currency code from text.
+d) salary_period must be one of: year, day, hour, month, or "".
+e) Keep raw explicit numeric salary values only.
+f) Do not use years of experience, dates, ids, percentages, bonus-only numbers, benefits budgets, employee counts, revenue, or unrelated page numbers.
+g) If salary is ambiguous or not clearly tied to this role, return empty strings.
 
-2. job_location
-- Prefer explicit header/location labels first
-- Prefer the most specific visible location
-- If multiple valid locations exist, return the best primary one
-- If the ad only clearly states Remote UK / UK Remote / remote in the UK, return the matching UK location only if a specific valid location is explicitly shown; otherwise return ""
-- Return "" if unclear
-
-3. remote_preferences
-- Allowed only: onsite, hybrid, remote, or ""
-- home based = remote
-- office attendance wording usually = hybrid
-- do not let generic company-wide flexibility override role-specific wording
-- if role says remote with occasional office travel but still fundamentally remote, use remote
-- if role says x days in office / weekly office attendance / split office-home, use hybrid
-
-4. remote_days
-- Return number as string or ""
-- Only when office/remote day evidence exists
-- Examples:
-  - 1 office day per week => 4
-  - 2 office days per week => 3
-  - 1-2 office days per week => 3
-  - 3 office days per week => 2
-  - 60% office based => 2
-- Do NOT infer from generic flexible working language, benefits, or vague hybrid wording
-
-5. visa_sponsorship
-- yes, no, or ""
-- yes only if explicit sponsorship evidence exists
-- no only if explicit no-sponsorship/right-to-work evidence exists
+5. Visa Sponsorship
+- Return yes, no, or ""
+- yes only if sponsorship is explicitly available
+- no only if the ad explicitly says sponsorship is unavailable / right to work required
 - otherwise ""
 
-6. job_type
-- Allowed values: Permanent, FTC, Part Time, Freelance/Contract, or ""
-- FTC includes fixed term contract / maternity cover / temporary contract
-- Freelance/Contract includes day-rate contract, contractor, freelance, interim
-- Priority if multiple phrases appear: Permanent > FTC > Part Time > Freelance/Contract only when clearly role-specific
+6. Contract Type
+Identify and normalize into exactly one of:
+- Permanent
+- FTC
+- Part Time
+- Freelance/Contract
 
-Allowed locations list for normalization support:
+Rules:
+- If multiple types are mentioned, choose one using this priority:
+  Permanent > FTC > Part Time > Freelance/Contract
+- Map synonyms:
+  - Permanent -> permanent, full time, full-time, standard
+  - FTC -> temporary, fixed term, fixed-term, maternity cover
+  - Part Time -> part time, part-time, job share, job-share
+  - Freelance/Contract -> freelance, contract, contracting
+- If no valid type is found, return ""
+
+7. job_category
+- If the category is already obvious from the role, you may return T&P or NonT&P.
+- If unclear, return "".
+- This field exists for compatibility with the current pipeline, but relevance/category should primarily be decided in the first prompt.
+
+Allowed normalized locations:
 {location_list_text}
 
 Position name:
 {job_title}
 
 Header/meta text:
-{header_text[:4000]}
+{header_text[:5000]}
 
 Role description:
-{role_body_text[:12000]}
+{role_body_text[:14000]}
+""".strip()
+
+
+def build_location_normalization_prompt(input_location: str, allowed_locations: list[str]) -> str:
+    location_list_text = "\n".join(allowed_locations[:2500])
+
+    return f"""
+Output only the chosen normalized location exactly as it appears in the acceptable locations list, or output Unknown.
+
+You are given an input location string and a list of acceptable normalized locations.
+
+Your task:
+1. Identify the best matching normalized location from the list.
+2. If multiple acceptable locations match, choose the most specific one.
+3. If the input location is a small town or village not in the list, choose the closest broader matching location from the list.
+4. If none match, output Unknown.
+5. Output only the chosen normalized location, with no extra text.
+
+Input location:
+{input_location}
+
+Acceptable normalized locations:
+{location_list_text}
+""".strip()
+
+
+def build_salary_normalization_prompt(salary_text: str, predefined_salaries: list[int]) -> str:
+    salaries_text = ", ".join(str(x) for x in predefined_salaries[:5000])
+
+    return f"""
+Output only one line in this exact format:
+[min salary] - [max salary] [currency code]
+
+You are given a salary as free text and a predefined list of valid salary amounts.
+
+Tasks:
+1. Extract minimum and maximum salary values from the input text.
+2. Round each extracted value to the closest value from the predefined salary list.
+3. If only one salary number is present, treat it as both minimum and maximum.
+4. Identify the currency code from the salary text.
+5. Never output a salary that is not in the predefined list.
+6. If you cannot identify a valid salary, output:
+ -  
+
+Salary text:
+{salary_text}
+
+Predefined salary values:
+{salaries_text}
 """.strip()
 
 
@@ -225,7 +324,7 @@ Role description:
 
 
 def build_job_titles_prompt(position_name: str, description: str, allowed_job_titles: list[str]) -> str:
-    job_titles_text = ", ".join(allowed_job_titles[:2500])
+    job_titles_text = ", ".join(allowed_job_titles[:3000])
 
     return f"""
 Return valid JSON only:
@@ -233,16 +332,22 @@ Return valid JSON only:
   "job_titles": ["..."]
 }}
 
+You will receive:
+1. a position name
+2. a description
+
 Task:
 Choose up to 3 best matching job titles from the predefined list.
 
 Rules:
-- Use only titles from the predefined list
-- If the position name exactly matches one predefined title, return only that one
-- Otherwise choose up to 3 best functional matches based on title + description
-- Prefer functional fit over literal wording
-- Do not force 3 titles if 1 or 2 are clearly enough
-- Do not return titles that are only loosely related
+- Use only job titles from the predefined list.
+- If the position name exactly matches one predefined title, return only that one.
+- If the position name is unclear or ambiguous, choose up to the top 3 most appropriate job titles from the predefined list.
+- Prefer functional fit over literal wording.
+- Do not force 3 titles if 1 or 2 are clearly enough.
+- Do not return loosely related titles.
+- Output titles ordered from most to least appropriate.
+- If no suitable match exists, return an empty array.
 
 Important mappings:
 - National Account Manager / Key Account Manager / Account Manager / Customer Success style roles should include "CSM / Account Manager" when available
@@ -271,20 +376,25 @@ Return valid JSON only:
   "seniorities": ["entry|junior|mid|senior|lead|leadership"]
 }}
 
+You will receive:
+1. a position name
+2. a description
+
 Task:
 Choose up to 3 seniority values using only:
 entry, junior, mid, senior, lead, leadership
 
 Rules:
 - Keep order exactly as: entry, junior, mid, senior, lead, leadership
+- Seniority values must be lowercase
 - Use only values strongly supported by the title and description
 - Do not over-tag
 
 Strong title rules:
 - If title includes Head, Director, VP, Chief, C-level => leadership
-- If title includes Engineering Manager / Manager with clear people-management responsibility, leadership can apply only when it is genuinely managerial at department/team level
+- If title includes Engineering Manager or similar strong leadership title => leadership
 - Plain manager titles usually mean senior and/or lead, not mid
-- Do not include mid for manager titles unless the role is clearly junior/assistant/associate-manager style, which is rare
+- Do not include mid for manager titles unless the role is clearly junior/assistant/associate-manager style
 
 Role-specific rules:
 - PMO / Programme / Project / Operations / Account Manager / Customer Success / People roles:
@@ -300,13 +410,14 @@ Role-specific rules:
 Experience guidance:
 - 0-1 years => entry, junior
 - 2 years => junior, mid
-- 3-5 years => senior
+- 3-5 years => senior, lead
 - 5+ years => senior, lead
+- If the experience is a range, include all seniority levels that apply across that range
 - Only use experience guidance when title is not already clearer
 
 Other rules:
 - If title explicitly says junior / senior / lead, include that
-- Return empty array if genuinely unclear
+- If unclear, return empty array
 - Avoid adding mid just to fill space
 
 Position name:
@@ -317,42 +428,191 @@ Description:
 """.strip()
 
 
-def build_skills_prompt(role_category: str, description: str, exact_skills: list[str], allowed_skills: list[str]) -> str:
-    allowed_skills_text = ", ".join(allowed_skills[:3500])
-    exact_skills_text = ", ".join(exact_skills)
-
+def build_contract_type_prompt(text: str) -> str:
     return f"""
-Return valid JSON only:
-{{
-  "role_category": "T&P or NonT&P",
-  "skills": ["..."]
-}}
+Output only one of these exact values:
+Permanent
+FTC
+Part Time
+Freelance/Contract
+
+Or output an empty string if no valid type is found.
 
 Task:
-Return up to 10 skills total using only the allowed list.
+Identify and normalize the contract type.
 
 Rules:
-- Keep exact_skills first whenever they are valid and relevant
-- Add only clearly evidenced missing skills from the description
-- Use only skills from the allowed list
-- Do not infer adjacent tools or technologies
-- Do not infer broad umbrella skills unless directly supported
-- Exclude weak guesses
-- Do not use footer text, navigation text, marketing text, legal text, company boilerplate, partner lists, or unrelated content
-- Prefer skills that are central to the actual responsibilities/requirements
-- If the role is NonT&P, prefer business-function skills from the allowed list
-- If the role is T&P, prefer technical/product/data skills from the allowed list
-- If unsure, exclude rather than guess
+1. If multiple types are mentioned, choose only one using this priority:
+   Permanent > FTC > Part Time > Freelance/Contract
+2. Map synonyms:
+   - Permanent -> permanent, full time, full-time, standard
+   - FTC -> temporary, fixed term, fixed-term, maternity cover
+   - Part Time -> part time, part-time, job share, job-share
+   - Freelance/Contract -> freelance, contract, contracting
+3. Output only one category, with no extra words.
+
+Input text:
+{text[:10000]}
+""".strip()
+
+
+def build_job_description_prompt(description_text: str) -> str:
+    return f"""
+Output only valid HTML. No markdown. No commentary. No wrappers.
+
+From the input, extract only relevant job content.
+
+Include:
+1. Purpose and responsibilities (About the Role, Responsibilities, Key Duties)
+2. Candidate requirements, qualifications, skills, experience (About You, Requirements, Ideally You Will Have)
+3. Any text that directly explains what the job involves or what the candidate should bring
+
+Exclude:
+1. Company background
+2. Benefits and perks
+3. Disclaimers or application instructions
+4. Marketing or promotional text
+5. Unrelated content
+
+Formatting rules:
+1. HTML only:
+   - <b> for section titles
+   - <ul><li> for bullet lists
+   - <p> for plain paragraphs
+   - <em> only if in source
+
+2. Section titles:
+   a) Keep original headers word-for-word
+   b) Preserve casing, except if ALL CAPS then convert to Title Case
+   c) One blank line before and after each <b> block
+   d) If header is “About the Role” / “About this Role” / “The Role”, remove the header and keep only the content
+
+3. Bullets:
+   a) Use <ul><li> only if source has bullets or numbered list structure
+   b) Do not convert plain paragraphs into bullets
+   c) Keep each bullet in one <li>
+   d) Remove empty <li></li>
+   e) No blank lines between <li> items
+
+4. Lists & nesting:
+   a) Sub-bullets -> nested <ul> inside <li>
+   b) If unclear, flatten under nearest header
+   c) Do not invent new headers
+
+5. Preservation & cleanup:
+   a) Keep sentences word-for-word, no rephrasing
+   b) Remove markdown, stray dots, extra spaces
+   c) Collapse multiple newlines between </li><li> into a single one
+   d) Intro text before first header -> <p>
+
+6. Header fallback:
+   a) If bullets appear without a header:
+      - duties -> <b>Responsibilities</b>
+      - qualifications/skills -> <b>Requirements</b> or <b>Skills & Experience</b> if closer
+      - do not add fallback headers for prose
+   b) If nothing remains, output empty string
+
+Input:
+{description_text[:20000]}
+""".strip()
+
+
+def build_skills_full_prompt(role_category: str, description: str, candidate_skills: list[str], allowed_skills: list[str]) -> str:
+    allowed_skills_text = ", ".join(allowed_skills[:4000])
+    candidate_skills_text = ", ".join(candidate_skills[:100])
+
+    return f"""
+Return valid JSON only. No markdown. No commentary.
+
+Hard rules:
+- role_category is PROVIDED as input. You MUST echo it exactly as given ("T&P" or "NonT&P"). Do not change it.
+- skills MUST be an array with 2 to 10 items. Try hard to return at least 2.
+- skills MUST be chosen ONLY from the correct allowed skills list.
+- Prefer concrete, clearly evidenced skills from the description.
+- candidate_skills is provided: use it as the PRIMARY source, but if it has fewer than 2 items, infer additional skills from the description.
+- NEVER output a skill not present in the allowed list.
+- Before finalizing, verify each returned skill appears exactly in the allowed list. If not, remove it.
+- Use only skills supported by the description or candidate_skills.
+- Do not use footer text, navigation text, legal text, marketing text, partner lists, or unrelated company content.
+
+Output schema:
+{{
+  "role_category": "T&P" or "NonT&P",
+  "skills": ["..."]
+}}
 
 role_category:
 {role_category}
 
-exact_skills:
-{exact_skills_text}
+candidate_skills:
+{candidate_skills_text}
 
 Allowed skills:
 {allowed_skills_text}
 
 Description:
-{description[:12000]}
+{description[:14000]}
 """.strip()
+
+
+def build_skills_additional_prompt(
+    role_category: str,
+    description: str,
+    existing_skills: list[str],
+    candidate_skills: list[str],
+    allowed_skills: list[str],
+) -> str:
+    allowed_skills_text = ", ".join(allowed_skills[:4000])
+    existing_skills_text = ", ".join(existing_skills[:100])
+    candidate_skills_text = ", ".join(candidate_skills[:100])
+
+    return f"""
+Return valid JSON only. No markdown. No commentary.
+
+Hard rules:
+- role_category is PROVIDED as input. You MUST echo it exactly as given ("T&P" or "NonT&P"). Do not change it.
+- You MUST return additional_skills as an array with 2 to 5 items. Try hard to return at least 2 when strongly supported.
+- You MUST NOT repeat any skills that are already present in existing_skills.
+- You MUST choose skills ONLY from the correct allowed skills list.
+- candidate_skills is provided: use it as the primary source when relevant.
+- If candidate_skills is insufficient, infer from the description but still only from the allowed list.
+- Before finalizing, verify each returned skill exists exactly in the allowed list. Remove any that do not.
+- Do not output existing_skills again.
+- Do not use footer text, navigation text, legal text, marketing text, partner lists, or unrelated company content.
+
+Output schema:
+{{
+  "role_category": "T&P" or "NonT&P",
+  "additional_skills": ["..."]
+}}
+
+role_category:
+{role_category}
+
+existing_skills:
+{existing_skills_text}
+
+candidate_skills:
+{candidate_skills_text}
+
+Allowed skills:
+{allowed_skills_text}
+
+Description:
+{description[:14000]}
+""".strip()
+
+
+def build_skills_prompt(role_category: str, description: str, exact_skills: list[str], allowed_skills: list[str]) -> str:
+    """
+    Compatibility wrapper for the current pipeline.
+    If exact_skills is empty, the workflow should ideally use build_skills_full_prompt.
+    If exact_skills already has one or more items, the workflow should ideally use build_skills_additional_prompt.
+    This wrapper remains so current imports do not break immediately.
+    """
+    return build_skills_full_prompt(
+        role_category=role_category,
+        description=description,
+        candidate_skills=exact_skills,
+        allowed_skills=allowed_skills,
+    )
