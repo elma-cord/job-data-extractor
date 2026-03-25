@@ -11,9 +11,10 @@ from bs4 import BeautifulSoup
 
 from classifiers import (
     ai_check_relevance,
-    ai_enrich_skills,
     ai_extract_core_fields,
     ai_extract_salary_only,
+    ai_generate_additional_skills,
+    ai_generate_skills_full,
     ai_map_job_titles_only,
     ai_map_seniority_only,
 )
@@ -66,6 +67,7 @@ MIN_EXACT_SKILLS_TO_SKIP_AI = int(os.getenv("MIN_EXACT_SKILLS_TO_SKIP_AI", "3"))
 
 @dataclass
 class JobResult:
+    job_url: str = ""
     role_relevance: str = ""
     role_relevance_reason: str = ""
     job_category: str = ""
@@ -126,6 +128,26 @@ def dedupe_keep_order(values: List[str]) -> List[str]:
 
 def strip_html(text: str) -> str:
     return clean_whitespace(BeautifulSoup(text or "", "lxml").get_text("\n", strip=True))
+
+
+def normalize_remote_preferences_value(value: str) -> str:
+    value = clean_whitespace(value)
+    if not value:
+        return ""
+
+    low = normalize_quotes(value).lower()
+    if low in {"not specified", "not_specified"}:
+        return "not specified"
+
+    found = []
+    for pref in ["onsite", "hybrid", "remote"]:
+        if re.search(rf"(?<![a-z]){re.escape(pref)}(?![a-z])", low):
+            found.append(pref)
+
+    if not found:
+        return ""
+
+    return ", ".join(found)
 
 
 def load_urls(filepath: str) -> List[str]:
@@ -275,6 +297,10 @@ def should_run_core_fields_ai(
     fallback_location: str,
     fallback_remote_preferences: str,
     fallback_remote_days: str,
+    fallback_salary_min: str,
+    fallback_salary_max: str,
+    fallback_salary_currency: str,
+    fallback_salary_period: str,
     fallback_visa: str,
     fallback_job_type: str,
 ) -> bool:
@@ -282,20 +308,17 @@ def should_run_core_fields_ai(
         1 for x in [
             fallback_location,
             fallback_remote_preferences,
+            fallback_remote_days,
+            fallback_salary_min,
+            fallback_salary_max,
+            fallback_salary_currency,
+            fallback_salary_period,
             fallback_visa,
             fallback_job_type,
-        ] if not str(x).strip()
+        ]
+        if not str(x).strip()
     )
-
-    if fallback_remote_days:
-        return False
-    if missing_count >= 2:
-        return True
-    if not fallback_location:
-        return True
-    if not fallback_remote_preferences:
-        return True
-    return False
+    return missing_count >= 3
 
 
 def should_run_salary_ai(evidence_text: str) -> bool:
@@ -313,8 +336,9 @@ def should_run_seniority_ai(clean_title: str, role_text: str) -> bool:
     return len(fallback) == 0
 
 
-def blank_result_with_relevance(role_relevance: str, reason: str) -> JobResult:
+def blank_result_with_relevance(job_url: str, role_relevance: str, reason: str) -> JobResult:
     return JobResult(
+        job_url=job_url,
         role_relevance=role_relevance,
         role_relevance_reason=reason,
     )
@@ -355,6 +379,7 @@ def process_url(
 
     if not html or not parsed:
         return blank_result_with_relevance(
+            job_url=url,
             role_relevance="Not relevant",
             reason="Could not fetch or extract job content.",
         )
@@ -378,7 +403,9 @@ def process_url(
     evidence_text = normalize_quotes(evidence_text)
 
     fallback_location = normalize_location_rule_based(evidence_text, allowed_locations)
-    fallback_remote_preferences = detect_remote_preferences_rule_based(evidence_text)
+    fallback_remote_preferences = normalize_remote_preferences_value(
+        detect_remote_preferences_rule_based(evidence_text)
+    )
     fallback_remote_days = detect_remote_days_rule_based(evidence_text, fallback_remote_preferences)
     fallback_salary_min, fallback_salary_max, fallback_salary_currency, fallback_salary_period = parse_explicit_salary(
         evidence_text, allowed_salaries
@@ -386,6 +413,7 @@ def process_url(
     fallback_visa = detect_visa_rule_based(role_context_text)
     fallback_job_type = detect_job_type_rule_based(evidence_text, structured.get("employment_type_raw", ""))
     fallback_description = clean_whitespace(role_body_text)
+    fallback_job_category = "T&P" if is_tp_by_rules(clean_title, role_body_text) else "NonT&P"
 
     strong_rule_relevant = bool(clean_title and is_relevant_by_rules(clean_title, role_body_text, header_text))
     substantial_role_text = len(clean_whitespace(role_body_text)) >= 700
@@ -397,39 +425,48 @@ def process_url(
     if skip_rel_ai:
         role_relevance = rel_value
         role_relevance_reason = rel_reason
+        relevance_job_category = fallback_job_category
     else:
         relevance = ai_check_relevance(
             job_title=clean_title,
             role_context_text=role_context_text,
             fallback_role_relevance=fallback_role_relevance,
             fallback_reason=fallback_reason,
+            fallback_job_category=fallback_job_category,
         )
         role_relevance = relevance.get("role_relevance", "") or fallback_role_relevance
         role_relevance_reason = relevance.get("role_relevance_reason", "") or fallback_reason
+        relevance_job_category = normalize_category_for_skills(relevance.get("job_category", "")) or fallback_job_category
 
     if role_relevance == "Not relevant":
         return blank_result_with_relevance(
+            job_url=url,
             role_relevance=role_relevance,
             reason=role_relevance_reason,
         )
 
     if not substantial_role_text and len(clean_whitespace(role_context_text)) < 350:
         return blank_result_with_relevance(
+            job_url=url,
             role_relevance="Not relevant",
             reason="Insufficient extracted role content for reliable enrichment.",
         )
 
     result = JobResult(
+        job_url=url,
         role_relevance=role_relevance,
         role_relevance_reason=role_relevance_reason,
     )
-
-    fallback_job_category = "T&P" if is_tp_by_rules(clean_title, role_body_text) else "NonT&P"
+    result.job_category = relevance_job_category
 
     if should_run_core_fields_ai(
         fallback_location=fallback_location,
         fallback_remote_preferences=fallback_remote_preferences,
         fallback_remote_days=fallback_remote_days,
+        fallback_salary_min=fallback_salary_min,
+        fallback_salary_max=fallback_salary_max,
+        fallback_salary_currency=fallback_salary_currency,
+        fallback_salary_period=fallback_salary_period,
         fallback_visa=fallback_visa,
         fallback_job_type=fallback_job_type,
     ):
@@ -438,24 +475,32 @@ def process_url(
             header_text=header_text,
             role_body_text=role_body_text,
             allowed_locations=allowed_locations,
-            fallback_job_category=fallback_job_category,
+            fallback_job_category=result.job_category,
             fallback_location=fallback_location,
             fallback_remote_preferences=fallback_remote_preferences,
             fallback_remote_days=fallback_remote_days,
+            fallback_salary_min=fallback_salary_min,
+            fallback_salary_max=fallback_salary_max,
+            fallback_salary_currency=fallback_salary_currency,
+            fallback_salary_period=fallback_salary_period,
             fallback_visa=fallback_visa,
             fallback_job_type=fallback_job_type,
         )
     else:
         core_fields = {
-            "job_category": fallback_job_category,
+            "job_category": result.job_category,
             "job_location": fallback_location,
             "remote_preferences": fallback_remote_preferences,
             "remote_days": fallback_remote_days,
+            "salary_min": fallback_salary_min,
+            "salary_max": fallback_salary_max,
+            "salary_currency": fallback_salary_currency,
+            "salary_period": fallback_salary_period,
             "visa_sponsorship": fallback_visa,
             "job_type": fallback_job_type,
         }
 
-    result.job_category = normalize_category_for_skills(core_fields.get("job_category", "")) or fallback_job_category
+    result.job_category = normalize_category_for_skills(core_fields.get("job_category", "")) or result.job_category
 
     ai_location = core_fields.get("job_location", "") or ""
     if ai_location and location_value_has_evidence(ai_location, evidence_text, allowed_locations):
@@ -463,39 +508,41 @@ def process_url(
     else:
         result.job_location = fallback_location
 
-    result.remote_preferences = core_fields.get("remote_preferences", "") or fallback_remote_preferences
+    result.remote_preferences = normalize_remote_preferences_value(
+        core_fields.get("remote_preferences", "") or fallback_remote_preferences
+    )
     result.visa_sponsorship = core_fields.get("visa_sponsorship", "") or fallback_visa
     result.job_type = core_fields.get("job_type", "") or fallback_job_type
 
+    ai_remote_days = str(core_fields.get("remote_days", "") or "").strip()
+    if ai_remote_days.lower() == "not specified":
+        ai_remote_days = "not specified"
+
     explicit_remote_days_allowed = has_explicit_remote_days_evidence("\n".join([header_text, role_body_text]))
-    ai_remote_days = core_fields.get("remote_days", "") or ""
     if explicit_remote_days_allowed and ai_remote_days:
         result.remote_days = ai_remote_days
     else:
         result.remote_days = fallback_remote_days
+
+    result.salary_min = core_fields.get("salary_min", "") or fallback_salary_min
+    result.salary_max = core_fields.get("salary_max", "") or fallback_salary_max
+    result.salary_currency = core_fields.get("salary_currency", "") or fallback_salary_currency
+    result.salary_period = core_fields.get("salary_period", "") or fallback_salary_period
 
     if should_run_salary_ai(evidence_text):
         salary_fields = ai_extract_salary_only(
             job_title=clean_title,
             header_text=header_text,
             role_body_text=role_body_text,
-            fallback_salary_min=fallback_salary_min,
-            fallback_salary_max=fallback_salary_max,
-            fallback_salary_currency=fallback_salary_currency,
-            fallback_salary_period=fallback_salary_period,
+            fallback_salary_min=result.salary_min,
+            fallback_salary_max=result.salary_max,
+            fallback_salary_currency=result.salary_currency,
+            fallback_salary_period=result.salary_period,
         )
-    else:
-        salary_fields = {
-            "salary_min": fallback_salary_min,
-            "salary_max": fallback_salary_max,
-            "salary_currency": fallback_salary_currency,
-            "salary_period": fallback_salary_period,
-        }
-
-    result.salary_min = salary_fields.get("salary_min", "") or fallback_salary_min
-    result.salary_max = salary_fields.get("salary_max", "") or fallback_salary_max
-    result.salary_currency = salary_fields.get("salary_currency", "") or fallback_salary_currency
-    result.salary_period = salary_fields.get("salary_period", "") or fallback_salary_period
+        result.salary_min = salary_fields.get("salary_min", "") or result.salary_min
+        result.salary_max = salary_fields.get("salary_max", "") or result.salary_max
+        result.salary_currency = salary_fields.get("salary_currency", "") or result.salary_currency
+        result.salary_period = salary_fields.get("salary_period", "") or result.salary_period
 
     final_html_description = plain_text_to_html_preserve_structure(role_body_text)
     if not final_html_description:
@@ -506,7 +553,9 @@ def process_url(
     hard_evidence_text = normalize_quotes(hard_evidence_text)
 
     result.job_location = normalize_location_rule_based(hard_evidence_text, allowed_locations) or result.job_location
-    result.remote_preferences = detect_remote_preferences_rule_based(hard_evidence_text) or result.remote_preferences
+    result.remote_preferences = normalize_remote_preferences_value(
+        detect_remote_preferences_rule_based(hard_evidence_text)
+    ) or result.remote_preferences
 
     remote_days_candidates = [
         detect_remote_days_rule_based(header_text, result.remote_preferences),
@@ -519,12 +568,7 @@ def process_url(
     result.remote_days = next((x for x in remote_days_candidates if str(x).strip() != ""), "")
 
     explicit_salary_check = parse_explicit_salary(hard_evidence_text, allowed_salaries)
-    if explicit_salary_check == ("", "", "", ""):
-        result.salary_min = ""
-        result.salary_max = ""
-        result.salary_currency = ""
-        result.salary_period = ""
-    else:
+    if explicit_salary_check != ("", "", "", ""):
         result.salary_min, result.salary_max, result.salary_currency, result.salary_period = explicit_salary_check
 
     result.salary_min = snap_salary_value(result.salary_min, allowed_salaries)
@@ -578,16 +622,28 @@ def process_url(
     skill_list = tp_skills if result.job_category == "T&P" else nontp_skills
 
     exact_skills = exact_match_skills_in_order(skills_source_text, skill_list, limit=10)
+    exact_skills = dedupe_keep_order(exact_skills)
 
     if FAST_MODE and len(exact_skills) >= MIN_EXACT_SKILLS_TO_SKIP_AI:
         final_skills = exact_skills[:10]
     else:
-        final_skills = ai_enrich_skills(
-            role_category=result.job_category,
-            description=skills_source_text,
-            exact_skills=exact_skills,
-            allowed_skills=skill_list,
-        )
+        if len(exact_skills) == 0:
+            ai_skills = ai_generate_skills_full(
+                role_category=result.job_category,
+                description=skills_source_text,
+                candidate_skills=[],
+                allowed_skills=skill_list,
+            )
+            final_skills = ai_skills[:10]
+        else:
+            additional_skills = ai_generate_additional_skills(
+                role_category=result.job_category,
+                description=skills_source_text,
+                existing_skills=exact_skills,
+                candidate_skills=exact_skills,
+                allowed_skills=skill_list,
+            )
+            final_skills = (exact_skills + additional_skills)[:10]
 
     allowed_lower = {s.lower(): s for s in skill_list}
     final_skills = [
@@ -668,6 +724,7 @@ def main() -> None:
                 row = future.result()
             except Exception as e:
                 row = JobResult(
+                    job_url=urls[idx - 1],
                     role_relevance="Not relevant",
                     role_relevance_reason=f"Unhandled error: {e}",
                 )
