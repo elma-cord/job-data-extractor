@@ -99,7 +99,8 @@ def gather_location_lines(text: str) -> List[str]:
     soft_tokens = [
         " hybrid", " remote", " onsite", " on-site", " home based", " from home",
         " united kingdom", " office attendance", " days per week", " remote-enabled",
-        " office based", "% of your working week", "guildford", "london", "bristol"
+        " office based", "% of your working week", "guildford", "london", "bristol",
+        " ireland", " emea", " europe", " worldwide", " global",
     ]
 
     for idx, line in enumerate(lines[:360]):
@@ -229,41 +230,46 @@ def normalize_location_rule_based(text: str, allowed_locations: List[str]) -> st
 def detect_remote_preferences_rule_based(text: str) -> str:
     lines = gather_location_lines(text)
     low = normalize_quotes("\n".join(lines)).lower()
-    found = []
+
+    if not low.strip():
+        return ""
 
     remote_signal = bool(re.search(
-        r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote enabled\b|\bremote-enabled\b|\bremote working\b|\bwork from home\b|\bwfh\b",
+        r"\bhome based\b|\bhome-based\b|\buk remote\b|\bfully remote\b|\bremote enabled\b|\bremote-enabled\b|\bremote working\b|\bwork from home\b|\bwfh\b|\bremote uk\b|\bwork location\b.*\bremote\b",
         low
     ))
     hybrid_signal = bool(re.search(
-        r"\bhybrid\b|\bagile working\b|\boffice attendance requirement\b|\b\d+\s*-\s*\d+\s+days?\s+per week\b.*\boffice\b|\b\d+\s+days?\s+per week\b.*\boffice\b|\b\d{1,3}%\s+of your working week must be office based\b",
+        r"\bhybrid\b|\bagile working\b|\boffice attendance requirement\b|\b\d+\s*-\s*\d+\s+days?\s+per week\b.*\boffice\b|\b\d+\s+days?\s+per week\b.*\boffice\b|\b\d{1,3}%\s+of your working week must be office based\b|\bpartly remote\b|\bpartially remote\b",
         low
     ))
-    onsite_signal = bool(re.search(r"\bonsite\b|\bon-site\b|\bon site\b|\bin office\b|\bin-office\b", low))
+    onsite_signal = bool(re.search(
+        r"\bonsite\b|\bon-site\b|\bon site\b|\bin office\b|\bin-office\b|\boffice based\b|\boffice-based\b",
+        low
+    ))
 
     pct_match = re.search(r"\b(\d{1,3})%\s+of your working week must be office based\b", low)
     if pct_match:
         pct = int(pct_match.group(1))
         if pct >= 100:
             onsite_signal = True
+            hybrid_signal = False
+            remote_signal = False
         elif pct > 0:
             hybrid_signal = True
 
-    if remote_signal:
-        found.append("remote")
-    if hybrid_signal:
-        found.append("hybrid")
-    if onsite_signal:
-        found.append("onsite")
-
-    if re.search(r"\bwork location\b.*\bremote\b", low) or re.search(r"\bremote working within the united kingdom\b", low):
+    if re.search(r"\bremote working within the united kingdom\b", low):
         return "remote"
 
-    ordered = [x for x in ["onsite", "hybrid", "remote"] if x in found]
+    if hybrid_signal:
+        return "hybrid"
+    if remote_signal and not onsite_signal:
+        return "remote"
+    if onsite_signal and not remote_signal:
+        return "onsite"
+    if onsite_signal and remote_signal:
+        return "hybrid"
 
-    if "hybrid" in ordered and "remote" in ordered:
-        return "hybrid, remote"
-    return ", ".join(ordered)
+    return ""
 
 
 def has_explicit_remote_days_evidence(text: str) -> bool:
@@ -722,59 +728,171 @@ def refine_seniorities_rule_based(job_title: str, role_text: str, seniorities: L
 
 def is_tp_by_rules(job_title: str, role_text: str) -> bool:
     text = f"{job_title}\n{role_text}".lower()
+
+    non_tp_override_patterns = [
+        r"\bhuman resources\b", r"\bhr\b", r"\bpeople ops\b", r"\bpeople operations\b",
+        r"\btalent acquisition\b", r"\brecruit", r"\bfinance\b", r"\baccounting\b",
+        r"\bfp&a\b", r"\blegal\b", r"\bcompliance\b", r"\brisk\b", r"\brevops\b",
+        r"\bsales operations\b", r"\bcustomer success\b", r"\baccount manager\b",
+        r"\baccount executive\b", r"\brenewals\b", r"\bpartnerships\b",
+        r"\bproject manager\b", r"\bprogramme manager\b", r"\bprogram manager\b",
+        r"\bpmo\b", r"\bchief of staff\b", r"\bexecutive assistant\b",
+    ]
+    if any(re.search(p, text) for p in non_tp_override_patterns):
+        return False
+
     tp_patterns = [
         r"\bengineer\b", r"\bdeveloper\b", r"\bsoftware\b", r"\bdata\b",
-        r"\bmachine learning\b", r"\bml\b", r"\bai\b", r"\bproduct\b",
-        r"\bdesigner\b", r"\bux\b", r"\bui\b", r"\bqa\b", r"\bdevops\b",
-        r"\bsite reliability\b", r"\bsre\b", r"\barchitect\b", r"\bcloud\b",
-        r"\bplatform\b", r"\binfrastructure\b", r"\bsystem administrator\b",
+        r"\bmachine learning\b", r"\bml\b", r"\bai\b", r"\bproduct manager\b",
+        r"\bproduct owner\b", r"\bdesigner\b", r"\bux\b", r"\bui\b", r"\bqa\b",
+        r"\bdevops\b", r"\bsite reliability\b", r"\bsre\b", r"\barchitect\b",
+        r"\bcloud\b", r"\bplatform\b", r"\binfrastructure\b", r"\bsystem administrator\b",
         r"\bsystems administrator\b", r"\bsupport engineer\b", r"\btechnical support\b",
         r"\bnetwork engineer\b", r"\bsolutions engineer\b", r"\bit support\b",
         r"\b2nd line\b", r"\bsecond line\b", r"\bmsp\b", r"\bwindows server\b",
         r"\bactive directory\b", r"\bexchange\b", r"\bhyper-v\b", r"\bvmware\b",
         r"\bcitrix\b", r"\brouter\b", r"\bfirewall\b", r"\bvpn\b",
-        r"\bremote desktop\b", r"\bvoip\b", r"\brust\b", r"\bkubernetes\b",
-        r"\bopenshift\b", r"\bgrpc\b", r"\bprotocol buffers\b",
+        r"\bremote desktop\b", r"\bvoip\b", r"\bkubernetes\b", r"\bopenshift\b",
+        r"\bgrpc\b", r"\bprotocol buffers\b", r"\bsecurity engineer\b",
+        r"\bpenetration tester\b", r"\bdata scientist\b", r"\bdata engineer\b",
+        r"\bbi developer\b", r"\bfront end\b", r"\bback end\b", r"\bfull stack\b",
     ]
     return any(re.search(p, text) for p in tp_patterns)
 
 
+def _requires_non_english_language(text: str) -> bool:
+    low = normalize_quotes(text).lower()
+
+    required_patterns = [
+        r"\bmust speak\b.*\b(german|french|spanish|italian|dutch|polish|swedish|danish|norwegian|finnish|portuguese|czech|hungarian|romanian|arabic|japanese|korean|mandarin|cantonese)\b",
+        r"\bfluency in\b.*\b(german|french|spanish|italian|dutch|polish|swedish|danish|norwegian|finnish|portuguese|czech|hungarian|romanian|arabic|japanese|korean|mandarin|cantonese)\b",
+        r"\brequired\b.*\b(german|french|spanish|italian|dutch|polish|swedish|danish|norwegian|finnish|portuguese|czech|hungarian|romanian|arabic|japanese|korean|mandarin|cantonese)\b",
+        r"\bnative\b.*\b(german|french|spanish|italian|dutch|polish|swedish|danish|norwegian|finnish|portuguese|czech|hungarian|romanian|arabic|japanese|korean|mandarin|cantonese)\b",
+        r"\bbilingual\b.*\b(german|french|spanish|italian|dutch|polish|swedish|danish|norwegian|finnish|portuguese|czech|hungarian|romanian|arabic|japanese|korean|mandarin|cantonese)\b",
+    ]
+    optional_patterns = [
+        r"\bpreferred\b.*\b(german|french|spanish|italian|dutch|polish|swedish|danish|norwegian|finnish|portuguese|czech|hungarian|romanian|arabic|japanese|korean|mandarin|cantonese)\b",
+        r"\bbonus\b.*\b(german|french|spanish|italian|dutch|polish|swedish|danish|norwegian|finnish|portuguese|czech|hungarian|romanian|arabic|japanese|korean|mandarin|cantonese)\b",
+        r"\bnice to have\b.*\b(german|french|spanish|italian|dutch|polish|swedish|danish|norwegian|finnish|portuguese|czech|hungarian|romanian|arabic|japanese|korean|mandarin|cantonese)\b",
+    ]
+
+    if any(re.search(p, low) for p in optional_patterns):
+        return False
+    return any(re.search(p, low) for p in required_patterns)
+
+
+def _location_rules_allow(text: str) -> bool:
+    low = normalize_quotes(text).lower()
+
+    # strong disallowed remote-region signals
+    if re.search(r"\b(remote apac|apac only|latam only|remote latam|north america|usa only|us only|canada only)\b", low):
+        return False
+
+    # global remote may be allowed if not region-restricted
+    if re.search(r"\b(worldwide|global remote|remote worldwide|anywhere in the world)\b", low):
+        return True
+
+    # remote europe / emea allowed
+    if re.search(r"\bremote europe\b|\bremote emea\b|\bemea remote\b|\beurope remote\b", low):
+        return True
+
+    # ireland only if remote
+    ireland_present = bool(re.search(r"\bireland\b|\bdublin\b|\bcork\b|\bgalway\b", low))
+    if ireland_present:
+        prefs = detect_remote_preferences_rule_based(text)
+        return prefs == "remote"
+
+    # specific continental europe countries are not allowed unless remote europe/emEA already matched above
+    europe_country_patterns = [
+        r"\bgermany\b", r"\bfrance\b", r"\bspain\b", r"\bitaly\b", r"\bnetherlands\b",
+        r"\bbelgium\b", r"\bportugal\b", r"\bpoland\b", r"\bsweden\b", r"\bdenmark\b",
+        r"\bnorway\b", r"\bfinland\b", r"\baustria\b", r"\bswitzerland\b", r"\bczech\b",
+        r"\bromania\b", r"\bhungary\b", r"\bgreece\b",
+    ]
+    if any(re.search(p, low) for p in europe_country_patterns):
+        return False
+
+    # usa/canada/non-allowed explicit regions
+    non_allowed_patterns = [
+        r"\busa\b", r"\bunited states\b", r"\bus-based\b", r"\bcanada\b",
+        r"\bnorth america\b", r"\bnew york\b", r"\bcalifornia\b", r"\btoronto\b",
+        r"\bvancouver\b", r"\baustralia\b", r"\bnew zealand\b", r"\bindia\b",
+        r"\bsingapore\b", r"\bjapan\b", r"\bkorea\b", r"\bmiddle east\b",
+    ]
+    if any(re.search(p, low) for p in non_allowed_patterns):
+        return False
+
+    # UK accepted
+    uk_patterns = [
+        r"\buk\b", r"\bunited kingdom\b", r"\bgreat britain\b", r"\bengland\b",
+        r"\bscotland\b", r"\bwales\b", r"\bnorthern ireland\b", r"\blondon\b",
+        r"\bmanchester\b", r"\bbristol\b", r"\bleeds\b", r"\bbirmingham\b",
+        r"\bguildford\b", r"\bglasgow\b", r"\bedinburgh\b", r"\bcardiff\b",
+    ]
+    if any(re.search(p, low) for p in uk_patterns):
+        return True
+
+    # pure remote with no excluded-region evidence can pass
+    prefs = detect_remote_preferences_rule_based(text)
+    if prefs == "remote" and not any(re.search(p, low) for p in non_allowed_patterns):
+        return True
+
+    return False
+
+
 def is_relevant_by_rules(job_title: str, role_text: str, header_text: str = "") -> bool:
-    text = f"{job_title}\n{header_text}\n{role_text}".lower()
+    text = normalize_quotes(f"{job_title}\n{header_text}\n{role_text}").lower()
+
+    excluded_patterns = [
+        r"\bteacher\b", r"\bnurse\b", r"\bwaiter\b", r"\bchef\b",
+        r"\bconstruction\b", r"\bcivil engineer\b", r"\bcivil engineering\b",
+        r"\bretail associate\b", r"\bretail\b", r"\belectrician\b",
+        r"\bmechanical engineer\b", r"\bmanufacturing\b", r"\bmaritime\b",
+        r"\bmicrobiology\b", r"\binjection molding\b", r"\bwarehouse\b",
+        r"\bdriver\b", r"\bcleaner\b", r"\bbeauty brand\b", r"\bbeauty therapist\b",
+        r"\bstore manager\b", r"\bshop assistant\b", r"\bproduction operative\b",
+    ]
+    if any(re.search(p, text) for p in excluded_patterns):
+        return False
+
+    if _requires_non_english_language(text):
+        return False
+
+    if not _location_rules_allow(text):
+        return False
 
     allowed_patterns = [
+        # HR / talent / people
         r"\btalent acquisition\b", r"\brecruiter\b", r"\brecruitment\b",
         r"\bhuman resources\b", r"\bhead of hr\b", r"\bhr manager\b",
         r"\bpeople ops\b", r"\bpeople operations\b", r"\bpeople partner\b",
+        # account / customer
         r"\baccount manager\b", r"\baccount executive\b", r"\baccount director\b",
-        r"\bcustomer success\b", r"\bcsm\b", r"\brenewals\b", r"\bclient services\b",
+        r"\bcustomer success\b", r"\bcustomer success manager\b", r"\bcsm\b",
+        r"\brenewals\b", r"\bclient services\b", r"\bcustomer operations\b",
+        r"\bcustomer support\b", r"\bimplementation manager\b", r"\bpartnerships\b",
+        # business / ops / PMO
         r"\bbusiness analyst\b", r"\bbusiness operations\b", r"\boperations\b",
         r"\bchange manager\b", r"\btransformation\b", r"\bpmo\b",
         r"\bprogramme manager\b", r"\bprogram manager\b", r"\bproject manager\b",
+        r"\bscrum master\b", r"\bchief of staff\b", r"\bexecutive assistant\b",
+        # finance / legal / risk
         r"\brisk\b", r"\bcompliance\b", r"\blegal\b", r"\bfinance\b",
         r"\baccounting\b", r"\bfp&a\b", r"\brevops\b", r"\bsales operations\b",
-        r"\bsdr\b", r"\bbdr\b", r"\bmarketing\b", r"\bseo\b", r"\bpr\b",
-        r"\bcommunications\b", r"\bengineer\b", r"\bdeveloper\b",
-        r"\barchitect\b", r"\bdevops\b", r"\bqa\b", r"\bproduct\b",
+        # marketing
+        r"\bmarketing\b", r"\bseo\b", r"\bpr\b", r"\bcommunications\b",
+        r"\bproduct marketing\b", r"\bgrowth marketing\b", r"\bperformance marketing\b",
+        # technical
+        r"\bengineer\b", r"\bdeveloper\b", r"\barchitect\b", r"\bdevops\b",
+        r"\bqa\b", r"\bproduct manager\b", r"\bproduct owner\b",
         r"\bdesigner\b", r"\bux\b", r"\bui\b", r"\bdata\b",
         r"\bmachine learning\b", r"\bai\b", r"\bsecurity\b", r"\bcloud\b",
         r"\bnetwork\b", r"\binfrastructure\b", r"\bsystems\b",
         r"\bsupport engineer\b", r"\bsystem administrator\b", r"\bsystem engineer\b",
         r"\bsolutions engineer\b", r"\bit support\b", r"\b2nd line\b", r"\bsecond line\b",
     ]
-    excluded_patterns = [
-        r"\bteacher\b", r"\bnurse\b", r"\bwaiter\b", r"\bchef\b",
-        r"\bconstruction\b", r"\bcivil engineer\b", r"\belectrician\b",
-        r"\bmechanical engineer\b", r"\bmanufacturing\b", r"\bmaritime\b",
-        r"\bmicrobiology\b", r"\binjection molding\b", r"\bwarehouse\b",
-        r"\bdriver\b", r"\bcleaner\b",
-    ]
 
-    if any(re.search(p, text) for p in allowed_patterns):
-        return True
-    if any(re.search(p, text) for p in excluded_patterns):
-        return False
-    return False
+    return any(re.search(p, text) for p in allowed_patterns)
 
 
 def normalize_job_title_from_list(value: str, allowed_job_titles: List[str]) -> str:
@@ -860,71 +978,48 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
         }
         out = [x for x in out if x not in technical_titles_to_remove and x]
 
-    system_engineer_signal = any(re.search(p, title_low) for p in [
-        r"\bsenior systems engineer\b", r"\bsystems engineer\b",
-        r"\bsystem engineer\b", r"\bdtn software engineer\b",
+    systems_signal = any(re.search(p, title_low) for p in [
+        r"\bsystem engineer\b", r"\bsystems engineer\b", r"\binfrastructure engineer\b",
+        r"\bplatform engineer\b", r"\b2nd line\b", r"\bsecond line\b",
+        r"\bit support\b", r"\bsupport engineer\b",
     ]) or any(re.search(p, desc_low) for p in [
-        r"\bvirtuali[sz]ation\b", r"\bvmware\b", r"\bopenshift\b",
-        r"\bkubernetes\b", r"\blinux\b", r"\benterprise infrastructure\b",
-        r"\bdelay-tolerant networking\b", r"\bnetworking\b", r"\bstorage\b",
-        r"\bqueueing\b", r"\bgrpc\b", r"\bprotocol buffers\b", r"\brust\b",
-        r"\bday 2 operations\b",
+        r"\bkubernetes\b", r"\blinux\b", r"\bopenshift\b", r"\bvirtuali[sz]ation\b",
+        r"\bwindows server\b", r"\bactive directory\b", r"\bvmware\b", r"\bcitrix\b",
     ])
 
-    if not sales_account_role_signal:
-        if system_engineer and system_engineer_signal:
-            if system_engineer in out:
-                out.remove(system_engineer)
-            out.insert(0, system_engineer)
+    if systems_signal and system_engineer:
+        if system_engineer in out:
+            out.remove(system_engineer)
+        out.insert(0, system_engineer)
 
-        if devops_engineer and any(re.search(p, desc_low) for p in [
-            r"\bkubernetes\b", r"\bopenshift\b", r"\bcontaineri[sz]ing\b",
-            r"\bdistributed system\b", r"\bcloud platforms?\b", r"\baws\b",
-            r"\bgoogle cloud platform\b", r"\bgcp\b", r"\bmicroservice\b",
-            r"\bevent-driven\b", r"\bscalable and distributed\b",
-        ]):
-            if devops_engineer not in out:
-                out.append(devops_engineer)
-
-        if full_stack and full_stack in out:
-            if not any(re.search(p, desc_low) for p in [r"\bfront-end\b", r"\bfrontend\b", r"\breact\b", r"\bjavascript\b", r"\btypescript\b", r"\bui\b"]):
-                out = [x for x in out if x != full_stack]
-
-        if solutions_engineer and solutions_engineer in out:
-            if not any(re.search(p, title_low + "\n" + desc_low) for p in [r"\bsolutions engineer\b", r"\bpre-sales\b", r"\bpresales\b", r"\bsales engineer\b"]):
-                out = [x for x in out if x != solutions_engineer]
-
-        if system_admin and system_admin in out and system_engineer_signal:
-            out = [x for x in out if x != system_admin]
-            if system_engineer and system_engineer not in out:
-                out.insert(0, system_engineer)
-
-        if cloud_engineer and cloud_engineer in out and system_engineer_signal and any(re.search(p, title_low) for p in [r"\bsystems engineer\b", r"\bsystem engineer\b"]):
-            out = [x for x in out if x != cloud_engineer]
-
-    marketing_data_signal = any(re.search(p, desc_low) for p in [
-        r"\bcampaign performance\b", r"\bcustomer behaviour\b", r"\bcustomer behavior\b",
-        r"\bloyalty scheme\b", r"\bcrm analytics\b", r"\bmarketing optimisation\b",
-        r"\bmarketing optimization\b", r"\brfm\b", r"\bltv\b", r"\bbasket analysis\b",
-        r"\bchurn analysis\b", r"\bpromotional performance\b", r"\baudience counts\b",
-        r"\bclient database\b", r"\besp\b",
+    admin_signal = any(re.search(p, title_low) for p in [
+        r"\bsystem administrator\b", r"\bsystems administrator\b",
+    ]) or any(re.search(p, desc_low) for p in [
+        r"\bactive directory\b", r"\bexchange\b", r"\buser administration\b",
+        r"\bo365\b", r"\bm365\b",
     ])
+    if admin_signal and system_admin and system_admin not in out:
+        out.append(system_admin)
 
-    if marketing_data_signal:
-        if marketing_analyst and marketing_analyst not in out:
-            out.insert(0, marketing_analyst)
-        if data_insight_analyst and data_insight_analyst not in out:
-            out.append(data_insight_analyst)
+    crm_marketing_signal = any(re.search(p, desc_low) for p in [
+        r"\bcrm\b", r"\bloyalty\b", r"\bcampaign\b", r"\bcustomer analytics\b",
+        r"\bsegmentation\b", r"\blifecycle\b", r"\bretention\b",
+    ])
+    if crm_marketing_signal:
+        for candidate in [marketing_analyst, data_insight_analyst]:
+            if candidate and candidate not in out:
+                out.append(candidate)
 
-        if business_analyst and business_analyst in out:
-            out = [x for x in out if x != business_analyst]
+    data_signal = any(re.search(p, title_low) for p in [
+        r"\bdata scientist\b", r"\bml engineer\b", r"\bmachine learning engineer\b",
+    ]) or any(re.search(p, desc_low) for p in [
+        r"\bmachine learning\b", r"\bmodelling\b", r"\bmodeling\b",
+        r"\bpython\b", r"\bstatistics\b",
+    ])
+    if data_signal:
+        for candidate in [data_scientist, business_analyst]:
+            if candidate and candidate not in out:
+                out.append(candidate)
 
-        data_scientist_strong = any(re.search(p, desc_low) for p in [
-            r"\bmachine learning\b", r"\bpredictive\b", r"\bstatistical model",
-            r"\bmodelling\b", r"\bmodeling\b", r"\bclassification\b",
-            r"\bregression\b", r"\bdata science\b",
-        ])
-        if data_scientist and data_scientist in out and not data_scientist_strong:
-            out = [x for x in out if x != data_scientist]
-
-    return dedupe_keep_order(out)[:3]
+    out = dedupe_keep_order([x for x in out if x])
+    return out[:3]
