@@ -21,7 +21,7 @@ from fetch_extract import (
     extract_best_content,
     fetch_html,
     fetch_with_playwright,
-    looks_like_js_shell,
+    should_try_playwright,
 )
 from formatters import (
     build_skills_source_text,
@@ -320,6 +320,29 @@ def blank_result_with_relevance(role_relevance: str, reason: str) -> JobResult:
     )
 
 
+def fetch_and_extract(url: str):
+    html, status = fetch_html(url)
+
+    if html:
+        parsed = extract_best_content(html)
+
+        if should_try_playwright(url, html, parsed["role_context_text"]):
+            pw_html, pw_status = fetch_with_playwright(url)
+            if pw_html:
+                html = pw_html
+                parsed = extract_best_content(html)
+                status = pw_status
+
+        return html, parsed, status
+
+    pw_html, pw_status = fetch_with_playwright(url)
+    if not pw_html:
+        return None, None, f"{status}; {pw_status}"
+
+    parsed = extract_best_content(pw_html)
+    return pw_html, parsed, pw_status
+
+
 def process_url(
     url: str,
     allowed_locations: List[str],
@@ -328,30 +351,13 @@ def process_url(
     nontp_skills: List[str],
     allowed_job_titles: List[str],
 ) -> JobResult:
-    html, status = fetch_html(url)
-    source_method = "html"
-    notes = [status]
+    html, parsed, fetch_status = fetch_and_extract(url)
 
-    if html:
-        parsed = extract_best_content(html)
-        if looks_like_js_shell(html, parsed["role_context_text"]):
-            pw_html, pw_status = fetch_with_playwright(url)
-            notes.append(pw_status)
-            if pw_html:
-                html = pw_html
-                source_method = "playwright"
-                parsed = extract_best_content(html)
-    else:
-        pw_html, pw_status = fetch_with_playwright(url)
-        notes.append(pw_status)
-        if not pw_html:
-            return blank_result_with_relevance(
-                role_relevance="Not relevant",
-                reason="Could not fetch or extract job content.",
-            )
-        html = pw_html
-        source_method = "playwright"
-        parsed = extract_best_content(html)
+    if not html or not parsed:
+        return blank_result_with_relevance(
+            role_relevance="Not relevant",
+            reason="Could not fetch or extract job content.",
+        )
 
     structured = parsed["structured"]
     title_tag_text = parsed["title_tag_text"]
@@ -381,12 +387,10 @@ def process_url(
     fallback_job_type = detect_job_type_rule_based(evidence_text, structured.get("employment_type_raw", ""))
     fallback_description = clean_whitespace(role_body_text)
 
+    strong_rule_relevant = bool(clean_title and is_relevant_by_rules(clean_title, role_body_text, header_text))
     substantial_role_text = len(clean_whitespace(role_body_text)) >= 700
-    fallback_role_relevance = (
-        "Relevant"
-        if ((clean_title and is_relevant_by_rules(clean_title, role_body_text, header_text)) or substantial_role_text)
-        else "Not relevant"
-    )
+
+    fallback_role_relevance = "Relevant" if strong_rule_relevant else "Not relevant"
     fallback_reason = "Fallback classification based on extracted title and role text."
 
     skip_rel_ai, rel_value, rel_reason = should_skip_relevance_ai(clean_title, role_body_text, header_text)
@@ -407,6 +411,12 @@ def process_url(
         return blank_result_with_relevance(
             role_relevance=role_relevance,
             reason=role_relevance_reason,
+        )
+
+    if not substantial_role_text and len(clean_whitespace(role_context_text)) < 350:
+        return blank_result_with_relevance(
+            role_relevance="Not relevant",
+            reason="Insufficient extracted role content for reliable enrichment.",
         )
 
     result = JobResult(
