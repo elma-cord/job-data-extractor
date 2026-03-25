@@ -228,26 +228,24 @@ def ai_extract_core_fields(
     try:
         data = _call_openai_json_cached("core_fields", prompt)
 
-        job_category = normalize_category_for_skills(str(data.get("job_category", "") or "").strip()) or fallback_job_category
+        job_category = (
+            normalize_category_for_skills(str(data.get("job_category", "") or "").strip())
+            or fallback_job_category
+        )
         job_location = str(data.get("job_location", "") or "").strip() or fallback_location
         remote_preferences = str(data.get("remote_preferences", "") or "").strip() or fallback_remote_preferences
         remote_days = str(data.get("remote_days", "") or "").strip() or fallback_remote_days
         visa_sponsorship = str(data.get("visa_sponsorship", "") or "").strip()
         job_type = str(data.get("job_type", "") or "").strip()
 
+        if remote_preferences not in {"onsite", "hybrid", "remote", ""}:
+            remote_preferences = fallback_remote_preferences
+
         if visa_sponsorship not in {"yes", "no", ""}:
             visa_sponsorship = fallback_visa
+
         if job_type not in {"Permanent", "FTC", "Part Time", "Freelance/Contract", ""}:
             job_type = fallback_job_type
-
-        if remote_preferences:
-            parts = [p.strip() for p in remote_preferences.split(",") if p.strip()]
-            valid_order = ["onsite", "hybrid", "remote"]
-            parts = [p for p in valid_order if p in parts]
-            if "hybrid" in parts and "remote" in parts:
-                remote_preferences = "hybrid, remote"
-            else:
-                remote_preferences = ", ".join(parts)
 
         return {
             "job_category": job_category,
@@ -298,7 +296,7 @@ def ai_extract_salary_only(
         if salary_period not in {"year", "day", "hour", "month", ""}:
             salary_period = fallback_salary_period
 
-        if salary_currency not in {"GBP", "USD", "EUR", ""}:
+        if salary_currency not in {"GBP", "USD", "EUR", "CAD", ""}:
             salary_currency = fallback_salary_currency
 
         return {
