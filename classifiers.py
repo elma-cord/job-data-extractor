@@ -40,21 +40,6 @@ def clean_whitespace(text: str) -> str:
     return text.strip()
 
 
-def safe_json_loads(text: str) -> Dict[str, Any]:
-    text = (text or "").strip()
-
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json|html)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        text = text[start:end + 1]
-
-    return json.loads(text)
-
-
 def normalize_quotes(text: str) -> str:
     return (
         (text or "")
@@ -79,11 +64,49 @@ def canonical_label(text: str) -> str:
     return s
 
 
+def safe_json_loads(text: str) -> Dict[str, Any]:
+    text = (text or "").strip()
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json|html)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+    start_obj = text.find("{")
+    end_obj = text.rfind("}")
+    if start_obj != -1 and end_obj != -1 and end_obj > start_obj:
+        candidate = text[start_obj:end_obj + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+    start_arr = text.find("[")
+    end_arr = text.rfind("]")
+    if start_arr != -1 and end_arr != -1 and end_arr > start_arr:
+        candidate = text[start_arr:end_arr + 1]
+        try:
+            arr = json.loads(candidate)
+            return {"items": arr}
+        except Exception:
+            pass
+
+    return json.loads(text)
+
+
 def normalize_category_for_skills(job_category: str) -> str:
     low = (job_category or "").strip().lower()
     if low in {"t&p", "tp", "tech & product", "tech and product"}:
         return "T&P"
-    if low in {"nont&p", "non-t&p", "non tp", "not t&p", "not tp", "nontp", "non tech", "non-tech"}:
+    if low in {
+        "nont&p",
+        "non-t&p",
+        "non tp",
+        "not t&p",
+        "not tp",
+        "nontp",
+        "non tech",
+        "non-tech",
+    }:
         return "NonT&P"
     return ""
 
@@ -134,6 +157,69 @@ def normalize_remote_preferences_value(value: str) -> str:
         return ""
 
     return ", ".join(found)
+
+
+def normalize_job_type(value: str, fallback: str = "") -> str:
+    raw = clean_whitespace(value)
+    if not raw:
+        return fallback
+
+    low = raw.lower()
+
+    if low in {"permanent", "perm", "full time", "full-time"}:
+        return "Permanent"
+    if low in {"ftc", "fixed term", "fixed-term", "fixed term contract", "contract - fixed term"}:
+        return "FTC"
+    if low in {"part time", "part-time"}:
+        return "Part Time"
+    if low in {"freelance", "contract", "contractor", "freelance/contract"}:
+        return "Freelance/Contract"
+
+    return fallback
+
+
+def normalize_visa_value(value: str, fallback: str = "") -> str:
+    raw = clean_whitespace(value).lower()
+    if raw in {"yes", "no"}:
+        return raw
+    return fallback
+
+
+def normalize_salary_currency(value: str, fallback: str = "") -> str:
+    raw = clean_whitespace(value).upper()
+    if raw in {"GBP", "USD", "EUR", "CAD"}:
+        return raw
+    return fallback
+
+
+def normalize_salary_period(value: str, fallback: str = "") -> str:
+    raw = clean_whitespace(value).lower()
+    if raw in {"year", "day", "hour", "month"}:
+        return raw
+    return fallback
+
+
+def normalize_location_candidate(value: str, fallback: str = "") -> str:
+    raw = clean_whitespace(value)
+    if not raw:
+        return fallback
+
+    low = normalize_quotes(raw).lower()
+    if low in {
+        "not specified",
+        "unknown",
+        "n/a",
+        "na",
+        "multiple",
+        "multiple locations",
+        "various",
+        "various locations",
+        "global",
+        "worldwide",
+    }:
+        return fallback
+
+    return raw
 
 
 def _cache_key(namespace: str, payload: str) -> str:
@@ -200,21 +286,24 @@ def ai_check_relevance(
 
     try:
         data = _call_openai_json_cached("relevance", prompt)
+
         role_relevance = str(data.get("role_relevance", "") or "").strip()
-        reason = str(data.get("role_relevance_reason", "") or "").strip()
+        role_relevance_reason = str(data.get("role_relevance_reason", "") or "").strip()
         job_category = normalize_category_for_skills(str(data.get("job_category", "") or "").strip())
 
         if role_relevance not in {"Relevant", "Not relevant"}:
             role_relevance = fallback_role_relevance
-        if not reason:
-            reason = fallback_reason
+
+        if not role_relevance_reason:
+            role_relevance_reason = fallback_reason
+
         if not job_category:
             job_category = fallback_job_category
 
         return {
             "role_relevance": role_relevance,
             "job_category": job_category,
-            "role_relevance_reason": reason,
+            "role_relevance_reason": role_relevance_reason,
         }
     except Exception as e:
         return {
@@ -264,39 +353,47 @@ def ai_extract_core_fields(
     try:
         data = _call_openai_json_cached("core_fields", prompt)
 
-        job_category = (
-            normalize_category_for_skills(str(data.get("job_category", "") or "").strip())
-            or fallback_job_category
+        job_category = normalize_category_for_skills(str(data.get("job_category", "") or "").strip())
+        if not job_category:
+            job_category = fallback_job_category
+
+        job_location = normalize_location_candidate(
+            str(data.get("job_location", "") or "").strip(),
+            fallback=fallback_location,
         )
-        job_location = str(data.get("job_location", "") or "").strip() or fallback_location
 
         remote_preferences = normalize_remote_preferences_value(
             str(data.get("remote_preferences", "") or "").strip()
-        ) or fallback_remote_preferences
+        )
+        if not remote_preferences:
+            remote_preferences = fallback_remote_preferences
 
-        remote_days = str(data.get("remote_days", "") or "").strip() or fallback_remote_days
-        if remote_days.lower() == "not specified":
+        remote_days = str(data.get("remote_days", "") or "").strip()
+        if not remote_days:
+            remote_days = fallback_remote_days
+        elif remote_days.lower() == "not specified":
             remote_days = "not specified"
 
         salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
         salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
-        salary_currency = str(data.get("salary_currency", "") or "").strip() or fallback_salary_currency
-        salary_period = str(data.get("salary_period", "") or "").strip() or fallback_salary_period
+        salary_currency = normalize_salary_currency(
+            str(data.get("salary_currency", "") or "").strip(),
+            fallback=fallback_salary_currency,
+        )
+        salary_period = normalize_salary_period(
+            str(data.get("salary_period", "") or "").strip(),
+            fallback=fallback_salary_period,
+        )
 
-        visa_sponsorship = str(data.get("visa_sponsorship", "") or "").strip()
-        job_type = str(data.get("job_type", "") or "").strip()
+        visa_sponsorship = normalize_visa_value(
+            str(data.get("visa_sponsorship", "") or "").strip(),
+            fallback=fallback_visa,
+        )
 
-        if visa_sponsorship not in {"yes", "no", ""}:
-            visa_sponsorship = fallback_visa
-
-        if job_type not in {"Permanent", "FTC", "Part Time", "Freelance/Contract", ""}:
-            job_type = fallback_job_type
-
-        if salary_period not in {"year", "day", "hour", "month", ""}:
-            salary_period = fallback_salary_period
-
-        if salary_currency not in {"GBP", "USD", "EUR", "CAD", ""}:
-            salary_currency = fallback_salary_currency
+        job_type = normalize_job_type(
+            str(data.get("job_type", "") or "").strip(),
+            fallback=fallback_job_type,
+        )
 
         return {
             "job_category": job_category,
@@ -349,14 +446,14 @@ def ai_extract_salary_only(
 
         salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
         salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
-        salary_currency = str(data.get("salary_currency", "") or "").strip() or fallback_salary_currency
-        salary_period = str(data.get("salary_period", "") or "").strip() or fallback_salary_period
-
-        if salary_period not in {"year", "day", "hour", "month", ""}:
-            salary_period = fallback_salary_period
-
-        if salary_currency not in {"GBP", "USD", "EUR", "CAD", ""}:
-            salary_currency = fallback_salary_currency
+        salary_currency = normalize_salary_currency(
+            str(data.get("salary_currency", "") or "").strip(),
+            fallback=fallback_salary_currency,
+        )
+        salary_period = normalize_salary_period(
+            str(data.get("salary_period", "") or "").strip(),
+            fallback=fallback_salary_period,
+        )
 
         return {
             "salary_min": salary_min,
@@ -373,7 +470,11 @@ def ai_extract_salary_only(
         }
 
 
-def ai_map_job_titles_only(position_name: str, description: str, allowed_job_titles: List[str]) -> List[str]:
+def ai_map_job_titles_only(
+    position_name: str,
+    description: str,
+    allowed_job_titles: List[str],
+) -> List[str]:
     if not client:
         return []
 
