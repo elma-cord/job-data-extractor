@@ -44,6 +44,8 @@ def build_skill_regex(skill: str) -> re.Pattern:
         "next.js": r"(?<![A-Za-z0-9])(?:next\.js|nextjs|next js)(?![A-Za-z0-9])",
         "vue.js": r"(?<![A-Za-z0-9])(?:vue\.js|vuejs|vue js)(?![A-Za-z0-9])",
         "nuxt.js": r"(?<![A-Za-z0-9])(?:nuxt\.js|nuxtjs|nuxt js)(?![A-Za-z0-9])",
+        "react.js": r"(?<![A-Za-z0-9])(?:react\.js|reactjs|react js)(?![A-Za-z0-9])",
+        "angular.js": r"(?<![A-Za-z0-9])(?:angular\.js|angularjs|angular js)(?![A-Za-z0-9])",
         "git": r"(?<![A-Za-z0-9])git(?![A-Za-z0-9])",
         "aws": r"(?<![A-Za-z0-9])aws(?![A-Za-z0-9])",
         "gcp": r"(?<![A-Za-z0-9])gcp(?![A-Za-z0-9])",
