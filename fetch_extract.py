@@ -5,8 +5,6 @@ from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -20,33 +18,8 @@ HEADERS = {
     "Accept-Language": "en-GB,en;q=0.9,en-US;q=0.8",
 }
 
-REQUEST_TIMEOUT = 18
-PLAYWRIGHT_TIMEOUT_MS = 15000
-PLAYWRIGHT_NETWORKIDLE_MS = 3500
-PLAYWRIGHT_POST_LOAD_WAIT_MS = 700
-
-# Domains where raw HTML is usually enough
-NEVER_RENDER_DOMAINS = {
-    "boards.greenhouse.io",
-    "job-boards.greenhouse.io",
-    "jobs.ashbyhq.com",
-    "jobs.lever.co",
-    "apply.workable.com",
-    "smartrecruiters.com",
-}
-
-# Domains where JS rendering is more often needed
-LIKELY_RENDER_DOMAINS = {
-    "myworkdayjobs.com",
-    "workday.com",
-    "oraclecloud.com",
-    "successfactors.com",
-    "icims.com",
-    "ultipro.com",
-    "dayforcehcm.com",
-    "recruitee.com",
-    "pinpointhq.com",
-}
+# Faster timeout for fallback-only fetching
+REQUEST_TIMEOUT = 8
 
 STRONG_JOB_SIGNALS = [
     "responsibilities",
@@ -77,15 +50,15 @@ STRONG_JOB_SIGNALS = [
 
 _session = requests.Session()
 _retry = Retry(
-    total=2,
-    connect=2,
-    read=2,
-    status=2,
+    total=1,
+    connect=1,
+    read=1,
+    status=1,
     status_forcelist=(429, 500, 502, 503, 504),
-    backoff_factor=0.4,
+    backoff_factor=0.2,
     allowed_methods=frozenset(["GET", "HEAD"]),
 )
-_adapter = HTTPAdapter(max_retries=_retry, pool_connections=100, pool_maxsize=100)
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=50, pool_maxsize=50)
 _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
 _session.headers.update(HEADERS)
@@ -176,10 +149,6 @@ def get_domain(url: str) -> str:
         return ""
 
 
-def domain_matches(domain: str, candidates: set[str]) -> bool:
-    return any(domain == d or domain.endswith("." + d) for d in candidates)
-
-
 # -------------------------
 # Fetching
 # -------------------------
@@ -195,97 +164,9 @@ def fetch_html(url: str) -> Tuple[Optional[str], str]:
         return None, f"request_error: {e}"
 
 
+# Compatibility stub only. Not used in the fast workflow.
 def fetch_with_playwright(url: str) -> Tuple[Optional[str], str]:
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--no-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                ],
-            )
-            context = browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-                locale="en-GB",
-                java_script_enabled=True,
-                ignore_https_errors=True,
-            )
-            page = context.new_page()
-
-            def route_handler(route):
-                rtype = route.request.resource_type
-                if rtype in {"image", "media", "font", "stylesheet"}:
-                    try:
-                        route.abort()
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        route.continue_()
-                    except Exception:
-                        pass
-
-            page.route("**/*", route_handler)
-            page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT_MS)
-
-            try:
-                page.wait_for_load_state("networkidle", timeout=PLAYWRIGHT_NETWORKIDLE_MS)
-            except PlaywrightTimeoutError:
-                pass
-
-            # Small wait helps JS job boards render location / remote labels
-            page.wait_for_timeout(PLAYWRIGHT_POST_LOAD_WAIT_MS)
-
-            try:
-                page.evaluate(
-                    """
-                    async () => {
-                        const body = document.body;
-                        if (!body) return;
-                        const totalHeight = Math.max(
-                            body.scrollHeight,
-                            document.documentElement ? document.documentElement.scrollHeight : 0
-                        );
-                        if (totalHeight < 1800) return;
-
-                        window.scrollBy(0, 900);
-                        await new Promise(r => setTimeout(r, 180));
-                        window.scrollBy(0, 900);
-                        await new Promise(r => setTimeout(r, 180));
-                        window.scrollTo(0, 0);
-                    }
-                    """
-                )
-            except Exception:
-                pass
-
-            frames_html = []
-            try:
-                for fr in page.frames:
-                    try:
-                        if fr == page.main_frame:
-                            continue
-                        fr_html = fr.content()
-                        if fr_html and len(fr_html) > 1200:
-                            frames_html.append(fr_html)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            html = page.content()
-            context.close()
-            browser.close()
-
-            if frames_html:
-                html = html + "\n" + "\n".join(frames_html)
-
-            return html, "playwright"
-    except Exception as e:
-        return None, f"playwright_error: {e}"
+    return None, "playwright_disabled"
 
 
 def looks_like_js_shell(html: str, text: str) -> bool:
@@ -324,18 +205,8 @@ def looks_like_js_shell(html: str, text: str) -> bool:
     return False
 
 
+# Compatibility stub only. Fast workflow never auto-renders.
 def should_try_playwright(url: str, html: str, parsed_role_context_text: str) -> bool:
-    domain = get_domain(url)
-
-    if domain_matches(domain, NEVER_RENDER_DOMAINS):
-        return False
-
-    if domain_matches(domain, LIKELY_RENDER_DOMAINS):
-        return True
-
-    if looks_like_js_shell(html, parsed_role_context_text):
-        return True
-
     return False
 
 
@@ -423,7 +294,7 @@ def extract_embedded_json_candidates(soup: BeautifulSoup) -> List[Dict[str, Any]
     return candidates
 
 
-def walk_for_strings(node: Any, out: List[str], max_items: int = 3000) -> None:
+def walk_for_strings(node: Any, out: List[str], max_items: int = 1500) -> None:
     if len(out) >= max_items:
         return
     if isinstance(node, str):
@@ -499,34 +370,6 @@ def extract_structured_fields(soup: BeautifulSoup) -> Dict[str, Any]:
                             parts.append(piece)
             data["location_raw"] = ", ".join(parts)
 
-        base_salary = jp.get("baseSalary")
-        if isinstance(base_salary, dict):
-            data["salary_currency_raw"] = first_nonempty(base_salary.get("currency"))
-            unit_text = str(base_salary.get("unitText", "") or "").lower()
-            if unit_text in {"year", "yearly"}:
-                data["salary_period_raw"] = "year"
-            elif unit_text in {"month", "monthly"}:
-                data["salary_period_raw"] = "month"
-            elif unit_text in {"day", "daily"}:
-                data["salary_period_raw"] = "day"
-            elif unit_text in {"hour", "hourly"}:
-                data["salary_period_raw"] = "hour"
-
-            value = base_salary.get("value")
-            if isinstance(value, dict):
-                minv = value.get("minValue")
-                maxv = value.get("maxValue")
-                if minv is not None:
-                    try:
-                        data["salary_min_raw"] = int(float(minv))
-                    except Exception:
-                        pass
-                if maxv is not None:
-                    try:
-                        data["salary_max_raw"] = int(float(maxv))
-                    except Exception:
-                        pass
-
         emp_type = jp.get("employmentType")
         if isinstance(emp_type, list):
             data["employment_type_raw"] = ", ".join(str(x) for x in emp_type)
@@ -535,9 +378,9 @@ def extract_structured_fields(soup: BeautifulSoup) -> Dict[str, Any]:
 
     embedded = extract_embedded_json_candidates(soup)
     blob_strings: List[str] = []
-    for item in embedded[:20]:
-        walk_for_strings(item, blob_strings, max_items=2500)
-    data["json_blob_text"] = clean_whitespace("\n".join(dedupe_keep_order(blob_strings)))[:40000]
+    for item in embedded[:10]:
+        walk_for_strings(item, blob_strings, max_items=1500)
+    data["json_blob_text"] = clean_whitespace("\n".join(dedupe_keep_order(blob_strings)))[:12000]
 
     if not data["title"]:
         title_tag = soup.find("title")
@@ -555,55 +398,17 @@ ROLE_KEEP_HEADINGS = {
     "about the role",
     "about the job",
     "job description",
-    "role purpose",
-    "purpose of the role",
-    "context",
     "key responsibilities",
     "responsibilities",
-    "responsibilities include",
     "what you'll do",
     "what you’ll do",
-    "what to bring",
-    "what you'll need",
-    "what you’ll need",
     "required",
-    "required experience",
-    "essential",
-    "essential skills and experience",
-    "desirable",
-    "desirable skills and experience",
     "qualifications",
-    "skills & experience",
-    "skills and experience",
-    "activities",
-    "to be successful",
-    "who we are looking for",
     "minimum qualifications",
     "preferred qualifications",
-    "nice to have",
-    "key relationships",
-    "success measures",
-    "job requirements",
-    "overview",
-    "purpose",
-    "summary",
-    "person specification",
     "requirements",
     "about you",
-    "you will be responsible for",
-    "duties and responsibilities",
-    "knowledge, skills, and abilities",
     "experience",
-    "responsibilities and duties",
-    "what you'll be doing",
-    "what you’ll be doing",
-    "required qualifications",
-    "preferred experience",
-    "skills required",
-    "must have",
-    "ideal candidate",
-    "role and responsibilities",
-    "main responsibilities and accountabilities",
     "location",
     "work location",
     "remote",
@@ -616,9 +421,6 @@ ROLE_STOP_HEADINGS = {
     "about us",
     "benefits",
     "what we offer",
-    "what do you get for all your hard work?",
-    "what you'll get in return",
-    "what you’ll get in return",
     "additional information",
     "recruitment agencies",
     "privacy policy",
@@ -630,8 +432,6 @@ ROLE_STOP_HEADINGS = {
     "read more",
     "follow us",
     "logo",
-    "equal opportunities for all",
-    "more about",
     "application",
     "how to apply",
     "application process",
@@ -672,31 +472,12 @@ def looks_like_heading(line: str) -> bool:
         return True
 
     raw = normalize_quotes(line).strip()
-    if raw.endswith(":") and len(raw) <= 120:
+    if raw.endswith(":") and len(raw) <= 100:
         return True
 
-    if len(x) <= 90 and not re.search(r"[.!?]", x):
-        keyword_hits = [
-            "responsib",
-            "qualif",
-            "experience",
-            "about the role",
-            "about the job",
-            "requirements",
-            "about you",
-            "person specification",
-            "required",
-            "preferred",
-            "skills",
-            "location",
-            "remote",
-            "hybrid",
-        ]
-        if any(k in x for k in keyword_hits):
+    if len(x) <= 70 and not re.search(r"[.!?]", x):
+        if any(k in x for k in ["responsib", "qualif", "experience", "requirements", "skills", "location", "remote", "hybrid"]):
             return True
-
-    if len(raw) <= 80 and raw == raw.title() and not re.search(r"[.!?]", raw):
-        return True
 
     return False
 
@@ -716,15 +497,11 @@ def find_primary_root(soup: BeautifulSoup):
         "section",
         "div[id*='job']",
         "div[class*='job']",
-        "div[data-ui='job-description']",
         "div[class*='description']",
         "div[class*='posting']",
         "div[class*='content']",
         "div[class*='career']",
-        "div[id*='career']",
         "div[class*='opening']",
-        "div[id*='opening']",
-        "iframe",
     ]
     seen = set()
     for sel in selectors:
@@ -740,21 +517,10 @@ def find_primary_root(soup: BeautifulSoup):
             classes = " ".join(node.get("class", [])) if node.get("class") else ""
             node_id = node.get("id", "") or ""
             low_meta = f"{classes} {node_id}".lower()
-            if any(
-                k in low_meta for k in [
-                    "job",
-                    "career",
-                    "opening",
-                    "posting",
-                    "description",
-                    "apply",
-                    "greenhouse",
-                    "lever",
-                ]
-            ):
-                score += 1200
+            if any(k in low_meta for k in ["job", "career", "opening", "posting", "description", "apply"]):
+                score += 800
             if node.name in {"main", "article"}:
-                score += 1500
+                score += 1000
             candidates.append((score, node))
     if not candidates:
         return soup.body or soup
@@ -775,13 +541,13 @@ def extract_dom_blocks(root) -> List[str]:
         if not txt:
             continue
         txt = normalize_quotes(txt)
-        if len(txt) > 2200 and node.name in {"div", "span"}:
+        if len(txt) > 1600 and node.name in {"div", "span"}:
             continue
         if len(txt) < 2:
             continue
         blocks.append(txt)
 
-    return dedupe_keep_order(blocks)[:700]
+    return dedupe_keep_order(blocks)[:300]
 
 
 def build_section_based_role_text(blocks: List[str]) -> str:
@@ -806,28 +572,7 @@ def build_section_based_role_text(blocks: List[str]) -> str:
 
         if norm in ROLE_KEEP_HEADINGS or looks_like_heading(block):
             if norm in ROLE_KEEP_HEADINGS or any(
-                x in norm for x in [
-                    "responsib",
-                    "qualif",
-                    "experience",
-                    "about the role",
-                    "about the job",
-                    "requirements",
-                    "about you",
-                    "person specification",
-                    "minimum qualifications",
-                    "preferred qualifications",
-                    "what you'll do",
-                    "what you’ll do",
-                    "required qualifications",
-                    "skills",
-                    "must have",
-                    "ideal candidate",
-                    "role and responsibilities",
-                    "location",
-                    "remote",
-                    "hybrid",
-                ]
+                x in norm for x in ["responsib", "qualif", "experience", "requirements", "skills", "location", "remote", "hybrid"]
             ):
                 in_keep = True
                 seen_useful_heading = True
@@ -837,19 +582,12 @@ def build_section_based_role_text(blocks: List[str]) -> str:
         if in_keep:
             if any(
                 phrase in low
-                for phrase in [
-                    "privacy policy",
-                    "follow us",
-                    "recruitment agencies",
-                    "all rights reserved",
-                    "read more",
-                    "equal opportunities for all",
-                ]
+                for phrase in ["privacy policy", "follow us", "recruitment agencies", "all rights reserved", "read more"]
             ):
                 break
             kept.append(block)
 
-    if len(kept) < 8:
+    if len(kept) < 6:
         fallback = []
         for block in blocks:
             norm = normalize_heading(block)
@@ -858,16 +596,7 @@ def build_section_based_role_text(blocks: List[str]) -> str:
                 continue
             if norm in ROLE_STOP_HEADINGS:
                 continue
-            if any(
-                phrase in low
-                for phrase in [
-                    "privacy policy",
-                    "follow us",
-                    "recruitment agencies",
-                    "all rights reserved",
-                    "read more",
-                ]
-            ):
+            if any(phrase in low for phrase in ["privacy policy", "follow us", "recruitment agencies", "all rights reserved", "read more"]):
                 continue
             fallback.append(block)
         kept = fallback
@@ -900,7 +629,7 @@ def extract_header_candidates(
 
     for node in root.find_all(["p", "div", "span", "li"], recursive=True):
         txt = text_from_node(node)
-        if not txt or len(txt) > 260:
+        if not txt or len(txt) > 220:
             continue
         low = txt.lower()
         if any(
@@ -916,11 +645,8 @@ def extract_header_candidates(
                 "onsite",
                 "on-site",
                 "home based",
-                "home-based",
                 "salary",
-                "rate",
                 "contract",
-                "position role type",
                 "work location",
                 "right to work",
                 "office attendance",
@@ -929,7 +655,7 @@ def extract_header_candidates(
         ):
             out.append(txt)
 
-    return dedupe_keep_order(out)[:160]
+    return dedupe_keep_order(out)[:100]
 
 
 def clean_job_description(text: str) -> str:
@@ -982,7 +708,7 @@ def clean_job_description(text: str) -> str:
         cleaned.append(line)
 
     out = clean_whitespace("\n".join(dedupe_keep_order(cleaned)))
-    return out[:22000]
+    return out[:12000]
 
 
 def merge_role_bodies(*candidates: str) -> str:
@@ -1010,13 +736,9 @@ def job_text_score(text: str) -> int:
         "required",
         "what you'll do",
         "what you’ll do",
-        "key responsibilities",
         "minimum qualifications",
         "preferred qualifications",
-        "desirable",
         "about you",
-        "work location",
-        "right to work",
         "location",
         "remote",
         "hybrid",
@@ -1040,7 +762,7 @@ def job_text_score(text: str) -> int:
         if term in low:
             score -= 3
 
-    score += min(len(text) // 500, 8)
+    score += min(len(text) // 600, 6)
     return score
 
 
@@ -1087,7 +809,7 @@ def extract_best_content(html: str) -> Dict[str, Any]:
         best_body = scored[0][3]
 
     role_body_text = best_body
-    if len(role_body_text.strip()) < 600:
+    if len(role_body_text.strip()) < 400:
         role_body_text = merge_role_bodies(
             dom_role_text,
             visible_role_body,
