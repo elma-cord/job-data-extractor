@@ -2,6 +2,7 @@ name: Job data extractor
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONUNBUFFERED: "1"
 
 on:
   workflow_dispatch:
@@ -9,6 +10,7 @@ on:
 jobs:
   extract:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repo
@@ -29,9 +31,22 @@ jobs:
         run: |
           python -m playwright install chromium --with-deps
 
+      - name: Validate required input files
+        run: |
+          test -f jobs_input.csv || (echo "Missing jobs_input.csv" && exit 1)
+          test -f predefined_locations.csv || (echo "Missing predefined_locations.csv" && exit 1)
+          test -f predefined_salaries.csv || (echo "Missing predefined_salaries.csv" && exit 1)
+          test -f predefined_tp_skills.csv || (echo "Missing predefined_tp_skills.csv" && exit 1)
+          test -f predefined_nontp_skills.csv || (echo "Missing predefined_nontp_skills.csv" && exit 1)
+          test -f predefined_job_titles.csv || (echo "Missing predefined_job_titles.csv" && exit 1)
+
       - name: Run extractor
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+          MAX_WORKERS: "6"
+          FAST_MODE: "1"
+          MIN_EXACT_SKILLS_TO_SKIP_AI: "3"
         run: |
           python main.py
 
@@ -39,6 +54,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: job-data-results
-          path: |
-            results.csv
+          path: results.csv
           if-no-files-found: error
