@@ -10,19 +10,21 @@ Return valid JSON only:
 You are the FIRST screening step for a recruiting workflow.
 
 You will receive:
-1. a job title
-2. a job description / role context
+1. a position name
+2. the CURRENT PROVIDED JOB DESCRIPTION / ROLE CONTEXT
+
+Important:
+- The provided description is the primary source of truth.
+- Do not assume any information not supported by the provided title + description.
+- Do not guess from company name alone.
+- Ignore cookie banners, legal boilerplate, privacy text, marketing text, navigation text, partner lists, and unrelated company text.
 
 Your tasks:
 1. Decide whether the role is Relevant or Not relevant
 2. Decide whether the role is T&P or NonT&P
 3. Give a concise reason
 
-IMPORTANT:
-- If a role is Not relevant, the workflow will stop after this step.
-- Be strict, accurate, and grounded in the actual title + description.
-- Ignore cookie banners, footers, legal boilerplate, privacy text, marketing text, navigation text, partner lists, and unrelated company text.
-- Do not guess from company name alone.
+If a role is Not relevant, the workflow will stop after this step.
 
 RELEVANT ROLE FAMILIES
 Relevant roles include these exact families and close synonyms/specialisations:
@@ -58,7 +60,7 @@ Exclude any roles related to:
 - beauty brands
 
 LOCATION RULES
-The role is Relevant only if the working location setup is allowed.
+The role is Relevant only if the working location setup is allowed based on the PROVIDED DESCRIPTION.
 
 Allowed:
 a) United Kingdom: onsite, hybrid, or remote
@@ -74,6 +76,7 @@ Detailed rules:
 - If the role clearly mentions USA, Canada, or another non-allowed region and there is no evidence it can be done from an allowed region, mark Not relevant.
 - If salary is stated in USD or CAD and there is no evidence the role can be worked from an allowed region, that is evidence for Not relevant.
 - If multiple locations are listed and at least one is allowed while others are generic like remote/anywhere, treat as Relevant only if the contract clearly allows working fully from the allowed location.
+- If location is missing or unclear in the provided description, do NOT mark Not relevant for that reason alone. Judge based on function first.
 
 LANGUAGE RULE
 - If the role clearly requires any language other than English, mark Not relevant.
@@ -86,8 +89,8 @@ T&P VS NonT&P
 
 DECISION ORDER
 1. Identify likely role family from title and description.
-2. Identify location and remote setup from the description.
-3. Apply the location rules.
+2. Identify location and remote setup from the provided description if present.
+3. Apply the location rules only where supported by the description.
 4. Apply the language rule.
 5. If Relevant, classify T&P or NonT&P.
 6. Return final result.
@@ -101,11 +104,12 @@ REASON RULES
   - "Role requires French language."
   - "Manufacturing mechanical role is outside target functions."
   - "Remote Ireland role is allowed and matches finance function."
+  - "Relevant PMO / operations role."
 
 Position name:
 {job_title}
 
-Description:
+Current provided job description / role context:
 {role_context_text[:16000]}
 """.strip()
 
@@ -133,26 +137,33 @@ Return valid JSON only:
   "job_type": "Permanent|FTC|Part Time|Freelance/Contract|"
 }}
 
-You will receive a relevant job only.
+You are extracting fields from the CURRENT PROVIDED JOB DESCRIPTION.
+The provided description is the main source of truth.
+Be strict and grounded. Do not guess.
 
-Perform the following tasks carefully.
+If a field is not clearly supported by the provided text, return an empty string for that field.
+Exception:
+- remote_preferences may return "not specified"
+- remote_days may return "not specified"
 
 1. Position Location
-a) Read the entire description to find the job’s work location.
-b) Focus on locations near keywords like: "location:", "based in", "office in", "work location", "remote in", "country", "city", "based at".
-c) If multiple locations appear, select the most specific one (city/town over region/country).
+a) Read the provided description carefully to find the work location.
+b) Focus on locations near keywords like:
+   "location:", "based in", "office in", "work location", "remote in", "country", "city", "based at"
+c) If multiple locations appear, select the most specific one that seems directly tied to the role.
 d) Match exactly one entry from the provided list of acceptable normalized locations where possible.
-e) If the extracted location does not exactly exist in the list, select the closest broader location.
-f) If no match is found, return "".
+e) If the extracted location does not exactly exist in the list, select the closest broader location from the list.
+f) If no supported match is found, return "".
+g) Do not invent a location from company HQ, company name, currency alone, or generic regional references.
 
 2. Position Remote Preferences
-a) Extract all remote working preferences anywhere in the description.
+a) Extract remote working preferences only if supported by the provided description.
 b) Normalize all variants of onsite as exactly onsite.
 c) Normalize all hybrid variants as exactly hybrid.
 d) Normalize all remote variants as exactly remote.
 e) List extracted preferences in this order only: onsite, hybrid, remote.
 f) Separate multiple preferences with comma + space.
-g) If none of these appear, return "not specified".
+g) If none of these are clearly supported, return "not specified".
 h) It is valid to return combinations such as:
    - onsite, hybrid
    - hybrid, remote
@@ -166,31 +177,32 @@ Return only:
 - "not specified"
 
 Rules:
-a) Return a number only if remote/office days are explicitly stated.
+a) Return a number only if remote days or office days are explicitly stated.
 b) If a range is given for remote days, return the highest number.
-c) If office days are stated, calculate remote days as 5 - office days. For a range, return the highest possible remote days.
-d) If text says fully remote / remote every day, return "not specified".
-e) If no remote work is allowed, return "not specified".
-f) If days are mentioned but unclear whether they are remote or office days, return "not specified".
-g) Examples:
+c) If office days are stated, calculate remote days as 5 - office days.
+d) If office days are given as a range, return the highest possible remote days.
+e) Examples:
    - 2 days in office => 3
    - 1-2 days in office => 4
    - 2-3 remote days => 3
    - 60% office based => 2
+f) If text says fully remote / remote every day, return "not specified".
+g) If no remote work is allowed, return "not specified".
+h) If days are mentioned but unclear whether they are remote or office days, return "not specified".
 
 4. Salary
-a) Extract minimum and maximum salary numbers anywhere in the description.
+a) Extract minimum and maximum salary numbers only if explicitly stated for this role.
 b) If only one salary is present, treat it as both min and max.
 c) Identify currency code from text.
 d) salary_period must be one of: year, day, hour, month, or "".
 e) Keep raw explicit numeric salary values only.
-f) Do not use years of experience, dates, ids, percentages, bonus-only numbers, benefits budgets, employee counts, revenue, or unrelated page numbers.
+f) Do not use years of experience, dates, ids, percentages, bonus-only numbers, benefits budgets, employee counts, revenue, or unrelated numbers.
 g) If salary is ambiguous or not clearly tied to this role, return empty strings.
 
 5. Visa Sponsorship
 - Return yes, no, or ""
 - yes only if sponsorship is explicitly available
-- no only if the ad explicitly says sponsorship is unavailable / right to work required
+- no only if the ad explicitly says sponsorship is unavailable / right to work required / no sponsorship
 - otherwise ""
 
 6. Contract Type
@@ -211,9 +223,9 @@ Rules:
 - If no valid type is found, return ""
 
 7. job_category
-- If the category is already obvious from the role, you may return T&P or NonT&P.
+- If the category is obvious from the role, return T&P or NonT&P.
 - If unclear, return "".
-- This field exists for compatibility with the current pipeline, but relevance/category should primarily be decided in the first prompt.
+- Do not force a category.
 
 Allowed normalized locations:
 {location_list_text}
@@ -224,7 +236,7 @@ Position name:
 Header/meta text:
 {header_text[:5000]}
 
-Role description:
+Current provided job description:
 {role_body_text[:14000]}
 """.strip()
 
@@ -288,7 +300,7 @@ Return valid JSON only:
   "salary_period": ""
 }}
 
-Extract salary only when it is explicitly stated for this role.
+Extract salary only when it is explicitly stated for this role in the CURRENT PROVIDED JOB DESCRIPTION.
 
 Rules:
 - salary_period must be one of: year, day, hour, month, or ""
@@ -318,7 +330,7 @@ Position name:
 Header/meta text:
 {header_text[:3000]}
 
-Role description:
+Current provided job description:
 {role_body_text[:10000]}
 """.strip()
 
@@ -334,7 +346,7 @@ Return valid JSON only:
 
 You will receive:
 1. a position name
-2. a description
+2. the CURRENT PROVIDED JOB DESCRIPTION
 
 Task:
 Choose up to 3 best matching job titles from the predefined list.
@@ -342,10 +354,12 @@ Choose up to 3 best matching job titles from the predefined list.
 Rules:
 - Use only job titles from the predefined list.
 - If the position name exactly matches one predefined title, return only that one.
+- If the position name is clear and strongly points to one allowed title, prefer just one result.
 - If the position name is unclear or ambiguous, choose up to the top 3 most appropriate job titles from the predefined list.
 - Prefer functional fit over literal wording.
 - Do not force 3 titles if 1 or 2 are clearly enough.
 - Do not return loosely related titles.
+- Do not guess from company background.
 - Output titles ordered from most to least appropriate.
 - If no suitable match exists, return an empty array.
 
@@ -364,7 +378,7 @@ Predefined job titles:
 Position name:
 {position_name}
 
-Description:
+Current provided job description:
 {description[:12000]}
 """.strip()
 
@@ -378,7 +392,7 @@ Return valid JSON only:
 
 You will receive:
 1. a position name
-2. a description
+2. the CURRENT PROVIDED JOB DESCRIPTION
 
 Task:
 Choose up to 3 seniority values using only:
@@ -389,10 +403,11 @@ Rules:
 - Seniority values must be lowercase
 - Use only values strongly supported by the title and description
 - Do not over-tag
+- Do not add levels just to fill space
 
 Strong title rules:
 - If title includes Head, Director, VP, Chief, C-level => leadership
-- If title includes Engineering Manager or similar strong leadership title => leadership
+- If title includes Engineering Manager or similar strong people-management title => leadership
 - Plain manager titles usually mean senior and/or lead, not mid
 - Do not include mid for manager titles unless the role is clearly junior/assistant/associate-manager style
 
@@ -423,7 +438,7 @@ Other rules:
 Position name:
 {position_name}
 
-Description:
+Current provided job description:
 {description[:12000]}
 """.strip()
 
@@ -458,62 +473,17 @@ Input text:
 
 def build_job_description_prompt(description_text: str) -> str:
     return f"""
-Output only valid HTML. No markdown. No commentary. No wrappers.
+Return valid JSON only:
+{{
+  "status": "unused"
+}}
 
-From the input, extract only relevant job content.
+This prompt is kept only for compatibility with older imports.
+Do not transform, rewrite, clean, format, or summarize the job description.
+The current workflow no longer outputs a generated job_description column.
 
-Include:
-1. Purpose and responsibilities (About the Role, Responsibilities, Key Duties)
-2. Candidate requirements, qualifications, skills, experience (About You, Requirements, Ideally You Will Have)
-3. Any text that directly explains what the job involves or what the candidate should bring
-
-Exclude:
-1. Company background
-2. Benefits and perks
-3. Disclaimers or application instructions
-4. Marketing or promotional text
-5. Unrelated content
-
-Formatting rules:
-1. HTML only:
-   - <b> for section titles
-   - <ul><li> for bullet lists
-   - <p> for plain paragraphs
-   - <em> only if in source
-
-2. Section titles:
-   a) Keep original headers word-for-word
-   b) Preserve casing, except if ALL CAPS then convert to Title Case
-   c) One blank line before and after each <b> block
-   d) If header is “About the Role” / “About this Role” / “The Role”, remove the header and keep only the content
-
-3. Bullets:
-   a) Use <ul><li> only if source has bullets or numbered list structure
-   b) Do not convert plain paragraphs into bullets
-   c) Keep each bullet in one <li>
-   d) Remove empty <li></li>
-   e) No blank lines between <li> items
-
-4. Lists & nesting:
-   a) Sub-bullets -> nested <ul> inside <li>
-   b) If unclear, flatten under nearest header
-   c) Do not invent new headers
-
-5. Preservation & cleanup:
-   a) Keep sentences word-for-word, no rephrasing
-   b) Remove markdown, stray dots, extra spaces
-   c) Collapse multiple newlines between </li><li> into a single one
-   d) Intro text before first header -> <p>
-
-6. Header fallback:
-   a) If bullets appear without a header:
-      - duties -> <b>Responsibilities</b>
-      - qualifications/skills -> <b>Requirements</b> or <b>Skills & Experience</b> if closer
-      - do not add fallback headers for prose
-   b) If nothing remains, output empty string
-
-Input:
-{description_text[:20000]}
+Input text:
+{description_text[:2000]}
 """.strip()
 
 
@@ -526,14 +496,15 @@ Return valid JSON only. No markdown. No commentary.
 
 Hard rules:
 - role_category is PROVIDED as input. You MUST echo it exactly as given ("T&P" or "NonT&P"). Do not change it.
-- skills MUST be an array with 2 to 10 items. Try hard to return at least 2.
+- skills MUST be an array with 2 to 10 items. Try hard to return at least 2 when clearly supported.
 - skills MUST be chosen ONLY from the correct allowed skills list.
-- Prefer concrete, clearly evidenced skills from the description.
+- Prefer concrete, clearly evidenced skills from the CURRENT PROVIDED JOB DESCRIPTION.
 - candidate_skills is provided: use it as the PRIMARY source, but if it has fewer than 2 items, infer additional skills from the description.
 - NEVER output a skill not present in the allowed list.
 - Before finalizing, verify each returned skill appears exactly in the allowed list. If not, remove it.
 - Use only skills supported by the description or candidate_skills.
 - Do not use footer text, navigation text, legal text, marketing text, partner lists, or unrelated company content.
+- Do not invent broad generic skills if the wording is not supported.
 
 Output schema:
 {{
@@ -550,7 +521,7 @@ candidate_skills:
 Allowed skills:
 {allowed_skills_text}
 
-Description:
+Current provided job description:
 {description[:14000]}
 """.strip()
 
@@ -575,10 +546,11 @@ Hard rules:
 - You MUST NOT repeat any skills that are already present in existing_skills.
 - You MUST choose skills ONLY from the correct allowed skills list.
 - candidate_skills is provided: use it as the primary source when relevant.
-- If candidate_skills is insufficient, infer from the description but still only from the allowed list.
+- If candidate_skills is insufficient, infer from the CURRENT PROVIDED JOB DESCRIPTION but still only from the allowed list.
 - Before finalizing, verify each returned skill exists exactly in the allowed list. Remove any that do not.
 - Do not output existing_skills again.
 - Do not use footer text, navigation text, legal text, marketing text, partner lists, or unrelated company content.
+- Do not invent broad generic skills if the wording is not supported.
 
 Output schema:
 {{
@@ -598,7 +570,7 @@ candidate_skills:
 Allowed skills:
 {allowed_skills_text}
 
-Description:
+Current provided job description:
 {description[:14000]}
 """.strip()
 
