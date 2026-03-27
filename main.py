@@ -12,17 +12,13 @@ from bs4 import BeautifulSoup
 from classifiers import (
     ai_check_relevance,
     ai_extract_core_fields,
-    ai_extract_salary_only,
     ai_generate_additional_skills,
     ai_generate_skills_full,
     ai_map_job_titles_only,
-    ai_map_seniority_only,
 )
 from fetch_extract import (
     extract_best_content,
     fetch_html,
-    fetch_with_playwright,
-    should_try_playwright,
 )
 from formatters import (
     exact_match_skills_in_order,
@@ -36,7 +32,6 @@ from validators import (
     has_explicit_remote_days_evidence,
     is_relevant_by_rules,
     is_tp_by_rules,
-    line_has_compensation_anchor,
     location_value_has_evidence,
     normalize_category_for_skills,
     normalize_job_title_from_list,
@@ -58,9 +53,10 @@ TP_SKILLS_CSV = "predefined_tp_skills.csv"
 NONTP_SKILLS_CSV = "predefined_nontp_skills.csv"
 JOB_TITLES_CSV = "predefined_job_titles.csv"
 
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "6"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
 FAST_MODE = os.getenv("FAST_MODE", "1").strip().lower() in {"1", "true", "yes", "y"}
-MIN_EXACT_SKILLS_TO_SKIP_AI = int(os.getenv("MIN_EXACT_SKILLS_TO_SKIP_AI", "3"))
+MIN_EXACT_SKILLS_TO_SKIP_AI = int(os.getenv("MIN_EXACT_SKILLS_TO_SKIP_AI", "4"))
+ENABLE_URL_FALLBACK = os.getenv("ENABLE_URL_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "y"}
 
 
 @dataclass
@@ -349,19 +345,11 @@ def should_run_core_fields_ai(
     return missing_count >= 3
 
 
-def should_run_salary_ai(evidence_text: str) -> bool:
-    candidate_lines = split_lines(evidence_text)[:220]
-    return any(line_has_compensation_anchor(line) for line in candidate_lines)
-
-
 def should_run_titles_ai(clean_title: str, allowed_job_titles: List[str]) -> bool:
+    if FAST_MODE:
+        return False
     exact = normalize_job_title_from_list(clean_title, allowed_job_titles)
     return not bool(exact)
-
-
-def should_run_seniority_ai(clean_title: str, role_text: str) -> bool:
-    fallback = fallback_seniorities(clean_title, role_text)
-    return len(fallback) == 0
 
 
 def blank_result_with_relevance(job: JobInput, role_relevance: str, reason: str, notes: str = "") -> JobResult:
@@ -376,42 +364,35 @@ def blank_result_with_relevance(job: JobInput, role_relevance: str, reason: str,
     )
 
 
-def fetch_and_extract(url: str):
-    html, status = fetch_html(url)
-
-    if html:
-        parsed = extract_best_content(html)
-
-        if should_try_playwright(url, html, parsed["role_context_text"]):
-            pw_html, pw_status = fetch_with_playwright(url)
-            if pw_html:
-                html = pw_html
-                parsed = extract_best_content(html)
-                status = pw_status
-
-        return html, parsed, status
-
-    pw_html, pw_status = fetch_with_playwright(url)
-    if not pw_html:
-        return None, None, f"{status}; {pw_status}"
-
-    parsed = extract_best_content(pw_html)
-    return pw_html, parsed, pw_status
-
-
 def extract_location_and_remote_from_url(url: str, allowed_locations: List[str]) -> Dict[str, str]:
+    """
+    Fast fallback only:
+    - requests/html only
+    - no Playwright
+    - no retries beyond requests session defaults
+    """
     if not clean_whitespace(url):
         return {
             "job_location": "",
             "remote_preferences": "",
+            "notes_suffix": "link missing",
         }
 
     try:
-        html, parsed, _ = fetch_and_extract(url)
-        if not html or not parsed:
+        html, status = fetch_html(url)
+        if not html:
             return {
                 "job_location": "",
                 "remote_preferences": "",
+                "notes_suffix": f"link fetch failed ({status})",
+            }
+
+        parsed = extract_best_content(html)
+        if not parsed:
+            return {
+                "job_location": "",
+                "remote_preferences": "",
+                "notes_suffix": "link parse failed",
             }
 
         structured = parsed["structured"]
@@ -437,25 +418,34 @@ def extract_location_and_remote_from_url(url: str, allowed_locations: List[str])
         return {
             "job_location": fallback_location,
             "remote_preferences": fallback_remote_preferences,
+            "notes_suffix": "link checked",
         }
-    except Exception:
+    except Exception as e:
         return {
             "job_location": "",
             "remote_preferences": "",
+            "notes_suffix": f"link error ({e})",
         }
 
 
 def build_notes(
     used_link_for_location: bool,
     used_link_for_remote_preferences: bool,
+    extra_note: str = "",
 ) -> str:
     if used_link_for_location and used_link_for_remote_preferences:
-        return "link used for location and remote preferences"
-    if used_link_for_location:
-        return "link used for location"
-    if used_link_for_remote_preferences:
-        return "link used for remote preferences"
-    return "description only"
+        base = "link used for location and remote preferences"
+    elif used_link_for_location:
+        base = "link used for location"
+    elif used_link_for_remote_preferences:
+        base = "link used for remote preferences"
+    else:
+        base = "description only"
+
+    extra_note = clean_whitespace(extra_note)
+    if extra_note and extra_note not in {"link checked"}:
+        return f"{base} | {extra_note}"
+    return base
 
 
 def process_job(
@@ -596,26 +586,13 @@ def process_job(
     else:
         result.remote_days = fallback_remote_days
 
+    # Salary: keep it strict and cheap. No second salary AI call.
     result.salary_min = core_fields.get("salary_min", "") or fallback_salary_min
     result.salary_max = core_fields.get("salary_max", "") or fallback_salary_max
     result.salary_currency = core_fields.get("salary_currency", "") or fallback_salary_currency
     result.salary_period = core_fields.get("salary_period", "") or fallback_salary_period
 
-    if should_run_salary_ai(description_text):
-        salary_fields = ai_extract_salary_only(
-            job_title=clean_title,
-            header_text=header_text,
-            role_body_text=description_text,
-            fallback_salary_min=result.salary_min,
-            fallback_salary_max=result.salary_max,
-            fallback_salary_currency=result.salary_currency,
-            fallback_salary_period=result.salary_period,
-        )
-        result.salary_min = salary_fields.get("salary_min", "") or result.salary_min
-        result.salary_max = salary_fields.get("salary_max", "") or result.salary_max
-        result.salary_currency = salary_fields.get("salary_currency", "") or result.salary_currency
-        result.salary_period = salary_fields.get("salary_period", "") or result.salary_period
-
+    # URL fallback only if BOTH are missing/unclear.
     needs_location_fallback = not clean_whitespace(result.job_location)
     needs_remote_fallback = (
         not clean_whitespace(result.remote_preferences)
@@ -624,27 +601,23 @@ def process_job(
 
     used_link_for_location = False
     used_link_for_remote_preferences = False
+    extra_note = ""
 
-    if (needs_location_fallback or needs_remote_fallback) and clean_whitespace(job.job_url):
+    if ENABLE_URL_FALLBACK and needs_location_fallback and needs_remote_fallback and clean_whitespace(job.job_url):
         url_enrichment = extract_location_and_remote_from_url(job.job_url, allowed_locations)
+        extra_note = url_enrichment.get("notes_suffix", "")
 
-        if needs_location_fallback and clean_whitespace(url_enrichment.get("job_location", "")):
+        if clean_whitespace(url_enrichment.get("job_location", "")):
             result.job_location = url_enrichment["job_location"]
             used_link_for_location = True
 
-        if needs_remote_fallback and clean_whitespace(url_enrichment.get("remote_preferences", "")):
+        if clean_whitespace(url_enrichment.get("remote_preferences", "")):
             result.remote_preferences = normalize_remote_preferences_value(
                 url_enrichment["remote_preferences"]
             ) or result.remote_preferences
             used_link_for_remote_preferences = True
 
-    result.notes = build_notes(
-        used_link_for_location=used_link_for_location,
-        used_link_for_remote_preferences=used_link_for_remote_preferences,
-    )
-
     hard_evidence_text = normalize_quotes(description_text)
-
     explicit_salary_check = parse_explicit_salary(hard_evidence_text, allowed_salaries)
     if explicit_salary_check != ("", "", "", ""):
         result.salary_min, result.salary_max, result.salary_currency, result.salary_period = explicit_salary_check
@@ -652,15 +625,18 @@ def process_job(
     result.salary_min = snap_salary_value(result.salary_min, allowed_salaries)
     result.salary_max = snap_salary_value(result.salary_max, allowed_salaries)
 
-    if should_run_titles_ai(clean_title, allowed_job_titles):
+    # Job titles: exact/rule first, AI only when FAST_MODE is off.
+    exact_title = normalize_job_title_from_list(clean_title, allowed_job_titles)
+    if exact_title:
+        job_titles = [exact_title]
+    elif should_run_titles_ai(clean_title, allowed_job_titles):
         job_titles = ai_map_job_titles_only(
             position_name=clean_title,
             description=description_text,
             allowed_job_titles=allowed_job_titles,
         )
     else:
-        exact_title = normalize_job_title_from_list(clean_title, allowed_job_titles)
-        job_titles = [exact_title] if exact_title else []
+        job_titles = []
 
     job_titles = postprocess_job_titles(
         job_title=clean_title,
@@ -673,17 +649,8 @@ def process_job(
     result.job_title_tag_2 = job_titles[1] if len(job_titles) > 1 else ""
     result.job_title_tag_3 = job_titles[2] if len(job_titles) > 2 else ""
 
-    if should_run_seniority_ai(clean_title, description_text):
-        seniorities = ai_map_seniority_only(
-            position_name=clean_title,
-            description=description_text,
-        )
-    else:
-        seniorities = fallback_seniorities(clean_title, description_text)
-
-    if not seniorities:
-        seniorities = fallback_seniorities(clean_title, description_text)
-
+    # Seniority: rule-based only in FAST_MODE.
+    seniorities = fallback_seniorities(clean_title, description_text)
     seniorities = refine_seniorities_rule_based(
         clean_title,
         description_text,
@@ -695,13 +662,14 @@ def process_job(
     result.seniority_2 = seniorities[1] if len(seniorities) > 1 else ""
     result.seniority_3 = seniorities[2] if len(seniorities) > 2 else ""
 
+    # Skills: exact match first, AI only when weak.
     skills_source_text = description_text
     skill_list = tp_skills if result.job_category == "T&P" else nontp_skills
 
     exact_skills = exact_match_skills_in_order(skills_source_text, skill_list, limit=10)
     exact_skills = dedupe_keep_order(exact_skills)
 
-    if FAST_MODE and len(exact_skills) >= MIN_EXACT_SKILLS_TO_SKIP_AI:
+    if len(exact_skills) >= MIN_EXACT_SKILLS_TO_SKIP_AI:
         final_skills = exact_skills[:10]
     else:
         if len(exact_skills) == 0:
@@ -742,6 +710,12 @@ def process_job(
     result.skill_9 = padded_skills[8]
     result.skill_10 = padded_skills[9]
 
+    result.notes = build_notes(
+        used_link_for_location=used_link_for_location,
+        used_link_for_remote_preferences=used_link_for_remote_preferences,
+        extra_note=extra_note,
+    )
+
     return result
 
 
@@ -776,6 +750,7 @@ def main() -> None:
     print(f"[INFO] Job titles loaded: {len(allowed_job_titles)}")
     print(f"[INFO] FAST_MODE: {'yes' if FAST_MODE else 'no'}")
     print(f"[INFO] MAX_WORKERS: {MAX_WORKERS}")
+    print(f"[INFO] ENABLE_URL_FALLBACK: {'yes' if ENABLE_URL_FALLBACK else 'no'}")
 
     results_map = {}
 
