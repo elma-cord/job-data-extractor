@@ -119,8 +119,9 @@ def gather_location_lines(text: str) -> List[str]:
     soft_tokens = [
         " hybrid", " remote", " onsite", " on-site", " home based", " from home",
         " united kingdom", " office attendance", " days per week", " remote-enabled",
-        " office based", "% of your working week", "guildford", "london", "bristol",
-        " ireland", " emea", " europe", " worldwide", " global",
+        " office based", "% of your working week", " ireland", " emea", " europe",
+        " worldwide", " global", " london", " manchester", " bristol", " leeds",
+        " birmingham", " glasgow", " edinburgh", " guildford", " dublin", " cork",
     ]
 
     for idx, line in enumerate(lines[:360]):
@@ -632,6 +633,8 @@ def _strategic_senior_signals(title_low: str, text_low: str) -> bool:
         r"\bkey account manager\b",
         r"\boperations manager\b",
         r"\bproduct manager\b",
+        r"\bpeople operations manager\b",
+        r"\bpeople ops manager\b",
     ]
     text_patterns = [
         r"\bfull contract lifecycle\b",
@@ -654,6 +657,11 @@ def _strategic_senior_signals(title_low: str, text_low: str) -> bool:
         r"\bkpis\b",
         r"\boversight\b",
         r"\bteam assigned to projects\b",
+        r"\bcross-functional leadership\b",
+        r"\bchange management\b",
+        r"\bprogram governance\b",
+        r"\bvendor management\b",
+        r"\bownership\b",
     ]
     return any(re.search(p, title_low) for p in title_patterns) or any(re.search(p, text_low) for p in text_patterns)
 
@@ -677,7 +685,7 @@ def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
 
     if _manager_like_title(title_low):
         if _juniorish_title(title_low):
-            return ["mid", "lead"]
+            return ["lead"]
         if _strategic_senior_signals(title_low, text_low) or _strong_lead_signals(text_low):
             return ["senior", "lead"]
         return ["senior", "lead"]
@@ -760,6 +768,7 @@ def is_tp_by_rules(job_title: str, role_text: str) -> bool:
         r"\baccount executive\b", r"\brenewals\b", r"\bpartnerships\b",
         r"\bproject manager\b", r"\bprogramme manager\b", r"\bprogram manager\b",
         r"\bpmo\b", r"\bchief of staff\b", r"\bexecutive assistant\b",
+        r"\bmarketing\b", r"\bproduct marketing\b",
     ]
     if any(re.search(p, text) for p in non_tp_override_patterns):
         return False
@@ -779,6 +788,7 @@ def is_tp_by_rules(job_title: str, role_text: str) -> bool:
         r"\bgrpc\b", r"\bprotocol buffers\b", r"\bsecurity engineer\b",
         r"\bpenetration tester\b", r"\bdata scientist\b", r"\bdata engineer\b",
         r"\bbi developer\b", r"\bfront end\b", r"\bback end\b", r"\bfull stack\b",
+        r"\binfrastructure analyst\b", r"\bdesktop support\b", r"\bservice desk\b",
     ]
     return any(re.search(p, text) for p in tp_patterns)
 
@@ -873,7 +883,9 @@ def is_relevant_by_rules(job_title: str, role_text: str, header_text: str = "") 
     if _requires_non_english_language(text):
         return False
 
-    if not _location_rules_allow(text):
+    location_text = f"{job_title}\n{header_text}\n{role_text}"
+    has_any_location_signal = bool(gather_location_lines(location_text))
+    if has_any_location_signal and not _location_rules_allow(location_text):
         return False
 
     allowed_patterns = [
