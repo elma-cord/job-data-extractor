@@ -12,8 +12,6 @@ from prompts import (
     build_core_fields_prompt,
     build_job_titles_prompt,
     build_relevance_prompt,
-    build_salary_prompt,
-    build_seniority_prompt,
     build_skills_additional_prompt,
     build_skills_full_prompt,
 )
@@ -21,9 +19,10 @@ from prompts import (
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-OPENAI_TIMEOUT_S = float(os.getenv("OPENAI_TIMEOUT_S", "35"))
-OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
-OPENAI_RETRY_SLEEP_S = float(os.getenv("OPENAI_RETRY_SLEEP_S", "1.2"))
+# Faster defaults for GitHub workflow
+OPENAI_TIMEOUT_S = float(os.getenv("OPENAI_TIMEOUT_S", "20"))
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "1"))
+OPENAI_RETRY_SLEEP_S = float(os.getenv("OPENAI_RETRY_SLEEP_S", "0.8"))
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -129,16 +128,6 @@ def normalize_job_title_from_list(value: str, allowed_job_titles: List[str]) -> 
     return ""
 
 
-def normalize_seniority_list(values: List[str]) -> List[str]:
-    order = ["entry", "junior", "mid", "senior", "lead", "leadership"]
-    found = []
-    for v in values:
-        low = str(v).strip().lower()
-        if low in order and low not in found:
-            found.append(low)
-    return [x for x in order if x in found][:3]
-
-
 def normalize_remote_preferences_value(value: str) -> str:
     value = clean_whitespace(value)
     if not value:
@@ -236,11 +225,20 @@ def _cache_set(key: str, value: Any) -> None:
         _response_cache[key] = value
 
 
+def _truncate_for_model(prompt: str, limit: int = 22000) -> str:
+    prompt = prompt or ""
+    if len(prompt) <= limit:
+        return prompt
+    return prompt[:limit]
+
+
 def _call_openai_text(prompt: str) -> str:
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
 
+    prompt = _truncate_for_model(prompt)
     last_err = None
+
     for attempt in range(OPENAI_MAX_RETRIES + 1):
         try:
             response = client.with_options(timeout=OPENAI_TIMEOUT_S).responses.create(
@@ -422,54 +420,6 @@ def ai_extract_core_fields(
         }
 
 
-def ai_extract_salary_only(
-    job_title: str,
-    header_text: str,
-    role_body_text: str,
-    fallback_salary_min: str,
-    fallback_salary_max: str,
-    fallback_salary_currency: str,
-    fallback_salary_period: str,
-) -> Dict[str, str]:
-    if not client:
-        return {
-            "salary_min": fallback_salary_min,
-            "salary_max": fallback_salary_max,
-            "salary_currency": fallback_salary_currency,
-            "salary_period": fallback_salary_period,
-        }
-
-    prompt = build_salary_prompt(job_title, header_text, role_body_text)
-
-    try:
-        data = _call_openai_json_cached("salary_only", prompt)
-
-        salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
-        salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
-        salary_currency = normalize_salary_currency(
-            str(data.get("salary_currency", "") or "").strip(),
-            fallback=fallback_salary_currency,
-        )
-        salary_period = normalize_salary_period(
-            str(data.get("salary_period", "") or "").strip(),
-            fallback=fallback_salary_period,
-        )
-
-        return {
-            "salary_min": salary_min,
-            "salary_max": salary_max,
-            "salary_currency": salary_currency,
-            "salary_period": salary_period,
-        }
-    except Exception:
-        return {
-            "salary_min": fallback_salary_min,
-            "salary_max": fallback_salary_max,
-            "salary_currency": fallback_salary_currency,
-            "salary_period": fallback_salary_period,
-        }
-
-
 def ai_map_job_titles_only(
     position_name: str,
     description: str,
@@ -493,22 +443,6 @@ def ai_map_job_titles_only(
                 out.append(exact)
 
         return out[:3]
-    except Exception:
-        return []
-
-
-def ai_map_seniority_only(position_name: str, description: str) -> List[str]:
-    if not client:
-        return []
-
-    prompt = build_seniority_prompt(position_name, description)
-
-    try:
-        data = _call_openai_json_cached("seniority_only", prompt)
-        raw = data.get("seniorities", [])
-        if not isinstance(raw, list):
-            return []
-        return normalize_seniority_list(raw)
     except Exception:
         return []
 
@@ -601,3 +535,27 @@ def ai_generate_additional_skills(
         return out[:5]
     except Exception:
         return []
+
+
+# Compatibility helpers kept so older imports do not break,
+# but they are no longer used by the faster main.py.
+
+def ai_extract_salary_only(
+    job_title: str,
+    header_text: str,
+    role_body_text: str,
+    fallback_salary_min: str,
+    fallback_salary_max: str,
+    fallback_salary_currency: str,
+    fallback_salary_period: str,
+) -> Dict[str, str]:
+    return {
+        "salary_min": fallback_salary_min,
+        "salary_max": fallback_salary_max,
+        "salary_currency": fallback_salary_currency,
+        "salary_period": fallback_salary_period,
+    }
+
+
+def ai_map_seniority_only(position_name: str, description: str) -> List[str]:
+    return []
