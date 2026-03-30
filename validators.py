@@ -761,7 +761,8 @@ def is_tp_by_rules(job_title: str, role_text: str) -> bool:
         r"\btalent acquisition\b", r"\brecruit", r"\bfinance\b", r"\baccounting\b",
         r"\bfp&a\b", r"\blegal\b", r"\bcompliance\b", r"\brisk\b", r"\brevops\b",
         r"\bsales operations\b", r"\bcustomer success\b", r"\baccount manager\b",
-        r"\baccount executive\b", r"\brenewals\b", r"\bpartnerships\b",
+        r"\baccount executive\b", r"\bbusiness development representative\b", r"\bbdr\b",
+        r"\bsdr\b", r"\brenewals\b", r"\bpartnerships\b",
         r"\bproject manager\b", r"\bprogramme manager\b", r"\bprogram manager\b",
         r"\bpmo\b", r"\bchief of staff\b", r"\bexecutive assistant\b",
         r"\bmarketing\b", r"\bproduct marketing\b", r"\bmarketing analyst\b",
@@ -893,22 +894,23 @@ def is_relevant_by_rules(job_title: str, role_text: str, header_text: str = "") 
         r"\baccount manager\b", r"\baccount executive\b", r"\baccount director\b",
         r"\bcustomer success\b", r"\bcustomer success manager\b", r"\bcsm\b",
         r"\brenewals\b", r"\bclient services\b", r"\bcustomer operations\b",
-        r"\bcustomer support\b", r"\bimplementation manager\b", r"\bpartnerships\b",
-        r"\bbusiness analyst\b", r"\bbusiness operations\b", r"\boperations\b",
-        r"\bchange manager\b", r"\btransformation\b", r"\bpmo\b",
+        r"\bcustomer support\b", r"\bcustomer service\b", r"\bimplementation manager\b",
+        r"\bpartnerships\b", r"\bbusiness analyst\b", r"\bbusiness operations\b",
+        r"\boperations\b", r"\bchange manager\b", r"\btransformation\b", r"\bpmo\b",
         r"\bprogramme manager\b", r"\bprogram manager\b", r"\bproject manager\b",
         r"\bscrum master\b", r"\bchief of staff\b", r"\bexecutive assistant\b",
         r"\brisk\b", r"\bcompliance\b", r"\blegal\b", r"\bfinance\b",
         r"\baccounting\b", r"\bfp&a\b", r"\brevops\b", r"\bsales operations\b",
         r"\bmarketing\b", r"\bseo\b", r"\bpr\b", r"\bcommunications\b",
         r"\bproduct marketing\b", r"\bgrowth marketing\b", r"\bperformance marketing\b",
-        r"\bengineer\b", r"\bdeveloper\b", r"\barchitect\b", r"\bdevops\b",
-        r"\bqa\b", r"\bproduct manager\b", r"\bproduct owner\b",
-        r"\bdesigner\b", r"\bux\b", r"\bui\b", r"\bdata\b",
-        r"\bmachine learning\b", r"\bai\b", r"\bsecurity\b", r"\bcloud\b",
-        r"\bnetwork\b", r"\binfrastructure\b", r"\bsystems\b",
-        r"\bsupport engineer\b", r"\bsystem administrator\b", r"\bsystem engineer\b",
-        r"\bsolutions engineer\b", r"\bit support\b", r"\b2nd line\b", r"\bsecond line\b",
+        r"\bbusiness development representative\b", r"\bsales development representative\b",
+        r"\bbdr\b", r"\bsdr\b", r"\bengineer\b", r"\bdeveloper\b", r"\barchitect\b",
+        r"\bdevops\b", r"\bqa\b", r"\bproduct manager\b", r"\bproduct owner\b",
+        r"\bdesigner\b", r"\bux\b", r"\bui\b", r"\bdata\b", r"\bmachine learning\b",
+        r"\bai\b", r"\bsecurity\b", r"\bcloud\b", r"\bnetwork\b",
+        r"\binfrastructure\b", r"\bsystems\b", r"\bsupport engineer\b",
+        r"\bsystem administrator\b", r"\bsystem engineer\b", r"\bsolutions engineer\b",
+        r"\bit support\b", r"\b2nd line\b", r"\bsecond line\b",
     ]
 
     return any(re.search(p, text) for p in allowed_patterns)
@@ -983,13 +985,17 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
     fpna = find_allowed_title_case_insensitive("FP&A", allowed_job_titles)
     legal = find_allowed_title_case_insensitive("Legal", allowed_job_titles)
     risk_compliance = find_allowed_title_case_insensitive("Risk and Compliance", allowed_job_titles)
+    sdr_bdr = find_allowed_title_case_insensitive("SDR / BDR", allowed_job_titles)
 
-    # Strong exact title-first overrides
     exact_title = normalize_job_title_from_list(job_title, allowed_job_titles)
     if exact_title:
         return [exact_title]
 
-    # Account / customer roles
+    if sdr_bdr and re.search(r"\bbusiness development representative\b|\bsales development representative\b|\bbdr\b|\bsdr\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = _remove_if_present(out, account_executive)
+        out = [sdr_bdr] + [x for x in out if x != sdr_bdr]
+
     account_manager_signals = [
         r"\bnational account manager\b", r"\bkey account manager\b", r"\baccount manager\b",
         r"\bcustomer success manager\b", r"\bcustomer success\b", r"\bcsm\b",
@@ -1012,9 +1018,9 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
         or any(re.search(p, desc_low) for p in account_exec_signals)
     ):
         out = _remove_if_present(out, csm_account_manager)
+        out = _remove_if_present(out, system_engineer)
         out = [account_executive] + [x for x in out if x != account_executive]
 
-    # Marketing roles
     marketing_signals = bool(re.search(
         r"\bmarketing\b|\bseo\b|\bcampaign\b|\bcrm\b|\bdemand gen\b|\blead generation\b|\bbrand\b|\bcontent\b|\bproduct marketing\b|\bperformance marketing\b",
         title_low + "\n" + desc_low
@@ -1036,7 +1042,6 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
         elif generalist_marketing:
             out = [generalist_marketing] + [x for x in out if x != generalist_marketing]
 
-    # Business / sales ops roles
     if sales_ops and re.search(r"\bsales operations\b|\bsales ops\b", title_low + "\n" + desc_low):
         out = _remove_if_present(out, system_engineer)
         out = [sales_ops] + [x for x in out if x != sales_ops]
@@ -1046,7 +1051,6 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
             out = _remove_if_present(out, system_engineer)
             out = [business_ops] + [x for x in out if x != business_ops]
 
-    # Project / PMO roles
     if project_manager and re.search(r"\bproject manager\b|\bpmo\b|\bprogramme manager\b|\bprogram manager\b", title_low + "\n" + desc_low):
         out = _remove_if_present(out, system_engineer)
         out = _remove_if_present(out, system_admin)
@@ -1056,7 +1060,6 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
         out = _remove_if_present(out, project_manager)
         out = [scrum_master] + [x for x in out if x != scrum_master]
 
-    # HR / TA / Finance / Legal / Risk roles
     if human_resources and re.search(r"\bhuman resources\b|\bhr\b|\bpeople ops\b|\bpeople operations\b", title_low + "\n" + desc_low):
         out = _remove_if_present(out, system_engineer)
         out = [human_resources] + [x for x in out if x != human_resources]
@@ -1081,7 +1084,6 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
         out = _remove_if_present(out, system_engineer)
         out = [risk_compliance] + [x for x in out if x != risk_compliance]
 
-    # Support vs system roles
     support_signals = bool(re.search(
         r"\bcustomer support\b|\bcustomer service\b|\bhelpdesk\b|\bservice desk\b|\btechnical support\b|\bsupport engineer\b",
         title_low + "\n" + desc_low
@@ -1098,7 +1100,6 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
             out = _remove_if_present(out, system_engineer)
             out = [support_engineer] + [x for x in out if x != support_engineer]
 
-    # Only allow System Engineer when there is strong infra/sys evidence
     strong_system_signals = bool(re.search(
         r"\bsystems? engineer\b|\binfrastructure engineer\b|\bnetwork engineer\b|\bplatform engineer\b|\bkubernetes\b|\blinux\b|\bopenshift\b|\bvirtuali[sz]ation\b|\bwindows server\b|\bactive directory\b|\bvmware\b|\bcitrix\b|\bfirewall\b|\brouter\b|\bvpn\b|\bhyper-v\b",
         title_low + "\n" + desc_low
@@ -1128,7 +1129,6 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
         out = _remove_if_present(out, system_engineer)
         out = [solutions_engineer] + [x for x in out if x != solutions_engineer]
 
-    # Data roles
     if data_scientist and re.search(r"\bdata scientist\b|\bmachine learning\b|\bmodelling\b|\bmodeling\b", title_low + "\n" + desc_low):
         out = _remove_if_present(out, system_engineer)
         out = [data_scientist] + [x for x in out if x != data_scientist]
