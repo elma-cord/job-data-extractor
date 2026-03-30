@@ -19,7 +19,6 @@ from prompts import (
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# Faster defaults for GitHub workflow
 OPENAI_TIMEOUT_S = float(os.getenv("OPENAI_TIMEOUT_S", "20"))
 OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "1"))
 OPENAI_RETRY_SLEEP_S = float(os.getenv("OPENAI_RETRY_SLEEP_S", "0.8"))
@@ -536,9 +535,6 @@ def ai_generate_additional_skills(
     except Exception:
         return []
 
-
-# Compatibility helpers kept so older imports do not break,
-# but they are no longer used by the faster main.py.
 
 def ai_extract_salary_only(
     job_title: str,
