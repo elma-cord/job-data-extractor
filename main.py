@@ -4,7 +4,8 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
-from typing import Dict, List
+from difflib import SequenceMatcher
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -28,6 +29,7 @@ from validators import (
     detect_visa_rule_based,
     fallback_seniorities,
     has_explicit_remote_days_evidence,
+    is_tp_by_rules,
     location_value_has_evidence,
     normalize_category_for_skills,
     normalize_job_title_from_list,
@@ -52,6 +54,9 @@ JOB_TITLES_CSV = "predefined_job_titles.csv"
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
 MIN_EXACT_SKILLS_TO_SKIP_AI = int(os.getenv("MIN_EXACT_SKILLS_TO_SKIP_AI", "4"))
 ENABLE_URL_FALLBACK = os.getenv("ENABLE_URL_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "y"}
+
+TITLE_STRONG_MATCH_RATIO = float(os.getenv("TITLE_STRONG_MATCH_RATIO", "0.84"))
+TITLE_TOKEN_MATCH_RATIO = float(os.getenv("TITLE_TOKEN_MATCH_RATIO", "0.67"))
 
 
 @dataclass
@@ -288,6 +293,91 @@ def prepare_description_text(raw_description: str) -> str:
     return text
 
 
+def title_tokens(text: str) -> List[str]:
+    text = normalize_quotes(text).lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    toks = [t for t in text.split() if t]
+    stop = {
+        "the", "and", "of", "for", "to", "in", "on", "with", "a", "an",
+        "senior", "junior", "lead", "principal", "staff", "mid", "level"
+    }
+    return [t for t in toks if t not in stop]
+
+
+def title_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, normalize_quotes(a).lower(), normalize_quotes(b).lower()).ratio()
+
+
+def best_allowed_title_match(job_title: str, allowed_job_titles: List[str]) -> Tuple[str, float, float]:
+    """
+    Returns:
+    - best_title
+    - best string similarity ratio
+    - token overlap ratio
+    """
+    clean_title = clean_whitespace(job_title)
+    if not clean_title or not allowed_job_titles:
+        return "", 0.0, 0.0
+
+    exact = normalize_job_title_from_list(clean_title, allowed_job_titles)
+    if exact:
+        return exact, 1.0, 1.0
+
+    jtoks = set(title_tokens(clean_title))
+    best_title = ""
+    best_ratio = 0.0
+    best_token_ratio = 0.0
+
+    for allowed in allowed_job_titles:
+        ratio = title_similarity(clean_title, allowed)
+
+        atoks = set(title_tokens(allowed))
+        overlap = len(jtoks & atoks)
+        token_ratio = 0.0
+        if jtoks and atoks:
+            token_ratio = overlap / max(1, min(len(jtoks), len(atoks)))
+
+        # slight boost for acronym-style known pairs
+        compact_job = re.sub(r"[^a-z0-9]", "", clean_title.lower())
+        compact_allowed = re.sub(r"[^a-z0-9]", "", allowed.lower())
+        if compact_job == compact_allowed:
+            ratio = 1.0
+            token_ratio = 1.0
+
+        if (
+            ratio > best_ratio
+            or (abs(ratio - best_ratio) < 0.0001 and token_ratio > best_token_ratio)
+        ):
+            best_title = allowed
+            best_ratio = ratio
+            best_token_ratio = token_ratio
+
+    return best_title, best_ratio, best_token_ratio
+
+
+def is_strong_allowed_title_match(job_title: str, allowed_job_titles: List[str]) -> Tuple[bool, str, str]:
+    best_title, ratio, token_ratio = best_allowed_title_match(job_title, allowed_job_titles)
+
+    if not best_title:
+        return False, "", ""
+
+    if ratio >= 0.999:
+        return True, best_title, f"Exact allowed title match: {best_title}"
+
+    if ratio >= TITLE_STRONG_MATCH_RATIO:
+        return True, best_title, f"Strong title match to allowed title: {best_title}"
+
+    if token_ratio >= TITLE_TOKEN_MATCH_RATIO and ratio >= 0.58:
+        return True, best_title, f"Token-based title match to allowed title: {best_title}"
+
+    return False, best_title, ""
+
+
+def derive_category_from_title_or_text(matched_title: str, clean_title: str, description_text: str) -> str:
+    combined = "\n".join([matched_title or "", clean_title or "", description_text or ""])
+    return "T&P" if is_tp_by_rules(matched_title or clean_title, combined) else "NonT&P"
+
+
 def blank_result_with_relevance(job: JobInput, role_relevance: str, reason: str, notes: str = "") -> JobResult:
     return JobResult(
         row_id=job.row_id,
@@ -378,6 +468,41 @@ def build_notes(
     return base
 
 
+def determine_relevance_and_primary_title(
+    clean_title: str,
+    description_text: str,
+    role_context_text: str,
+    allowed_job_titles: List[str],
+) -> Tuple[str, str, str, str]:
+    """
+    Returns:
+    - role_relevance
+    - role_relevance_reason
+    - matched_or_primary_title
+    - job_category_seed
+    """
+    strong_match, matched_title, match_reason = is_strong_allowed_title_match(clean_title, allowed_job_titles)
+
+    if strong_match:
+        category_seed = derive_category_from_title_or_text(matched_title, clean_title, description_text)
+        return "Relevant", match_reason, matched_title, category_seed
+
+    # Title not strongly grounded in allowed list -> ask AI, but keep title-list context for mapping later.
+    relevance = ai_check_relevance(
+        job_title=clean_title,
+        role_context_text=role_context_text,
+        fallback_role_relevance="Not relevant",
+        fallback_reason="Title does not clearly map to predefined job titles.",
+        fallback_job_category="",
+    )
+
+    role_relevance = relevance.get("role_relevance", "") or "Not relevant"
+    role_relevance_reason = relevance.get("role_relevance_reason", "") or "No reason returned."
+    category_seed = normalize_category_for_skills(relevance.get("job_category", ""))
+
+    return role_relevance, role_relevance_reason, matched_title, category_seed
+
+
 def process_job(
     job: JobInput,
     allowed_locations: List[str],
@@ -411,17 +536,12 @@ def process_job(
     fallback_visa = detect_visa_rule_based(description_text)
     fallback_job_type = detect_job_type_rule_based(description_text, "")
 
-    relevance = ai_check_relevance(
-        job_title=clean_title,
+    role_relevance, role_relevance_reason, title_match_hint, relevance_job_category = determine_relevance_and_primary_title(
+        clean_title=clean_title,
+        description_text=description_text,
         role_context_text=role_context_text,
-        fallback_role_relevance="Not relevant",
-        fallback_reason="Fallback classification failed.",
-        fallback_job_category="",
+        allowed_job_titles=allowed_job_titles,
     )
-
-    role_relevance = relevance.get("role_relevance", "") or "Not relevant"
-    role_relevance_reason = relevance.get("role_relevance_reason", "") or "No reason returned."
-    relevance_job_category = normalize_category_for_skills(relevance.get("job_category", ""))
 
     if role_relevance == "Not relevant":
         return blank_result_with_relevance(
@@ -459,6 +579,8 @@ def process_job(
     )
 
     result.job_category = normalize_category_for_skills(core_fields.get("job_category", "")) or result.job_category
+    if not result.job_category:
+        result.job_category = derive_category_from_title_or_text(title_match_hint, clean_title, description_text)
 
     ai_location = core_fields.get("job_location", "") or ""
     if ai_location and location_value_has_evidence(ai_location, description_text, allowed_locations):
@@ -518,9 +640,12 @@ def process_job(
     result.salary_min = snap_salary_value(result.salary_min, allowed_salaries)
     result.salary_max = snap_salary_value(result.salary_max, allowed_salaries)
 
+    # Title tagging: use exact/strong predefined list match first. AI only if needed.
     exact_title = normalize_job_title_from_list(clean_title, allowed_job_titles)
     if exact_title:
         job_titles = [exact_title]
+    elif title_match_hint:
+        job_titles = [title_match_hint]
     else:
         job_titles = ai_map_job_titles_only(
             position_name=clean_title,
