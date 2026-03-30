@@ -105,7 +105,6 @@ def gather_location_lines(text: str) -> List[str]:
         r"^home based\b",
         r"^position role type\s*:",
         r"\blocated in\b",
-        r"\bthis is a .* position located in\b",
         r"\bwork location\b",
         r"\bideal locations\b",
         r"\bterritories available\b",
@@ -113,7 +112,6 @@ def gather_location_lines(text: str) -> List[str]:
         r"\bright to work in the\b",
         r"\boffice attendance\b",
         r"\boffice based\b",
-        r"\bworking week must be office based\b",
         r"^location\b",
     ]
     soft_tokens = [
@@ -551,7 +549,7 @@ def detect_visa_rule_based(text: str) -> str:
 def detect_job_type_rule_based(text: str, structured_employment_type: str = "") -> str:
     low = f"{structured_employment_type} {text}".lower()
 
-    permanent_patterns = [r"\bpermanent\b", r"\bfull[- ]time\b", r"\bstandard\b"]
+    permanent_patterns = [r"\bpermanent\b", r"\bfull[- ]time\b", r"\bfull time\b"]
     ftc_patterns = [r"\btemporary\b", r"\bfixed[- ]term\b", r"\bmaternity cover\b", r"\bftc\b"]
     part_time_patterns = [r"\bpart[- ]time\b", r"\bjob share\b", r"\bjob-share\b"]
     freelance_patterns = [r"\bfreelance\b", r"\bcontract\b", r"\bcontracting\b"]
@@ -604,7 +602,6 @@ def _strong_lead_signals(text_low: str) -> bool:
         r"\bdirect report\b",
         r"\bpeople management\b",
         r"\bteam management\b",
-        r"\bmanage(?:s|d|ing)? a third-party provider\b",
         r"\bown(?:s|ing)? end-to-end\b",
         r"\blead .* delivery\b",
         r"\blead .* team\b",
@@ -656,7 +653,6 @@ def _strategic_senior_signals(title_low: str, text_low: str) -> bool:
         r"\bconfiguration control\b",
         r"\bkpis\b",
         r"\boversight\b",
-        r"\bteam assigned to projects\b",
         r"\bcross-functional leadership\b",
         r"\bchange management\b",
         r"\bprogram governance\b",
@@ -693,7 +689,7 @@ def fallback_seniorities(job_title: str, role_text: str) -> List[str]:
     if any(x in title_low for x in ["senior", "sr ", "sr."]):
         return ["senior"]
 
-    if any(x in title_low for x in ["lead ", "principal"]):
+    if any(x in title_low for x in ["lead ", "principal", "staff "]):
         return ["lead"]
 
     if any(x in title_low for x in ["junior", "jr "]):
@@ -768,7 +764,8 @@ def is_tp_by_rules(job_title: str, role_text: str) -> bool:
         r"\baccount executive\b", r"\brenewals\b", r"\bpartnerships\b",
         r"\bproject manager\b", r"\bprogramme manager\b", r"\bprogram manager\b",
         r"\bpmo\b", r"\bchief of staff\b", r"\bexecutive assistant\b",
-        r"\bmarketing\b", r"\bproduct marketing\b",
+        r"\bmarketing\b", r"\bproduct marketing\b", r"\bmarketing analyst\b",
+        r"\bbrand\b", r"\bcopywriter\b", r"\bcommunications\b",
     ]
     if any(re.search(p, text) for p in non_tp_override_patterns):
         return False
@@ -876,6 +873,7 @@ def is_relevant_by_rules(job_title: str, role_text: str, header_text: str = "") 
         r"\bmicrobiology\b", r"\binjection molding\b", r"\bwarehouse\b",
         r"\bdriver\b", r"\bcleaner\b", r"\bbeauty brand\b", r"\bbeauty therapist\b",
         r"\bstore manager\b", r"\bshop assistant\b", r"\bproduction operative\b",
+        r"\bpharmacist\b", r"\bdoctor\b", r"\bdentist\b", r"\bcare assistant\b",
     ]
     if any(re.search(p, text) for p in excluded_patterns):
         return False
@@ -940,6 +938,12 @@ def find_allowed_title_case_insensitive(target: str, allowed_job_titles: List[st
     return ""
 
 
+def _remove_if_present(out: List[str], value: str) -> List[str]:
+    if not value:
+        return out
+    return [x for x in out if x != value]
+
+
 def postprocess_job_titles(job_title: str, description: str, predicted_titles: List[str], allowed_job_titles: List[str]) -> List[str]:
     title_low = normalize_quotes(job_title or "").lower()
     desc_low = normalize_quotes(description or "").lower()
@@ -956,91 +960,187 @@ def postprocess_job_titles(job_title: str, description: str, predicted_titles: L
     system_admin = find_allowed_title_case_insensitive("System Administrator", allowed_job_titles)
     devops_engineer = find_allowed_title_case_insensitive("DevOps Engineer", allowed_job_titles)
     solutions_engineer = find_allowed_title_case_insensitive("Solutions Engineer", allowed_job_titles)
-    full_stack = find_allowed_title_case_insensitive("Full Stack", allowed_job_titles)
     cloud_engineer = find_allowed_title_case_insensitive("Cloud Engineer", allowed_job_titles)
+    data_scientist = find_allowed_title_case_insensitive("Data Scientist", allowed_job_titles)
     marketing_analyst = find_allowed_title_case_insensitive("Marketing Analyst", allowed_job_titles)
     data_insight_analyst = find_allowed_title_case_insensitive("Data / Insight Analyst", allowed_job_titles)
-    data_scientist = find_allowed_title_case_insensitive("Data Scientist", allowed_job_titles)
     business_analyst = find_allowed_title_case_insensitive("Business Analyst", allowed_job_titles)
+    project_manager = find_allowed_title_case_insensitive("Project Manager", allowed_job_titles)
+    scrum_master = find_allowed_title_case_insensitive("Scrum Master", allowed_job_titles)
+    product_marketing = find_allowed_title_case_insensitive("Product Marketing", allowed_job_titles)
+    digital_marketing = find_allowed_title_case_insensitive("Digital Marketing", allowed_job_titles)
+    content_marketing = find_allowed_title_case_insensitive("Content Marketing", allowed_job_titles)
+    performance_marketing = find_allowed_title_case_insensitive("Performance Marketing", allowed_job_titles)
+    generalist_marketing = find_allowed_title_case_insensitive("Generalist Marketing", allowed_job_titles)
+    customer_support = find_allowed_title_case_insensitive("Customer Support", allowed_job_titles)
+    customer_service_rep = find_allowed_title_case_insensitive("Customer Service Representative", allowed_job_titles)
+    support_engineer = find_allowed_title_case_insensitive("Support Engineer", allowed_job_titles)
+    sales_ops = find_allowed_title_case_insensitive("Sales Operations", allowed_job_titles)
+    business_ops = find_allowed_title_case_insensitive("Business Operations", allowed_job_titles)
+    human_resources = find_allowed_title_case_insensitive("Human Resources", allowed_job_titles)
+    talent_acquisition = find_allowed_title_case_insensitive("Talent Acquisition", allowed_job_titles)
+    finance_accounting = find_allowed_title_case_insensitive("Finance / Accounting", allowed_job_titles)
+    fpna = find_allowed_title_case_insensitive("FP&A", allowed_job_titles)
+    legal = find_allowed_title_case_insensitive("Legal", allowed_job_titles)
+    risk_compliance = find_allowed_title_case_insensitive("Risk and Compliance", allowed_job_titles)
 
+    # Strong exact title-first overrides
+    exact_title = normalize_job_title_from_list(job_title, allowed_job_titles)
+    if exact_title:
+        return [exact_title]
+
+    # Account / customer roles
     account_manager_signals = [
         r"\bnational account manager\b", r"\bkey account manager\b", r"\baccount manager\b",
         r"\bcustomer success manager\b", r"\bcustomer success\b", r"\bcsm\b",
-        r"\bclient success manager\b", r"\brenewals manager\b", r"\bsales account management\b",
-        r"\baccount management\b",
+        r"\bclient success manager\b", r"\brenewals manager\b", r"\baccount management\b",
     ]
     account_exec_signals = [
         r"\baccount executive\b", r"\bnew business\b", r"\bhunter\b",
-        r"\bpipeline generation\b", r"\bprospecting\b", r"\bquota\b",
+        r"\bprospecting\b", r"\bpipeline generation\b", r"\bquota\b",
     ]
+    if csm_account_manager and (
+        any(re.search(p, title_low) for p in account_manager_signals)
+        or any(re.search(p, desc_low) for p in account_manager_signals)
+    ):
+        out = _remove_if_present(out, account_executive)
+        out = _remove_if_present(out, system_engineer)
+        out = [csm_account_manager] + [x for x in out if x != csm_account_manager]
 
-    sales_account_role_signal = any(re.search(p, title_low) for p in account_manager_signals) or any(
-        re.search(p, desc_low) for p in [
-            r"\bwholesale\b", r"\bbuyers\b", r"\baccounts\b", r"\btrade terms\b",
-            r"\bpromotional plans\b", r"\bretailers\b", r"\bbrands\b",
-            r"\bcommercial conversations\b", r"\bdistributor partners\b",
-            r"\bnetwork development\b", r"\bvalue, gross margin, and volume targets\b",
-        ]
-    )
+    if account_executive and (
+        any(re.search(p, title_low) for p in account_exec_signals)
+        or any(re.search(p, desc_low) for p in account_exec_signals)
+    ):
+        out = _remove_if_present(out, csm_account_manager)
+        out = [account_executive] + [x for x in out if x != account_executive]
 
-    if csm_account_manager and sales_account_role_signal:
-        if csm_account_manager in out:
-            out.remove(csm_account_manager)
-        out.insert(0, csm_account_manager)
+    # Marketing roles
+    marketing_signals = bool(re.search(
+        r"\bmarketing\b|\bseo\b|\bcampaign\b|\bcrm\b|\bdemand gen\b|\blead generation\b|\bbrand\b|\bcontent\b|\bproduct marketing\b|\bperformance marketing\b",
+        title_low + "\n" + desc_low
+    ))
+    if marketing_signals:
+        out = _remove_if_present(out, system_engineer)
+        out = _remove_if_present(out, system_admin)
+        out = _remove_if_present(out, support_engineer)
+        if re.search(r"\bproduct marketing\b", title_low + "\n" + desc_low) and product_marketing:
+            out = [product_marketing] + [x for x in out if x != product_marketing]
+        elif re.search(r"\bperformance marketing\b|\bpaid social\b|\bpaid search\b|\bppc\b", title_low + "\n" + desc_low) and performance_marketing:
+            out = [performance_marketing] + [x for x in out if x != performance_marketing]
+        elif re.search(r"\bcontent\b|\bcopywriting\b", title_low + "\n" + desc_low) and content_marketing:
+            out = [content_marketing] + [x for x in out if x != content_marketing]
+        elif re.search(r"\bdigital marketing\b|\bgrowth marketing\b", title_low + "\n" + desc_low) and digital_marketing:
+            out = [digital_marketing] + [x for x in out if x != digital_marketing]
+        elif marketing_analyst and re.search(r"\banalyst\b|\banalytics\b|\binsights?\b|\bsegmentation\b", title_low + "\n" + desc_low):
+            out = [marketing_analyst] + [x for x in out if x != marketing_analyst]
+        elif generalist_marketing:
+            out = [generalist_marketing] + [x for x in out if x != generalist_marketing]
 
-    if account_executive and any(re.search(p, title_low) for p in account_exec_signals):
-        if account_executive not in out:
-            out.append(account_executive)
+    # Business / sales ops roles
+    if sales_ops and re.search(r"\bsales operations\b|\bsales ops\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [sales_ops] + [x for x in out if x != sales_ops]
 
-    if sales_account_role_signal:
-        technical_titles_to_remove = {
-            system_engineer, system_admin, devops_engineer,
-            solutions_engineer, full_stack, cloud_engineer,
-        }
-        out = [x for x in out if x not in technical_titles_to_remove and x]
+    if business_ops and re.search(r"\bbusiness operations\b|\boperations manager\b|\boperations\b", title_low + "\n" + desc_low):
+        if not re.search(r"\bcustomer operations\b", title_low + "\n" + desc_low):
+            out = _remove_if_present(out, system_engineer)
+            out = [business_ops] + [x for x in out if x != business_ops]
 
-    systems_signal = any(re.search(p, title_low) for p in [
-        r"\bsystem engineer\b", r"\bsystems engineer\b", r"\binfrastructure engineer\b",
-        r"\bplatform engineer\b", r"\b2nd line\b", r"\bsecond line\b",
-        r"\bit support\b", r"\bsupport engineer\b",
-    ]) or any(re.search(p, desc_low) for p in [
-        r"\bkubernetes\b", r"\blinux\b", r"\bopenshift\b", r"\bvirtuali[sz]ation\b",
-        r"\bwindows server\b", r"\bactive directory\b", r"\bvmware\b", r"\bcitrix\b",
-    ])
+    # Project / PMO roles
+    if project_manager and re.search(r"\bproject manager\b|\bpmo\b|\bprogramme manager\b|\bprogram manager\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = _remove_if_present(out, system_admin)
+        out = [project_manager] + [x for x in out if x != project_manager]
 
-    if systems_signal and system_engineer:
-        if system_engineer in out:
-            out.remove(system_engineer)
-        out.insert(0, system_engineer)
+    if scrum_master and re.search(r"\bscrum master\b|\bagile coach\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, project_manager)
+        out = [scrum_master] + [x for x in out if x != scrum_master]
 
-    admin_signal = any(re.search(p, title_low) for p in [
-        r"\bsystem administrator\b", r"\bsystems administrator\b",
-    ]) or any(re.search(p, desc_low) for p in [
-        r"\bactive directory\b", r"\bexchange\b", r"\buser administration\b",
-        r"\bo365\b", r"\bm365\b",
-    ])
-    if admin_signal and system_admin and system_admin not in out:
-        out.append(system_admin)
+    # HR / TA / Finance / Legal / Risk roles
+    if human_resources and re.search(r"\bhuman resources\b|\bhr\b|\bpeople ops\b|\bpeople operations\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [human_resources] + [x for x in out if x != human_resources]
 
-    crm_marketing_signal = any(re.search(p, desc_low) for p in [
-        r"\bcrm\b", r"\bloyalty\b", r"\bcampaign\b", r"\bcustomer analytics\b",
-        r"\bsegmentation\b", r"\blifecycle\b", r"\bretention\b",
-    ])
-    if crm_marketing_signal:
-        for candidate in [marketing_analyst, data_insight_analyst]:
-            if candidate and candidate not in out:
-                out.append(candidate)
+    if talent_acquisition and re.search(r"\btalent acquisition\b|\brecruiter\b|\brecruitment\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, human_resources)
+        out = [talent_acquisition] + [x for x in out if x != talent_acquisition]
 
-    data_signal = any(re.search(p, title_low) for p in [
-        r"\bdata scientist\b", r"\bml engineer\b", r"\bmachine learning engineer\b",
-    ]) or any(re.search(p, desc_low) for p in [
-        r"\bmachine learning\b", r"\bmodelling\b", r"\bmodeling\b",
-        r"\bpython\b", r"\bstatistics\b",
-    ])
-    if data_signal:
-        for candidate in [data_scientist, business_analyst]:
-            if candidate and candidate not in out:
-                out.append(candidate)
+    if finance_accounting and re.search(r"\bfinance\b|\baccounting\b|\bbookkeeper\b|\bcontroller\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [finance_accounting] + [x for x in out if x != finance_accounting]
+
+    if fpna and re.search(r"\bfp&a\b|\bfinancial planning\b|\bforecasting\b|\bbudgeting\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, finance_accounting)
+        out = [fpna] + [x for x in out if x != fpna]
+
+    if legal and re.search(r"\blegal\b|\bcounsel\b|\bcontract law\b|\bprivacy counsel\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [legal] + [x for x in out if x != legal]
+
+    if risk_compliance and re.search(r"\brisk\b|\bcompliance\b|\bregulatory\b|\bgovernance\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [risk_compliance] + [x for x in out if x != risk_compliance]
+
+    # Support vs system roles
+    support_signals = bool(re.search(
+        r"\bcustomer support\b|\bcustomer service\b|\bhelpdesk\b|\bservice desk\b|\btechnical support\b|\bsupport engineer\b",
+        title_low + "\n" + desc_low
+    ))
+    if support_signals:
+        if customer_support and re.search(r"\bcustomer support\b", title_low + "\n" + desc_low):
+            out = _remove_if_present(out, system_engineer)
+            out = _remove_if_present(out, system_admin)
+            out = [customer_support] + [x for x in out if x != customer_support]
+        elif customer_service_rep and re.search(r"\bcustomer service\b", title_low + "\n" + desc_low):
+            out = _remove_if_present(out, system_engineer)
+            out = [customer_service_rep] + [x for x in out if x != customer_service_rep]
+        elif support_engineer and re.search(r"\btechnical support\b|\bsupport engineer\b|\bhelpdesk\b|\bservice desk\b", title_low + "\n" + desc_low):
+            out = _remove_if_present(out, system_engineer)
+            out = [support_engineer] + [x for x in out if x != support_engineer]
+
+    # Only allow System Engineer when there is strong infra/sys evidence
+    strong_system_signals = bool(re.search(
+        r"\bsystems? engineer\b|\binfrastructure engineer\b|\bnetwork engineer\b|\bplatform engineer\b|\bkubernetes\b|\blinux\b|\bopenshift\b|\bvirtuali[sz]ation\b|\bwindows server\b|\bactive directory\b|\bvmware\b|\bcitrix\b|\bfirewall\b|\brouter\b|\bvpn\b|\bhyper-v\b",
+        title_low + "\n" + desc_low
+    ))
+    admin_signals = bool(re.search(
+        r"\bsystem administrator\b|\bsystems administrator\b|\bo365\b|\bm365\b|\bexchange\b|\buser administration\b",
+        title_low + "\n" + desc_low
+    ))
+
+    if system_admin and admin_signals:
+        out = _remove_if_present(out, system_engineer)
+        out = [system_admin] + [x for x in out if x != system_admin]
+    elif system_engineer and strong_system_signals:
+        out = [system_engineer] + [x for x in out if x != system_engineer]
+    else:
+        out = _remove_if_present(out, system_engineer)
+
+    if devops_engineer and re.search(r"\bdevops\b|\bci/cd\b|\bterraform\b|\binfrastructure as code\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [devops_engineer] + [x for x in out if x != devops_engineer]
+
+    if cloud_engineer and re.search(r"\baws\b|\bazure\b|\bgcp\b|\bcloud engineer\b|\bcloud infrastructure\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [cloud_engineer] + [x for x in out if x != cloud_engineer]
+
+    if solutions_engineer and re.search(r"\bsolutions engineer\b|\bpre-sales\b|\bpresales\b|\bsales engineer\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [solutions_engineer] + [x for x in out if x != solutions_engineer]
+
+    # Data roles
+    if data_scientist and re.search(r"\bdata scientist\b|\bmachine learning\b|\bmodelling\b|\bmodeling\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [data_scientist] + [x for x in out if x != data_scientist]
+
+    if data_insight_analyst and re.search(r"\binsights?\b|\banalytics\b|\bdashboard\b|\breporting\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        if data_insight_analyst not in out:
+            out = [data_insight_analyst] + out
+
+    if business_analyst and re.search(r"\bbusiness analyst\b|\brequirements gathering\b|\bprocess mapping\b", title_low + "\n" + desc_low):
+        out = _remove_if_present(out, system_engineer)
+        out = [business_analyst] + [x for x in out if x != business_analyst]
 
     out = dedupe_keep_order([x for x in out if x])
     return out[:3]
