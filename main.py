@@ -5,7 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -17,10 +17,7 @@ from classifiers import (
     ai_generate_skills_full,
     ai_map_job_titles_only,
 )
-from fetch_extract import (
-    extract_best_content,
-    fetch_html,
-)
+from fetch_extract import extract_best_content, fetch_html
 from formatters import exact_match_skills_in_order
 from validators import (
     detect_job_type_rule_based,
@@ -309,12 +306,6 @@ def title_similarity(a: str, b: str) -> float:
 
 
 def best_allowed_title_match(job_title: str, allowed_job_titles: List[str]) -> Tuple[str, float, float]:
-    """
-    Returns:
-    - best_title
-    - best string similarity ratio
-    - token overlap ratio
-    """
     clean_title = clean_whitespace(job_title)
     if not clean_title or not allowed_job_titles:
         return "", 0.0, 0.0
@@ -337,17 +328,13 @@ def best_allowed_title_match(job_title: str, allowed_job_titles: List[str]) -> T
         if jtoks and atoks:
             token_ratio = overlap / max(1, min(len(jtoks), len(atoks)))
 
-        # slight boost for acronym-style known pairs
         compact_job = re.sub(r"[^a-z0-9]", "", clean_title.lower())
         compact_allowed = re.sub(r"[^a-z0-9]", "", allowed.lower())
         if compact_job == compact_allowed:
             ratio = 1.0
             token_ratio = 1.0
 
-        if (
-            ratio > best_ratio
-            or (abs(ratio - best_ratio) < 0.0001 and token_ratio > best_token_ratio)
-        ):
+        if ratio > best_ratio or (abs(ratio - best_ratio) < 0.0001 and token_ratio > best_token_ratio):
             best_title = allowed
             best_ratio = ratio
             best_token_ratio = token_ratio
@@ -474,20 +461,12 @@ def determine_relevance_and_primary_title(
     role_context_text: str,
     allowed_job_titles: List[str],
 ) -> Tuple[str, str, str, str]:
-    """
-    Returns:
-    - role_relevance
-    - role_relevance_reason
-    - matched_or_primary_title
-    - job_category_seed
-    """
     strong_match, matched_title, match_reason = is_strong_allowed_title_match(clean_title, allowed_job_titles)
 
     if strong_match:
         category_seed = derive_category_from_title_or_text(matched_title, clean_title, description_text)
         return "Relevant", match_reason, matched_title, category_seed
 
-    # Title not strongly grounded in allowed list -> ask AI, but keep title-list context for mapping later.
     relevance = ai_check_relevance(
         job_title=clean_title,
         role_context_text=role_context_text,
@@ -640,7 +619,6 @@ def process_job(
     result.salary_min = snap_salary_value(result.salary_min, allowed_salaries)
     result.salary_max = snap_salary_value(result.salary_max, allowed_salaries)
 
-    # Title tagging: use exact/strong predefined list match first. AI only if needed.
     exact_title = normalize_job_title_from_list(clean_title, allowed_job_titles)
     if exact_title:
         job_titles = [exact_title]
@@ -665,21 +643,15 @@ def process_job(
     result.job_title_tag_3 = job_titles[2] if len(job_titles) > 2 else ""
 
     seniorities = fallback_seniorities(clean_title, description_text)
-    seniorities = refine_seniorities_rule_based(
-        clean_title,
-        description_text,
-        seniorities,
-    )
+    seniorities = refine_seniorities_rule_based(clean_title, description_text, seniorities)
     seniorities = normalize_seniority_list(seniorities)
 
     result.seniority_1 = seniorities[0] if len(seniorities) > 0 else ""
     result.seniority_2 = seniorities[1] if len(seniorities) > 1 else ""
     result.seniority_3 = seniorities[2] if len(seniorities) > 2 else ""
 
-    skills_source_text = description_text
     skill_list = tp_skills if result.job_category == "T&P" else nontp_skills
-
-    exact_skills = exact_match_skills_in_order(skills_source_text, skill_list, limit=10)
+    exact_skills = exact_match_skills_in_order(description_text, skill_list, limit=10)
     exact_skills = dedupe_keep_order(exact_skills)
 
     if len(exact_skills) >= MIN_EXACT_SKILLS_TO_SKIP_AI:
@@ -688,7 +660,7 @@ def process_job(
         if len(exact_skills) == 0:
             ai_skills = ai_generate_skills_full(
                 role_category=result.job_category,
-                description=skills_source_text,
+                description=description_text,
                 candidate_skills=[],
                 allowed_skills=skill_list,
             )
@@ -696,7 +668,7 @@ def process_job(
         else:
             additional_skills = ai_generate_additional_skills(
                 role_category=result.job_category,
-                description=skills_source_text,
+                description=description_text,
                 existing_skills=exact_skills,
                 candidate_skills=exact_skills,
                 allowed_skills=skill_list,
@@ -704,11 +676,7 @@ def process_job(
             final_skills = (exact_skills + additional_skills)[:10]
 
     allowed_lower = {s.lower(): s for s in skill_list}
-    final_skills = [
-        allowed_lower[sk.lower()]
-        for sk in final_skills
-        if sk.lower() in allowed_lower
-    ]
+    final_skills = [allowed_lower[sk.lower()] for sk in final_skills if sk.lower() in allowed_lower]
     final_skills = dedupe_keep_order(final_skills)[:10]
 
     padded_skills = (final_skills + [""] * 10)[:10]
