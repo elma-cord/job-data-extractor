@@ -4,7 +4,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -20,9 +20,7 @@ from fetch_extract import (
     extract_best_content,
     fetch_html,
 )
-from formatters import (
-    exact_match_skills_in_order,
-)
+from formatters import exact_match_skills_in_order
 from validators import (
     detect_job_type_rule_based,
     detect_remote_days_rule_based,
@@ -30,8 +28,6 @@ from validators import (
     detect_visa_rule_based,
     fallback_seniorities,
     has_explicit_remote_days_evidence,
-    is_relevant_by_rules,
-    is_tp_by_rules,
     location_value_has_evidence,
     normalize_category_for_skills,
     normalize_job_title_from_list,
@@ -54,7 +50,6 @@ NONTP_SKILLS_CSV = "predefined_nontp_skills.csv"
 JOB_TITLES_CSV = "predefined_job_titles.csv"
 
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
-FAST_MODE = os.getenv("FAST_MODE", "1").strip().lower() in {"1", "true", "yes", "y"}
 MIN_EXACT_SKILLS_TO_SKIP_AI = int(os.getenv("MIN_EXACT_SKILLS_TO_SKIP_AI", "4"))
 ENABLE_URL_FALLBACK = os.getenv("ENABLE_URL_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "y"}
 
@@ -253,20 +248,7 @@ def clean_job_title(raw_title: str) -> str:
     for pat in stop_patterns:
         title = re.sub(pat, "", title, flags=re.I)
 
-    company_words = [
-        " ltd", " limited", " inc", " llc", " plc", " gmbh", " s.a.", " remote",
-        " full-time", " full time", " part-time", " part time", " contract",
-        " freelance", " location", " office"
-    ]
-    low = title.lower()
-    cut = len(title)
-    for w in company_words:
-        idx = low.find(w)
-        if idx != -1:
-            cut = min(cut, idx)
-
-    title = title[:cut].strip(" -|,·")
-    return clean_whitespace(title)
+    return clean_whitespace(title.strip(" -|,·"))
 
 
 def infer_title_from_description(description_text: str) -> str:
@@ -306,52 +288,6 @@ def prepare_description_text(raw_description: str) -> str:
     return text
 
 
-def should_skip_relevance_ai(clean_title: str, role_body_text: str, header_text: str) -> Tuple[bool, str, str]:
-    strong_rule_relevant = is_relevant_by_rules(clean_title, role_body_text, header_text)
-    substantial_role_text = len(clean_whitespace(role_body_text)) >= 700
-
-    if strong_rule_relevant and substantial_role_text:
-        return True, "Relevant", "Rule-based relevance: clear allowed role with substantial provided description."
-
-    return False, "", ""
-
-
-def should_run_core_fields_ai(
-    fallback_location: str,
-    fallback_remote_preferences: str,
-    fallback_remote_days: str,
-    fallback_salary_min: str,
-    fallback_salary_max: str,
-    fallback_salary_currency: str,
-    fallback_salary_period: str,
-    fallback_visa: str,
-    fallback_job_type: str,
-) -> bool:
-    missing_count = sum(
-        1
-        for x in [
-            fallback_location,
-            fallback_remote_preferences,
-            fallback_remote_days,
-            fallback_salary_min,
-            fallback_salary_max,
-            fallback_salary_currency,
-            fallback_salary_period,
-            fallback_visa,
-            fallback_job_type,
-        ]
-        if not str(x).strip()
-    )
-    return missing_count >= 3
-
-
-def should_run_titles_ai(clean_title: str, allowed_job_titles: List[str]) -> bool:
-    if FAST_MODE:
-        return False
-    exact = normalize_job_title_from_list(clean_title, allowed_job_titles)
-    return not bool(exact)
-
-
 def blank_result_with_relevance(job: JobInput, role_relevance: str, reason: str, notes: str = "") -> JobResult:
     return JobResult(
         row_id=job.row_id,
@@ -365,12 +301,6 @@ def blank_result_with_relevance(job: JobInput, role_relevance: str, reason: str,
 
 
 def extract_location_and_remote_from_url(url: str, allowed_locations: List[str]) -> Dict[str, str]:
-    """
-    Fast fallback only:
-    - requests/html only
-    - no Playwright
-    - no retries beyond requests session defaults
-    """
     if not clean_whitespace(url):
         return {
             "job_location": "",
@@ -480,28 +410,18 @@ def process_job(
     )
     fallback_visa = detect_visa_rule_based(description_text)
     fallback_job_type = detect_job_type_rule_based(description_text, "")
-    fallback_job_category = "T&P" if is_tp_by_rules(clean_title, description_text) else "NonT&P"
 
-    strong_rule_relevant = bool(clean_title and is_relevant_by_rules(clean_title, description_text, header_text))
-    fallback_role_relevance = "Relevant" if strong_rule_relevant else "Not relevant"
-    fallback_reason = "Fallback classification based on provided title and provided job description."
+    relevance = ai_check_relevance(
+        job_title=clean_title,
+        role_context_text=role_context_text,
+        fallback_role_relevance="Not relevant",
+        fallback_reason="Fallback classification failed.",
+        fallback_job_category="",
+    )
 
-    skip_rel_ai, rel_value, rel_reason = should_skip_relevance_ai(clean_title, description_text, header_text)
-    if skip_rel_ai:
-        role_relevance = rel_value
-        role_relevance_reason = rel_reason
-        relevance_job_category = fallback_job_category
-    else:
-        relevance = ai_check_relevance(
-            job_title=clean_title,
-            role_context_text=role_context_text,
-            fallback_role_relevance=fallback_role_relevance,
-            fallback_reason=fallback_reason,
-            fallback_job_category=fallback_job_category,
-        )
-        role_relevance = relevance.get("role_relevance", "") or fallback_role_relevance
-        role_relevance_reason = relevance.get("role_relevance_reason", "") or fallback_reason
-        relevance_job_category = normalize_category_for_skills(relevance.get("job_category", "")) or fallback_job_category
+    role_relevance = relevance.get("role_relevance", "") or "Not relevant"
+    role_relevance_reason = relevance.get("role_relevance_reason", "") or "No reason returned."
+    relevance_job_category = normalize_category_for_skills(relevance.get("job_category", ""))
 
     if role_relevance == "Not relevant":
         return blank_result_with_relevance(
@@ -521,7 +441,12 @@ def process_job(
         job_category=relevance_job_category,
     )
 
-    if should_run_core_fields_ai(
+    core_fields = ai_extract_core_fields(
+        job_title=clean_title,
+        header_text=header_text,
+        role_body_text=description_text,
+        allowed_locations=allowed_locations,
+        fallback_job_category=result.job_category,
         fallback_location=fallback_location,
         fallback_remote_preferences=fallback_remote_preferences,
         fallback_remote_days=fallback_remote_days,
@@ -531,36 +456,7 @@ def process_job(
         fallback_salary_period=fallback_salary_period,
         fallback_visa=fallback_visa,
         fallback_job_type=fallback_job_type,
-    ):
-        core_fields = ai_extract_core_fields(
-            job_title=clean_title,
-            header_text=header_text,
-            role_body_text=description_text,
-            allowed_locations=allowed_locations,
-            fallback_job_category=result.job_category,
-            fallback_location=fallback_location,
-            fallback_remote_preferences=fallback_remote_preferences,
-            fallback_remote_days=fallback_remote_days,
-            fallback_salary_min=fallback_salary_min,
-            fallback_salary_max=fallback_salary_max,
-            fallback_salary_currency=fallback_salary_currency,
-            fallback_salary_period=fallback_salary_period,
-            fallback_visa=fallback_visa,
-            fallback_job_type=fallback_job_type,
-        )
-    else:
-        core_fields = {
-            "job_category": result.job_category,
-            "job_location": fallback_location,
-            "remote_preferences": fallback_remote_preferences,
-            "remote_days": fallback_remote_days,
-            "salary_min": fallback_salary_min,
-            "salary_max": fallback_salary_max,
-            "salary_currency": fallback_salary_currency,
-            "salary_period": fallback_salary_period,
-            "visa_sponsorship": fallback_visa,
-            "job_type": fallback_job_type,
-        }
+    )
 
     result.job_category = normalize_category_for_skills(core_fields.get("job_category", "")) or result.job_category
 
@@ -586,13 +482,11 @@ def process_job(
     else:
         result.remote_days = fallback_remote_days
 
-    # Salary: keep it strict and cheap. No second salary AI call.
     result.salary_min = core_fields.get("salary_min", "") or fallback_salary_min
     result.salary_max = core_fields.get("salary_max", "") or fallback_salary_max
     result.salary_currency = core_fields.get("salary_currency", "") or fallback_salary_currency
     result.salary_period = core_fields.get("salary_period", "") or fallback_salary_period
 
-    # URL fallback only if BOTH are missing/unclear.
     needs_location_fallback = not clean_whitespace(result.job_location)
     needs_remote_fallback = (
         not clean_whitespace(result.remote_preferences)
@@ -617,26 +511,22 @@ def process_job(
             ) or result.remote_preferences
             used_link_for_remote_preferences = True
 
-    hard_evidence_text = normalize_quotes(description_text)
-    explicit_salary_check = parse_explicit_salary(hard_evidence_text, allowed_salaries)
+    explicit_salary_check = parse_explicit_salary(normalize_quotes(description_text), allowed_salaries)
     if explicit_salary_check != ("", "", "", ""):
         result.salary_min, result.salary_max, result.salary_currency, result.salary_period = explicit_salary_check
 
     result.salary_min = snap_salary_value(result.salary_min, allowed_salaries)
     result.salary_max = snap_salary_value(result.salary_max, allowed_salaries)
 
-    # Job titles: exact/rule first, AI only when FAST_MODE is off.
     exact_title = normalize_job_title_from_list(clean_title, allowed_job_titles)
     if exact_title:
         job_titles = [exact_title]
-    elif should_run_titles_ai(clean_title, allowed_job_titles):
+    else:
         job_titles = ai_map_job_titles_only(
             position_name=clean_title,
             description=description_text,
             allowed_job_titles=allowed_job_titles,
         )
-    else:
-        job_titles = []
 
     job_titles = postprocess_job_titles(
         job_title=clean_title,
@@ -649,7 +539,6 @@ def process_job(
     result.job_title_tag_2 = job_titles[1] if len(job_titles) > 1 else ""
     result.job_title_tag_3 = job_titles[2] if len(job_titles) > 2 else ""
 
-    # Seniority: rule-based only in FAST_MODE.
     seniorities = fallback_seniorities(clean_title, description_text)
     seniorities = refine_seniorities_rule_based(
         clean_title,
@@ -662,7 +551,6 @@ def process_job(
     result.seniority_2 = seniorities[1] if len(seniorities) > 1 else ""
     result.seniority_3 = seniorities[2] if len(seniorities) > 2 else ""
 
-    # Skills: exact match first, AI only when weak.
     skills_source_text = description_text
     skill_list = tp_skills if result.job_category == "T&P" else nontp_skills
 
@@ -748,7 +636,6 @@ def main() -> None:
     print(f"[INFO] T&P skills loaded: {len(tp_skills)}")
     print(f"[INFO] NonT&P skills loaded: {len(nontp_skills)}")
     print(f"[INFO] Job titles loaded: {len(allowed_job_titles)}")
-    print(f"[INFO] FAST_MODE: {'yes' if FAST_MODE else 'no'}")
     print(f"[INFO] MAX_WORKERS: {MAX_WORKERS}")
     print(f"[INFO] ENABLE_URL_FALLBACK: {'yes' if ENABLE_URL_FALLBACK else 'no'}")
 
