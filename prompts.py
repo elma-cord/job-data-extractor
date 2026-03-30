@@ -18,9 +18,11 @@ Rules:
 - Do not guess from company name.
 - Ignore legal text, privacy text, cookie text, navigation, marketing, and unrelated company text.
 - Keep the reason short and concrete.
+- Business/commercial roles can still be relevant. Do not reject a role just because it is not technical.
+- Sales, business development, account management, customer success, operations, finance, legal, HR, marketing, PMO, and support roles can all be relevant.
 
 Relevant roles include technical and business functions such as:
-software, engineering, product, data, AI/ML, QA, DevOps, cloud, infrastructure, security, UX/UI, IT support, solutions engineering, HR, people ops, talent, finance, accounting, legal, compliance, risk, revops, sales ops, operations, PMO, programme/project/change/transformation, customer success, account management, renewals, implementation, partnerships, executive assistant, chief of staff, founder, C-level.
+software, engineering, product, data, AI/ML, QA, DevOps, cloud, infrastructure, security, UX/UI, IT support, solutions engineering, HR, people ops, talent, finance, accounting, legal, compliance, risk, revops, sales ops, operations, PMO, programme/project/change/transformation, customer success, account management, renewals, implementation, partnerships, executive assistant, chief of staff, founder, C-level, sales development, business development.
 
 Treat these as relevant:
 - PMO / programme / project / transformation / business operations roles
@@ -28,6 +30,7 @@ Treat these as relevant:
 - National Account Manager / Key Account Manager / Account Manager / Customer Success roles
 - Finance / accounting / legal / compliance / revops / sales ops
 - HR / TA / People roles
+- Business Development Representative / Sales Development Representative / BDR / SDR / Account Executive
 
 Clearly not relevant:
 teacher, nurse, waiter, chef, cleaner, warehouse operative, driver, construction, civil engineering, retail, electrician, mechanical/manufacturing plant roles, microbiology, maritime, injection molding, beauty brand store roles.
@@ -48,7 +51,7 @@ T&P:
 software, engineering, product, data, AI/ML, QA, DevOps, cloud, systems, network, security, IT support, infrastructure, solutions engineering, technical architecture
 
 NonT&P:
-HR, talent, people, operations, PMO, project/programme/change, finance, legal, compliance, risk, marketing, partnerships, executive assistant, chief of staff, account/customer/renewals/implementation roles
+HR, talent, people, operations, PMO, project/programme/change, finance, legal, compliance, risk, marketing, partnerships, executive assistant, chief of staff, account/customer/renewals/implementation roles, sales/business development roles
 
 Position name:
 {job_title}
@@ -138,7 +141,8 @@ Map:
 
 7. job_category
 - Return T&P or NonT&P only if clear
-- Otherwise ""
+- Business development, SDR/BDR, account, customer success, operations, finance, legal, HR, PMO, marketing are usually NonT&P.
+- Do not label a role T&P just because it works with technical customers.
 
 Allowed normalized locations:
 {location_list_text}
@@ -250,13 +254,15 @@ Rules:
 - If no suitable match exists, return []
 
 Important mappings:
+- Business Development Representative / Sales Development Representative / BDR / SDR -> prefer SDR / BDR
 - National Account Manager / Key Account Manager / Account Manager / Customer Success -> prefer CSM / Account Manager when suitable
-- Systems / infrastructure / Kubernetes / Linux / OpenShift / virtualization -> prefer System Engineer
+- Systems / infrastructure / Kubernetes / Linux / OpenShift / virtualization -> prefer System Engineer only when there is strong infra/system evidence
 - CRM / loyalty / campaign / customer analytics -> prefer Marketing Analyst and/or Data / Insight Analyst
 - Do not force Account Executive unless clearly new-business / hunter / AE
 - PMO / Programme / Change / Transformation -> prefer closest operations/project/programme title
 - People Ops / Talent / HR / Recruiter -> prefer closest HR / TA title
 - Finance / FP&A / Accounting -> prefer closest finance title
+- Do not map marketing, BDR, HR, finance, PMO, customer roles to System Engineer
 
 Predefined job titles:
 {job_titles_text}
