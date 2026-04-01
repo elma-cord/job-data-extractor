@@ -109,6 +109,7 @@ class JobClassifier:
         if remote_preferences_list:
             notes.append("remote preferences from current job description")
 
+        # Always fetch when either location OR remote is missing from the description.
         should_fetch = (not desc_job_location) or (not desc_remote_preferences_list)
 
         if should_fetch and job_url:
@@ -134,7 +135,6 @@ class JobClassifier:
                 if remote_days == "not specified" and fetched_remote_days != "not specified":
                     remote_days = fetched_remote_days
                     notes.append("remote days via link")
-
             else:
                 notes.append(f"url_fetch_failed: {fetched.error or fetched.status_code or 'unknown'}")
 
@@ -177,8 +177,6 @@ class JobClassifier:
         if not parsed["job_category"]:
             parsed["job_category"] = quick_tp or ""
 
-        # Relevant business/technical roles should not become Not Relevant
-        # just because they are Not T&P.
         if (
             parsed["role_relevance"] == "Not Relevant"
             and quick_rel == "Relevant"
@@ -190,7 +188,6 @@ class JobClassifier:
                 or "Title matches target scope and at least one acceptable location was found."
             )
 
-        # If we have extracted location and it is clearly disallowed, override to Not Relevant.
         if (
             parsed["role_relevance"] == "Relevant"
             and location_candidates
