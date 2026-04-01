@@ -109,7 +109,7 @@ class JobClassifier:
         if remote_preferences_list:
             notes.append("remote preferences from current job description")
 
-        # open link whenever either location OR remote preference is missing in description
+        # Always fetch when either location OR remote is missing from the description.
         should_fetch = (not desc_job_location) or (not desc_remote_preferences_list)
 
         if should_fetch and job_url:
@@ -177,7 +177,6 @@ class JobClassifier:
         if not parsed["job_category"]:
             parsed["job_category"] = quick_tp or ""
 
-        # keep relevant business / tech roles relevant if at least one allowed location exists
         if (
             parsed["role_relevance"] == "Not Relevant"
             and quick_rel == "Relevant"
@@ -189,7 +188,6 @@ class JobClassifier:
                 or "Title matches target scope and at least one acceptable location was found."
             )
 
-        # if extracted location is clearly disallowed, override to Not Relevant
         if (
             parsed["role_relevance"] == "Relevant"
             and location_candidates
