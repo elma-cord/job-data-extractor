@@ -107,6 +107,197 @@ NOISE_LOCATION_PATTERNS = [
     r"about the role",
 ]
 
+# ---------------------------------------------------------------------------
+# Built-in location knowledge — replaces predefined_locations CSV.
+# Keys are lowercase canonical names; values are their display form.
+# Covers UK cities/regions, Ireland, major EU cities, and broad regions.
+# Longer / more specific keys are preferred during matching.
+# ---------------------------------------------------------------------------
+_KNOWN_LOCATIONS: dict[str, str] = {
+    # ── UK regions / countries ───────────────────────────────────────────────
+    "united kingdom": "United Kingdom",
+    "uk": "UK",
+    "england": "England",
+    "scotland": "Scotland",
+    "wales": "Wales",
+    "northern ireland": "Northern Ireland",
+    # ── UK cities ────────────────────────────────────────────────────────────
+    "london, united kingdom": "London, UK",
+    "london, uk": "London, UK",
+    "london": "London, UK",
+    "manchester, united kingdom": "Manchester, UK",
+    "manchester, uk": "Manchester, UK",
+    "manchester": "Manchester, UK",
+    "birmingham, united kingdom": "Birmingham, UK",
+    "birmingham, uk": "Birmingham, UK",
+    "birmingham": "Birmingham, UK",
+    "leeds, united kingdom": "Leeds, UK",
+    "leeds, uk": "Leeds, UK",
+    "leeds": "Leeds, UK",
+    "bristol, united kingdom": "Bristol, UK",
+    "bristol, uk": "Bristol, UK",
+    "bristol": "Bristol, UK",
+    "edinburgh, united kingdom": "Edinburgh, UK",
+    "edinburgh, uk": "Edinburgh, UK",
+    "edinburgh": "Edinburgh, UK",
+    "glasgow, united kingdom": "Glasgow, UK",
+    "glasgow, uk": "Glasgow, UK",
+    "glasgow": "Glasgow, UK",
+    "sheffield, united kingdom": "Sheffield, UK",
+    "sheffield, uk": "Sheffield, UK",
+    "sheffield": "Sheffield, UK",
+    "liverpool, united kingdom": "Liverpool, UK",
+    "liverpool, uk": "Liverpool, UK",
+    "liverpool": "Liverpool, UK",
+    "nottingham, united kingdom": "Nottingham, UK",
+    "nottingham, uk": "Nottingham, UK",
+    "nottingham": "Nottingham, UK",
+    "oxford, united kingdom": "Oxford, UK",
+    "oxford, uk": "Oxford, UK",
+    "oxford": "Oxford, UK",
+    "cambridge, united kingdom": "Cambridge, UK",
+    "cambridge, uk": "Cambridge, UK",
+    "cambridge": "Cambridge, UK",
+    "reading, united kingdom": "Reading, UK",
+    "reading, uk": "Reading, UK",
+    "reading": "Reading, UK",
+    "brighton, united kingdom": "Brighton, UK",
+    "brighton, uk": "Brighton, UK",
+    "brighton": "Brighton, UK",
+    "cardiff, united kingdom": "Cardiff, UK",
+    "cardiff, uk": "Cardiff, UK",
+    "cardiff": "Cardiff, UK",
+    "belfast, united kingdom": "Belfast, UK",
+    "belfast, uk": "Belfast, UK",
+    "belfast": "Belfast, UK",
+    "newcastle upon tyne": "Newcastle, UK",
+    "newcastle, united kingdom": "Newcastle, UK",
+    "newcastle, uk": "Newcastle, UK",
+    "newcastle": "Newcastle, UK",
+    "coventry, united kingdom": "Coventry, UK",
+    "coventry, uk": "Coventry, UK",
+    "coventry": "Coventry, UK",
+    "leicester, united kingdom": "Leicester, UK",
+    "leicester, uk": "Leicester, UK",
+    "leicester": "Leicester, UK",
+    "southampton, united kingdom": "Southampton, UK",
+    "southampton, uk": "Southampton, UK",
+    "southampton": "Southampton, UK",
+    "portsmouth, united kingdom": "Portsmouth, UK",
+    "portsmouth, uk": "Portsmouth, UK",
+    "portsmouth": "Portsmouth, UK",
+    "milton keynes, united kingdom": "Milton Keynes, UK",
+    "milton keynes, uk": "Milton Keynes, UK",
+    "milton keynes": "Milton Keynes, UK",
+    "guildford, united kingdom": "Guildford, UK",
+    "guildford, uk": "Guildford, UK",
+    "guildford": "Guildford, UK",
+    "watford, united kingdom": "Watford, UK",
+    "watford, uk": "Watford, UK",
+    "watford": "Watford, UK",
+    "exeter, united kingdom": "Exeter, UK",
+    "exeter, uk": "Exeter, UK",
+    "exeter": "Exeter, UK",
+    "york, united kingdom": "York, UK",
+    "york, uk": "York, UK",
+    "york": "York, UK",
+    "hull, united kingdom": "Hull, UK",
+    "hull, uk": "Hull, UK",
+    "hull": "Hull, UK",
+    "stoke-on-trent, united kingdom": "Stoke-on-Trent, UK",
+    "stoke-on-trent, uk": "Stoke-on-Trent, UK",
+    "stoke-on-trent": "Stoke-on-Trent, UK",
+    "stoke": "Stoke-on-Trent, UK",
+    "derby, united kingdom": "Derby, UK",
+    "derby, uk": "Derby, UK",
+    "derby": "Derby, UK",
+    "swansea, united kingdom": "Swansea, UK",
+    "swansea, uk": "Swansea, UK",
+    "swansea": "Swansea, UK",
+    "aberdeen, united kingdom": "Aberdeen, UK",
+    "aberdeen, uk": "Aberdeen, UK",
+    "aberdeen": "Aberdeen, UK",
+    "dundee, united kingdom": "Dundee, UK",
+    "dundee, uk": "Dundee, UK",
+    "dundee": "Dundee, UK",
+    "bath, united kingdom": "Bath, UK",
+    "bath, uk": "Bath, UK",
+    "bath": "Bath, UK",
+    "worcester, united kingdom": "Worcester, UK",
+    "worcester, uk": "Worcester, UK",
+    "worcester": "Worcester, UK",
+    "norwich, united kingdom": "Norwich, UK",
+    "norwich, uk": "Norwich, UK",
+    "norwich": "Norwich, UK",
+    "ipswich, united kingdom": "Ipswich, UK",
+    "ipswich, uk": "Ipswich, UK",
+    "ipswich": "Ipswich, UK",
+    "peterborough, united kingdom": "Peterborough, UK",
+    "peterborough, uk": "Peterborough, UK",
+    "peterborough": "Peterborough, UK",
+    "luton, united kingdom": "Luton, UK",
+    "luton, uk": "Luton, UK",
+    "luton": "Luton, UK",
+    "swindon, united kingdom": "Swindon, UK",
+    "swindon, uk": "Swindon, UK",
+    "swindon": "Swindon, UK",
+    "slough, united kingdom": "Slough, UK",
+    "slough, uk": "Slough, UK",
+    "slough": "Slough, UK",
+    "warrington, united kingdom": "Warrington, UK",
+    "warrington, uk": "Warrington, UK",
+    "warrington": "Warrington, UK",
+    "wigan, united kingdom": "Wigan, UK",
+    "wigan, uk": "Wigan, UK",
+    "wigan": "Wigan, UK",
+    "bolton, united kingdom": "Bolton, UK",
+    "bolton, uk": "Bolton, UK",
+    "bolton": "Bolton, UK",
+    # ── Ireland ───────────────────────────────────────────────────────────────
+    "republic of ireland": "Ireland",
+    "ireland": "Ireland",
+    "dublin, ireland": "Dublin, Ireland",
+    "dublin": "Dublin, Ireland",
+    "cork, ireland": "Cork, Ireland",
+    "cork": "Cork, Ireland",
+    "galway, ireland": "Galway, Ireland",
+    "galway": "Galway, Ireland",
+    # ── Broad regions ─────────────────────────────────────────────────────────
+    "europe": "Europe",
+    "emea": "EMEA",
+    "remote": "Remote",
+    "worldwide": "Worldwide",
+    "global": "Global",
+    # ── Major EU / international cities frequently seen in UK job ads ──────────
+    "amsterdam, netherlands": "Amsterdam, Netherlands",
+    "amsterdam": "Amsterdam, Netherlands",
+    "berlin, germany": "Berlin, Germany",
+    "berlin": "Berlin, Germany",
+    "paris, france": "Paris, France",
+    "paris": "Paris, France",
+    "madrid, spain": "Madrid, Spain",
+    "madrid": "Madrid, Spain",
+    "barcelona, spain": "Barcelona, Spain",
+    "barcelona": "Barcelona, Spain",
+    "lisbon, portugal": "Lisbon, Portugal",
+    "lisbon": "Lisbon, Portugal",
+    "new york, usa": "New York, USA",
+    "new york": "New York, USA",
+    "san francisco, usa": "San Francisco, USA",
+    "san francisco": "San Francisco, USA",
+    "toronto, canada": "Toronto, Canada",
+    "toronto": "Toronto, Canada",
+    "sydney, australia": "Sydney, Australia",
+    "sydney": "Sydney, Australia",
+}
+
+# Pre-build a sorted list of keys from longest to shortest so that more
+# specific aliases (e.g. "london, united kingdom") are tried before shorter
+# ones (e.g. "london").
+_KNOWN_LOCATION_KEYS_SORTED: list[str] = sorted(
+    _KNOWN_LOCATIONS.keys(), key=len, reverse=True
+)
+
 
 def load_single_column_csv(path: Path) -> list[str]:
     values = []
@@ -189,109 +380,87 @@ def _looks_like_noise_location_value(value: str) -> bool:
     return any(re.search(p, v) for p in NOISE_LOCATION_PATTERNS)
 
 
-def _build_location_alias_map(predefined_locations: list[str]) -> dict[str, list[str]]:
+def _extract_locations_from_text(text: str) -> list[str]:
     """
-    Build a map of lowercased location aliases → canonical location strings.
-    Each alias is stored as a normalised (lowercased, whitespace-collapsed) string
-    so that matching can be done with whole-word regex rather than substring hacks.
+    Extract location names from *text* without requiring a predefined CSV.
+
+    Strategy:
+    1. Match against the built-in _KNOWN_LOCATIONS dictionary using whole-word
+       regex, longest alias first so specific forms beat bare city names.
+    2. Additionally capture freeform title-case "City, Country" patterns not
+       already covered by the dictionary.
+
+    Returns a deduplicated list of display-form location strings.
     """
-    alias_map: dict[str, list[str]] = {}
-
-    def add(alias: str, target: str) -> None:
-        key = lower_text(alias)
-        if not key:
-            return
-        alias_map.setdefault(key, [])
-        if target not in alias_map[key]:
-            alias_map[key].append(target)
-
-    for loc in predefined_locations:
-        # Full canonical form, e.g. "London, United Kingdom"
-        add(loc, loc)
-
-        parts = [p.strip() for p in loc.split(",") if p.strip()]
-        if parts:
-            city = parts[0]
-            # City-only alias only when the city name is >= 4 chars to avoid
-            # false positives from very short tokens like "Ely" or "Rye".
-            if len(city) >= 4:
-                add(city, loc)
-
-            if len(parts) >= 2:
-                add(f"{city}, {parts[-1]}", loc)
-
-        loc_l = lower_text(loc)
-        if "united kingdom" in loc_l:
-            add(loc.replace("United Kingdom", "UK"), loc)
-        if loc_l.endswith(", uk"):
-            add(loc.replace(", UK", ""), loc)
-
-    return alias_map
-
-
-def _match_predefined_locations(text: str, predefined_locations: list[str]) -> list[str]:
-    """
-    Match predefined location aliases against *text* using whole-word regex.
-    This replaces the previous compact-token substring approach which caused
-    false positives (e.g. 'london' matching inside 'londonderry', or a city
-    name buried in an unrelated sentence being silently picked up).
-
-    Scoring prefers longer (more specific) aliases so "London, United Kingdom"
-    beats a bare "London" match.
-    """
-    alias_map = _build_location_alias_map(predefined_locations)
     t_lower = lower_text(text)
+    found: list[tuple[int, str]] = []  # (alias_length, display_value)
 
-    scored: list[tuple[int, str]] = []
-
-    for alias_key, targets in alias_map.items():
-        # Build a whole-word pattern for this alias.
-        # We use re.escape so commas / dots in aliases are treated literally,
-        # then wrap in word-boundary anchors where possible.
-        escaped = re.escape(alias_key)
-        # \b doesn't work after a non-word char (comma, space), so we use
-        # a lookahead/lookbehind that asserts a non-alpha boundary.
+    # ── Step 1: match against built-in dictionary ─────────────────────────
+    for key in _KNOWN_LOCATION_KEYS_SORTED:
+        escaped = re.escape(key)
         pattern = r"(?<![a-z])" + escaped + r"(?![a-z])"
         if re.search(pattern, t_lower):
-            for target in targets:
-                scored.append((len(alias_key), target))
+            display = _KNOWN_LOCATIONS[key]
+            found.append((len(key), display))
 
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return dedupe_keep_order([target for _, target in scored])
+    # ── Step 2: capture freeform "Word(s), Word(s)" city/country patterns ─
+    # Matches things like "Austin, Texas" or "Cape Town, South Africa" that
+    # are not in the dictionary. We require title-case to reduce false hits.
+    freeform_pattern = (
+        r"\b([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)?)"
+        r",\s*"
+        r"([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)?)\b"
+    )
+    for m in re.finditer(freeform_pattern, text):
+        candidate = f"{m.group(1)}, {m.group(2)}"
+        candidate_lower = lower_text(candidate)
+        if candidate_lower not in _KNOWN_LOCATIONS:
+            if not _looks_like_noise_location_value(candidate):
+                found.append((len(candidate_lower), candidate))
+
+    # Sort: longest (most specific) first; stable so dict entries beat
+    # freeform ones of equal length.
+    found.sort(key=lambda x: -x[0])
+    return dedupe_keep_order([v for _, v in found])
 
 
-def extract_location_candidates(text: str, predefined_locations: list[str]) -> list[str]:
+def extract_location_candidates(text: str) -> list[str]:
     """
-    Return ONLY locations from the predefined list.
+    Return location strings extracted directly from *text*.
+    No predefined CSV is required.
 
     Search priority (stops as soon as results are found):
     1. Explicit label fields  (e.g. "Location: London")
     2. First 20 lines / header block of the primary section
-    3. Full primary section scan  ← last resort; kept but de-risked by
-       whole-word matching in _match_predefined_locations
+    3. Full primary section scan  ← last resort
     """
     primary = get_primary_text_window(text)
-    matches = []
+    matches: list[str] = []
 
-    # ── Priority 1: labeled location fields ──────────────────────────────────
+    # ── Priority 1: labeled location fields ──────────────────────────────
     labeled_values = _extract_labeled_values(primary, LOCATION_LABEL_PATTERNS)
     for value in labeled_values:
         cleaned = _clean_location_value(value)
         if cleaned and not _looks_like_noise_location_value(cleaned):
-            matches.extend(_match_predefined_locations(cleaned, predefined_locations))
+            hits = _extract_locations_from_text(cleaned)
+            if hits:
+                matches.extend(hits)
+            else:
+                # Labeled field found but not in dictionary — keep raw value.
+                matches.append(cleaned)
 
     if matches:
         return dedupe_keep_order(matches)
 
-    # ── Priority 2: top / header lines only (first 20 lines) ─────────────────
+    # ── Priority 2: top / header lines only (first 20 lines) ─────────────
     top_lines = split_lines(primary)[:20]
     header_blob = "\n".join(top_lines)
-    matches.extend(_match_predefined_locations(header_blob, predefined_locations))
+    matches.extend(_extract_locations_from_text(header_blob))
     if matches:
         return dedupe_keep_order(matches)
 
-    # ── Priority 3: full primary section scan (whole-word matching) ───────────
-    matches.extend(_match_predefined_locations(primary, predefined_locations))
+    # ── Priority 3: full primary section scan ─────────────────────────────
+    matches.extend(_extract_locations_from_text(primary))
     return dedupe_keep_order(matches)
 
 
@@ -300,13 +469,9 @@ def select_best_location(location_candidates: list[str]) -> str:
     Pick the single most specific / trustworthy location from the candidates.
 
     Scoring (higher = better):
-      2 + length  → city + country form  e.g. "London, United Kingdom"
+      2 + length  → city + country form  e.g. "London, UK"
       1 + length  → city-only or region  e.g. "London"
       0 + length  → broad region only    e.g. "United Kingdom", "Europe"
-
-    Among ties the longer string wins (more specific).
-    The first candidate in the original list is used as a tiebreaker so that
-    earlier (higher-priority) matches are preferred when scores are equal.
     """
     if not location_candidates:
         return ""
@@ -314,6 +479,7 @@ def select_best_location(location_candidates: list[str]) -> str:
     broad_exact = {
         "united kingdom", "uk", "england", "scotland",
         "wales", "northern ireland", "ireland", "europe", "emea",
+        "remote", "worldwide", "global",
     }
 
     def score(loc: str) -> tuple[int, int]:
@@ -324,7 +490,6 @@ def select_best_location(location_candidates: list[str]) -> str:
             return (2, len(loc))
         return (1, len(loc))
 
-    # Sort is stable: equal-scored items keep their original order.
     ranked = sorted(location_candidates, key=score, reverse=True)
     return ranked[0]
 
@@ -584,8 +749,9 @@ def extract_visa_status(text: str) -> str:
     return ""
 
 
-def location_or_remote_missing(description: str, predefined_locations: Optional[list[str]] = None) -> bool:
-    locations = extract_location_candidates(description, predefined_locations or [])
+def location_or_remote_missing(description: str) -> bool:
+    """Returns True if either location or remote preference could not be found."""
+    locations = extract_location_candidates(description)
     remote = extract_remote_preferences(description)
     return not (bool(locations) and bool(remote))
 
