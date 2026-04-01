@@ -12,35 +12,6 @@ CURRENCY_SIGNS = {
 
 REMOTE_ORDER = ["onsite", "hybrid", "remote"]
 
-CONTRACT_PATTERNS = {
-    "Permanent": [
-        r"\bpermanent\b",
-        r"\bfull[\s-]?time\b",
-        r"\bfull time\b",
-        r"\bemployment type\b.{0,20}\bpermanent\b",
-        r"\bemployment type\b.{0,40}\bfull[\s-]?time\b",
-    ],
-    "FTC": [
-        r"\bfixed[\s-]?term\b",
-        r"\btemporary\b",
-        r"\bmaternity cover\b",
-        r"\bmaternity leave\b",
-    ],
-    "Part Time": [
-        r"\bpart[\s-]?time\b",
-        r"\bjob[\s-]?share\b",
-    ],
-    "Freelance/Contract": [
-        r"\bfreelance\b",
-        r"\bcontract role\b",
-        r"\bcontract position\b",
-        r"\bcontractor\b",
-        r"\bcontracting\b",
-        r"\b12[\s-]?month contract\b",
-        r"\b6[\s-]?month contract\b",
-    ],
-}
-
 LEADERSHIP_TERMS = [
     "head of",
     "director",
@@ -97,15 +68,33 @@ WORKPLACE_LABEL_PATTERNS = [
     r"(?im)^\s*remote type\s*[:\-]?\s*(.+?)\s*$",
 ]
 
-NOISE_LOCATION_PATTERNS = [
-    r"reporting to",
-    r"department",
-    r"employment type",
-    r"salary",
-    r"key responsibilities",
-    r"skills, knowledge",
-    r"about the role",
-]
+CONTRACT_PATTERNS = {
+    "Permanent": [
+        r"\bpermanent\b",
+        r"\bfull[\s-]?time\b",
+        r"\bjob type\s*[:\-]?\s*full[\s-]?time\b",
+        r"\bemployment type\s*[:\-]?\s*permanent\b",
+        r"\bemployment type\s*[:\-]?\s*permanent\s*-\s*full[\s-]?time\b",
+    ],
+    "FTC": [
+        r"\bfixed[\s-]?term\b",
+        r"\btemporary\b",
+        r"\bmaternity cover\b",
+        r"\bmaternity leave\b",
+    ],
+    "Part Time": [
+        r"\bpart[\s-]?time\b",
+        r"\bjob[\s-]?share\b",
+    ],
+    "Freelance/Contract": [
+        r"\bfreelance\b",
+        r"\bcontract role\b",
+        r"\bcontract position\b",
+        r"\bcontractor\b",
+        r"\bcontracting\b",
+        r"\b(?:3|6|12)[\s-]?month contract\b",
+    ],
+}
 
 
 def load_single_column_csv(path: Path) -> list[str]:
@@ -153,6 +142,9 @@ def get_primary_text_window(text: str, max_chars: int = 4500) -> str:
         r"(?i)\byou may also like\b",
         r"(?i)\bmore jobs\b",
         r"(?i)\brelated jobs\b",
+        r'(?i)apply for this role',
+        r'(?i)indicates required fields',
+        r'(?i)we offer a free, no obligation consultation',
     ]
     for pattern in cut_markers:
         m = re.search(pattern, text)
@@ -184,22 +176,22 @@ def _clean_location_value(value: str) -> str:
     return value.strip()
 
 
-def _looks_like_noise_location_value(value: str) -> bool:
-    v = lower_text(value)
-    return any(re.search(p, v) for p in NOISE_LOCATION_PATTERNS)
+def _compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", lower_text(text))
 
 
-def _compact_location_token(text: str) -> str:
-    text = lower_text(text)
-    text = re.sub(r"[^a-z0-9]+", "", text)
-    return text
+def _country_alias(country: str) -> list[str]:
+    c = lower_text(country)
+    if c == "united kingdom":
+        return ["united kingdom", "uk", "great britain"]
+    return [country]
 
 
 def _build_location_alias_map(predefined_locations: list[str]) -> dict[str, list[str]]:
     alias_map: dict[str, list[str]] = {}
 
     def add(alias: str, target: str) -> None:
-        key = _compact_location_token(alias)
+        key = _compact(alias)
         if not key:
             return
         alias_map.setdefault(key, [])
@@ -210,66 +202,126 @@ def _build_location_alias_map(predefined_locations: list[str]) -> dict[str, list
         add(loc, loc)
 
         parts = [p.strip() for p in loc.split(",") if p.strip()]
-        if parts:
-            city = parts[0]
-            add(city, loc)
+        if not parts:
+            continue
 
-            if len(parts) >= 2:
-                add(f"{city}, {parts[-1]}", loc)
+        first = parts[0]
+        add(first, loc)
 
-        loc_l = lower_text(loc)
-        if "united kingdom" in loc_l:
-            add(loc.replace("United Kingdom", "UK"), loc)
-        if loc_l.endswith(", uk"):
-            add(loc.replace(", UK", ""), loc)
+        if len(parts) >= 2:
+            country = parts[-1]
+            add(f"{first}, {country}", loc)
+            for ca in _country_alias(country):
+                add(f"{first}, {ca}", loc)
+
+        if len(parts) >= 3:
+            mid = ", ".join(parts[:-1])
+            add(mid, loc)
 
     return alias_map
 
 
-def _match_predefined_locations(text: str, predefined_locations: list[str]) -> list[str]:
+def _score_location_match(raw_value: str, target: str) -> tuple[int, int, int]:
+    raw_l = lower_text(raw_value)
+    target_l = lower_text(target)
+    raw_compact = _compact(raw_value)
+    target_compact = _compact(target)
+
+    exact = 1 if raw_l == target_l else 0
+    starts = 1 if target_l.startswith(raw_l + ",") else 0
+    compact_exact = 1 if raw_compact == target_compact else 0
+
+    parts = [p.strip() for p in target.split(",") if p.strip()]
+    specificity = len(parts)
+
+    return (exact, compact_exact + starts, specificity)
+
+
+def match_best_predefined_location(raw_value: str, predefined_locations: list[str]) -> str:
+    raw_value = _clean_location_value(raw_value)
+    if not raw_value:
+        return ""
+
     alias_map = _build_location_alias_map(predefined_locations)
-    t = text or ""
-    t_compact = _compact_location_token(t)
+    raw_key = _compact(raw_value)
 
-    scored: list[tuple[int, str]] = []
+    candidates = alias_map.get(raw_key, []).copy()
 
-    for alias_key, targets in alias_map.items():
-        if alias_key and alias_key in t_compact:
-            for target in targets:
-                scored.append((len(alias_key), target))
+    if not candidates:
+        raw_l = lower_text(raw_value)
+        first_token = raw_l.split(",")[0].strip()
+        for loc in predefined_locations:
+            loc_l = lower_text(loc)
+            if loc_l == raw_l or loc_l.startswith(raw_l + ","):
+                candidates.append(loc)
+            elif first_token and (loc_l == first_token or loc_l.startswith(first_token + ",")):
+                candidates.append(loc)
 
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return dedupe_keep_order([target for _, target in scored])
+    candidates = dedupe_keep_order(candidates)
+    if not candidates:
+        return ""
+
+    ranked = sorted(
+        candidates,
+        key=lambda loc: _score_location_match(raw_value, loc),
+        reverse=True,
+    )
+    return ranked[0]
 
 
 def extract_location_candidates(text: str, predefined_locations: list[str]) -> list[str]:
     """
-    Return ONLY locations from predefined list.
-    Priority:
-    1. labeled location fields in the primary section
-    2. top/header lines in the primary section
-    3. primary-section scan only
+    Return ONLY predefined-list locations.
+    Strong priority:
+    1. first labeled Location field
+    2. other labeled location fields
+    3. top header lines
+    4. broader primary text scan
     """
     primary = get_primary_text_window(text)
-    matches = []
 
     labeled_values = _extract_labeled_values(primary, LOCATION_LABEL_PATTERNS)
+    labeled_values = [_clean_location_value(v) for v in labeled_values if _clean_location_value(v)]
+
+    strong_matches = []
     for value in labeled_values:
-        cleaned = _clean_location_value(value)
-        if cleaned and not _looks_like_noise_location_value(cleaned):
-            matches.extend(_match_predefined_locations(cleaned, predefined_locations))
+        best = match_best_predefined_location(value, predefined_locations)
+        if best:
+            strong_matches.append(best)
 
-    if matches:
-        return dedupe_keep_order(matches)
+    if strong_matches:
+        return dedupe_keep_order(strong_matches)
 
-    top_lines = split_lines(primary)[:20]
-    header_blob = "\n".join(top_lines)
-    matches.extend(_match_predefined_locations(header_blob, predefined_locations))
-    if matches:
-        return dedupe_keep_order(matches)
+    header_lines = split_lines(primary)[:18]
+    header_blob = "\n".join(header_lines)
 
-    matches.extend(_match_predefined_locations(primary, predefined_locations))
-    return dedupe_keep_order(matches)
+    header_matches = []
+    for line in header_lines:
+        best = match_best_predefined_location(line, predefined_locations)
+        if best:
+            header_matches.append(best)
+
+    if header_matches:
+        return dedupe_keep_order(header_matches)
+
+    broad_matches = []
+    for loc in predefined_locations:
+        loc_l = lower_text(loc)
+        first = loc_l.split(",")[0].strip()
+        if not first:
+            continue
+        if re.search(rf"(?<![a-z]){re.escape(first)}(?![a-z])", lower_text(header_blob)):
+            broad_matches.append(loc)
+
+    if broad_matches:
+        ranked = sorted(
+            dedupe_keep_order(broad_matches),
+            key=lambda loc: ("," in loc, len(loc)),
+            reverse=True,
+        )
+        return ranked
+
+    return []
 
 
 def select_best_location(location_candidates: list[str]) -> str:
@@ -277,19 +329,16 @@ def select_best_location(location_candidates: list[str]) -> str:
         return ""
 
     def score(loc: str) -> tuple[int, int]:
-        loc_l = lower_text(loc)
+        parts = [p.strip() for p in loc.split(",") if p.strip()]
         broad_exact = {
             "united kingdom", "uk", "england", "scotland",
             "wales", "northern ireland", "ireland", "europe", "emea"
         }
-        if loc_l in broad_exact:
-            return (0, len(loc))
-        if "," in loc:
-            return (2, len(loc))
-        return (1, len(loc))
+        if lower_text(loc) in broad_exact:
+            return (0, len(parts))
+        return (1, len(parts))
 
-    ranked = sorted(location_candidates, key=score, reverse=True)
-    return ranked[0]
+    return sorted(location_candidates, key=score, reverse=True)[0]
 
 
 def extract_remote_preferences(text: str) -> list[str]:
@@ -302,30 +351,29 @@ def extract_remote_preferences(text: str) -> list[str]:
     if labeled_blob:
         if "hybrid" in labeled_blob:
             found.add("hybrid")
-        if re.search(r"\bremote\b|\bwork from home\b|\bwfh\b", labeled_blob):
+        if re.search(r"\bremote\b|\bwork from home\b|\bwfh\b|\bhome\b", labeled_blob):
             found.add("remote")
         if re.search(r"\bonsite\b|\bon-site\b", labeled_blob):
             found.add("onsite")
         if found:
             return [x for x in REMOTE_ORDER if x in found]
 
-    t = lower_text(primary)
+    top = lower_text("\n".join(split_lines(primary)[:12]))
 
-    if re.search(r"\bhybrid\b|\bflexible hybrid\b", t):
+    if re.search(r"\bhybrid\b", top):
         found.add("hybrid")
-    if re.search(r"\bfully remote\b|\b100% remote\b|\bremote\b|\bwork from home\b|\bwfh\b|\bhome[- ]based\b", t):
+    if re.search(r"\bfully remote\b|\b100% remote\b|\bremote\b|\bwork from home\b|\bwfh\b", top):
         found.add("remote")
 
     onsite_patterns = [
         r"\bthis is an onsite role\b",
         r"\bthis role is onsite\b",
-        r"\bworkplace type\s*:\s*onsite\b",
         r"\boffice[- ]based\b",
         r"\bfully office based\b",
         r"\b5 days (?:a week|per week)? in the office\b",
     ]
     if not found.intersection({"hybrid", "remote"}):
-        if any(re.search(p, t) for p in onsite_patterns):
+        if any(re.search(p, top) for p in onsite_patterns):
             found.add("onsite")
 
     return [x for x in REMOTE_ORDER if x in found]
@@ -365,11 +413,10 @@ def extract_remote_days(text: str) -> str:
 def detect_contract_type(text: str) -> str:
     t = lower_text(get_primary_text_window(text))
 
-    # Strong priority: if full time/permanent exists anywhere in main section, return Permanent.
     if re.search(r"\bpermanent\b", t) or re.search(r"\bfull[\s-]?time\b", t):
         return "Permanent"
 
-    if re.search(r"\bpart[\s-]?time\b", t) or re.search(r"\bjob[\s-]?share\b", t):
+    if re.search(r"\bpart[\s-]?time\b|\bjob[\s-]?share\b", t):
         return "Part Time"
 
     if re.search(r"\bfixed[\s-]?term\b|\btemporary\b|\bmaternity cover\b|\bmaternity leave\b", t):
@@ -378,8 +425,7 @@ def detect_contract_type(text: str) -> str:
     if re.search(r"\bfreelance\b|\bcontract role\b|\bcontract position\b|\bcontractor\b|\bcontracting\b", t):
         return "Freelance/Contract"
 
-    # Only very explicit standalone contract-employment phrasing should fallback to contract.
-    if re.search(r"\b(?:12|6|3)[\s-]?month contract\b", t):
+    if re.search(r"\b(?:3|6|12)[\s-]?month contract\b", t):
         return "Freelance/Contract"
 
     return ""
