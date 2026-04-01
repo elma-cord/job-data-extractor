@@ -189,17 +189,16 @@ def _looks_like_noise_location_value(value: str) -> bool:
     return any(re.search(p, v) for p in NOISE_LOCATION_PATTERNS)
 
 
-def _compact_location_token(text: str) -> str:
-    text = lower_text(text)
-    text = re.sub(r"[^a-z0-9]+", "", text)
-    return text
-
-
 def _build_location_alias_map(predefined_locations: list[str]) -> dict[str, list[str]]:
+    """
+    Build a map of lowercased location aliases → canonical location strings.
+    Each alias is stored as a normalised (lowercased, whitespace-collapsed) string
+    so that matching can be done with whole-word regex rather than substring hacks.
+    """
     alias_map: dict[str, list[str]] = {}
 
     def add(alias: str, target: str) -> None:
-        key = _compact_location_token(alias)
+        key = lower_text(alias)
         if not key:
             return
         alias_map.setdefault(key, [])
@@ -207,12 +206,16 @@ def _build_location_alias_map(predefined_locations: list[str]) -> dict[str, list
             alias_map[key].append(target)
 
     for loc in predefined_locations:
+        # Full canonical form, e.g. "London, United Kingdom"
         add(loc, loc)
 
         parts = [p.strip() for p in loc.split(",") if p.strip()]
         if parts:
             city = parts[0]
-            add(city, loc)
+            # City-only alias only when the city name is >= 4 chars to avoid
+            # false positives from very short tokens like "Ely" or "Rye".
+            if len(city) >= 4:
+                add(city, loc)
 
             if len(parts) >= 2:
                 add(f"{city}, {parts[-1]}", loc)
@@ -227,14 +230,29 @@ def _build_location_alias_map(predefined_locations: list[str]) -> dict[str, list
 
 
 def _match_predefined_locations(text: str, predefined_locations: list[str]) -> list[str]:
+    """
+    Match predefined location aliases against *text* using whole-word regex.
+    This replaces the previous compact-token substring approach which caused
+    false positives (e.g. 'london' matching inside 'londonderry', or a city
+    name buried in an unrelated sentence being silently picked up).
+
+    Scoring prefers longer (more specific) aliases so "London, United Kingdom"
+    beats a bare "London" match.
+    """
     alias_map = _build_location_alias_map(predefined_locations)
-    t = text or ""
-    t_compact = _compact_location_token(t)
+    t_lower = lower_text(text)
 
     scored: list[tuple[int, str]] = []
 
     for alias_key, targets in alias_map.items():
-        if alias_key and alias_key in t_compact:
+        # Build a whole-word pattern for this alias.
+        # We use re.escape so commas / dots in aliases are treated literally,
+        # then wrap in word-boundary anchors where possible.
+        escaped = re.escape(alias_key)
+        # \b doesn't work after a non-word char (comma, space), so we use
+        # a lookahead/lookbehind that asserts a non-alpha boundary.
+        pattern = r"(?<![a-z])" + escaped + r"(?![a-z])"
+        if re.search(pattern, t_lower):
             for target in targets:
                 scored.append((len(alias_key), target))
 
@@ -244,15 +262,18 @@ def _match_predefined_locations(text: str, predefined_locations: list[str]) -> l
 
 def extract_location_candidates(text: str, predefined_locations: list[str]) -> list[str]:
     """
-    Return ONLY locations from predefined list.
-    Priority:
-    1. labeled location fields in the primary section
-    2. top/header lines in the primary section
-    3. primary-section scan only
+    Return ONLY locations from the predefined list.
+
+    Search priority (stops as soon as results are found):
+    1. Explicit label fields  (e.g. "Location: London")
+    2. First 20 lines / header block of the primary section
+    3. Full primary section scan  ← last resort; kept but de-risked by
+       whole-word matching in _match_predefined_locations
     """
     primary = get_primary_text_window(text)
     matches = []
 
+    # ── Priority 1: labeled location fields ──────────────────────────────────
     labeled_values = _extract_labeled_values(primary, LOCATION_LABEL_PATTERNS)
     for value in labeled_values:
         cleaned = _clean_location_value(value)
@@ -262,32 +283,48 @@ def extract_location_candidates(text: str, predefined_locations: list[str]) -> l
     if matches:
         return dedupe_keep_order(matches)
 
+    # ── Priority 2: top / header lines only (first 20 lines) ─────────────────
     top_lines = split_lines(primary)[:20]
     header_blob = "\n".join(top_lines)
     matches.extend(_match_predefined_locations(header_blob, predefined_locations))
     if matches:
         return dedupe_keep_order(matches)
 
+    # ── Priority 3: full primary section scan (whole-word matching) ───────────
     matches.extend(_match_predefined_locations(primary, predefined_locations))
     return dedupe_keep_order(matches)
 
 
 def select_best_location(location_candidates: list[str]) -> str:
+    """
+    Pick the single most specific / trustworthy location from the candidates.
+
+    Scoring (higher = better):
+      2 + length  → city + country form  e.g. "London, United Kingdom"
+      1 + length  → city-only or region  e.g. "London"
+      0 + length  → broad region only    e.g. "United Kingdom", "Europe"
+
+    Among ties the longer string wins (more specific).
+    The first candidate in the original list is used as a tiebreaker so that
+    earlier (higher-priority) matches are preferred when scores are equal.
+    """
     if not location_candidates:
         return ""
 
+    broad_exact = {
+        "united kingdom", "uk", "england", "scotland",
+        "wales", "northern ireland", "ireland", "europe", "emea",
+    }
+
     def score(loc: str) -> tuple[int, int]:
         loc_l = lower_text(loc)
-        broad_exact = {
-            "united kingdom", "uk", "england", "scotland",
-            "wales", "northern ireland", "ireland", "europe", "emea"
-        }
         if loc_l in broad_exact:
             return (0, len(loc))
         if "," in loc:
             return (2, len(loc))
         return (1, len(loc))
 
+    # Sort is stable: equal-scored items keep their original order.
     ranked = sorted(location_candidates, key=score, reverse=True)
     return ranked[0]
 
