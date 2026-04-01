@@ -109,6 +109,7 @@ class JobClassifier:
         if remote_preferences_list:
             notes.append("remote preferences from current job description")
 
+        # open link whenever either location OR remote preference is missing in description
         should_fetch = (not desc_job_location) or (not desc_remote_preferences_list)
 
         if should_fetch and job_url:
@@ -176,6 +177,7 @@ class JobClassifier:
         if not parsed["job_category"]:
             parsed["job_category"] = quick_tp or ""
 
+        # keep relevant business / tech roles relevant if at least one allowed location exists
         if (
             parsed["role_relevance"] == "Not Relevant"
             and quick_rel == "Relevant"
@@ -187,6 +189,7 @@ class JobClassifier:
                 or "Title matches target scope and at least one acceptable location was found."
             )
 
+        # if extracted location is clearly disallowed, override to Not Relevant
         if (
             parsed["role_relevance"] == "Relevant"
             and location_candidates
@@ -282,4 +285,38 @@ class JobClassifier:
         result = {
             "role_relevance": relevance_data.get("role_relevance", ""),
             "role_relevance_reason": relevance_data.get("role_relevance_reason", ""),
-           
+            "job_category": relevance_data.get("job_category", ""),
+
+            "job_location": location_remote.get("job_location", ""),
+            "remote_preferences": location_remote.get("remote_preferences", ""),
+            "remote_days": location_remote.get("remote_days", ""),
+
+            "salary_min": salary.get("salary_min", ""),
+            "salary_max": salary.get("salary_max", ""),
+            "salary_currency": salary.get("salary_currency", ""),
+
+            "visa_sponsorship": visa_sponsorship,
+            "contract_type": contract_type,
+
+            "job_titles": [],
+            "seniorities": [],
+            "skills": [],
+            "notes": "",
+        }
+
+        if result["role_relevance"] == "Not Relevant":
+            result["notes"] = "; ".join([x for x in notes if x])
+            return result
+
+        result["job_titles"] = self._classify_job_titles(position_name, job_description)
+        result["seniorities"] = self._classify_seniority(position_name, job_description)
+
+        if result["job_category"] in {"T&P job", "Not T&P"}:
+            result["skills"] = self._classify_skills(
+                position_name=position_name,
+                job_description=job_description,
+                job_category=result["job_category"],
+            )
+
+        result["notes"] = "; ".join([x for x in notes if x])
+        return result
