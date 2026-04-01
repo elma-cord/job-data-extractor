@@ -19,6 +19,9 @@ def build_role_relevance_prompt(position_name: str, job_description: str, predef
 
     Exclude any roles related to construction, civil engineering, retail, electrical, mechanical, manufacturing, microbiology, maritime, injection molding, and beauty brands.
 
+    Technical support / infrastructure rule:
+    Technical roles such as Support Engineer, Technical Support Engineer, 2nd Line Engineer, 3rd Line Support Engineer, IT Support, Infrastructure Engineer, Systems Engineer and similar technical support / infrastructure / escalation roles should be treated as relevant target roles when the work is technical.
+
     Location rules:
     a) United Kingdom: allowed for onsite, hybrid, or remote
     b) Ireland: only remote roles are allowed. If location mentions onsite or hybrid work, mark Not Relevant.
@@ -26,7 +29,9 @@ def build_role_relevance_prompt(position_name: str, job_description: str, predef
     d) Remote Global/worldwide is allowed unless the ad specifies or implies APAC, LATAM, Africa, Asia, USA, Canada, or another excluded region.
     e) If the role mentions a location outside allowed regions, or salary is only in USD/CAD and there is no evidence the role can be done from an allowed region, mark Not Relevant.
     f) Accept UK, Great Britain, London, England, Scotland, Wales, Northern Ireland as United Kingdom when appropriate.
-    g) If multiple locations are listed, treat as Relevant only if the role can be done fully from an allowed location.
+    g) If multiple locations are listed and at least one acceptable location exists for the role, mark Relevant.
+    h) Do not use office lists, company office examples, or generic global office mentions as the job location unless they are clearly the role's actual location.
+    i) Prefer the location stated in the main role header or labeled fields such as "Location:" or "Workplace type:" over lower-page text.
 
     Language rule:
     If the job requires any language other than English, mark Not Relevant.
@@ -80,6 +85,8 @@ def build_job_titles_prompt(position_name: str, job_description: str, predefined
 
     Important:
     - Prefer the most precise business/technical title.
+    - For recruiter / recruitment consultant / talent roles, prefer the closest talent acquisition / recruiter style title from the predefined list.
+    - For support engineer / line support / infrastructure support roles, prefer the closest technical support / IT support / infrastructure style title from the predefined list.
     - Do not guess unrelated titles.
     - Do not output titles that do not exist exactly in the predefined list.
 
@@ -129,14 +136,15 @@ def build_seniority_prompt(position_name: str, job_description: str) -> str:
     Experience rules:
     - 0-1 years: entry, junior
     - 2 years: junior, mid
-    - 3-5 years: senior, lead
-    - Team management or managerial responsibility: include lead
+    - 3-5 years: senior
+    - 5+ years or clear ownership/mentoring responsibility: senior, lead
     - Director, head of, VP, chief, C-level, engineering manager and similar leadership terms: leadership only
 
     Important:
     - Do not include mid if the role is clearly senior managerial level.
     - For PMO Manager, People Operations Manager, Engineering Manager, Head of X, Director roles, avoid junior or mid unless the description clearly supports that.
     - If the role is clearly managerial with ownership and cross-functional leadership, prefer senior/lead or leadership.
+    - If the title is neutral but experienced, mid or senior is acceptable. Do not leave it blank without reason.
 
     Output examples:
     senior
@@ -169,13 +177,14 @@ def build_contract_type_prompt(job_description: str) -> str:
        Permanent > FTC > Part Time > Freelance/Contract
 
     2. Map synonyms:
-       - Permanent: permanent, full time, full-time, standard
+       - Permanent: permanent, full time, full-time
        - FTC: temporary, fixed term, fixed-term, maternity cover, maternity leave
        - Part Time: part time, part-time, job share, job-share
-       - Freelance/Contract: freelance, contract, contracting, contractor
+       - Freelance/Contract: freelance, contract role, contractor, contracting
 
-    3. Output must be only one category name.
-    4. If no valid type is found, output an empty string.
+    3. Do not treat generic words like "contract", "client contract", or "contracts" as employment type unless the role is clearly contract employment.
+    4. Output must be only one category name.
+    5. If no valid type is found, output an empty string.
 
     Job description:
     {job_description}
