@@ -1,510 +1,327 @@
-import hashlib
+import csv
 import json
-import os
 import re
-import threading
-import time
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any
 
 from openai import OpenAI
 
+from config import (
+    MAIN_MODEL,
+    MAX_JOB_TITLES,
+    MAX_RETRIES,
+    MAX_SKILLS,
+    OPENAI_TIMEOUT_SECONDS,
+    PREDEFINED_JOB_TITLES_CSV,
+    PREDEFINED_LOCATIONS_CSV,
+    PREDEFINED_NONTP_SKILLS_CSV,
+    PREDEFINED_SALARIES_CSV,
+    PREDEFINED_TP_SKILLS_CSV,
+)
+from fetch_extract import fetch_job_page_text
 from prompts import (
-    build_core_fields_prompt,
+    build_contract_type_prompt,
     build_job_titles_prompt,
-    build_relevance_prompt,
-    build_skills_additional_prompt,
-    build_skills_full_prompt,
+    build_role_relevance_prompt,
+    build_seniority_prompt,
+    build_skills_prompt,
+)
+from rules import (
+    detect_basic_relevance_from_title,
+    detect_contract_type,
+    detect_seniority_from_title_and_description,
+    detect_tp_from_title,
+    extract_remote_days,
+    extract_remote_preferences,
+    extract_salary,
+    extract_visa_status,
+    load_single_column_csv,
+    location_or_remote_missing,
+    normalize_text,
+)
+from validators import (
+    clean_description,
+    parse_role_relevance_response,
+    validate_contract_type,
+    validate_job_titles,
+    validate_seniorities,
+    validate_skills,
 )
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-OPENAI_TIMEOUT_S = float(os.getenv("OPENAI_TIMEOUT_S", "20"))
-OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "1"))
-OPENAI_RETRY_SLEEP_S = float(os.getenv("OPENAI_RETRY_SLEEP_S", "0.8"))
+class JobClassifier:
+    def __init__(self):
+        self.client = OpenAI(timeout=OPENAI_TIMEOUT_SECONDS)
+        self.predefined_job_titles = load_single_column_csv(Path(PREDEFINED_JOB_TITLES_CSV))
+        self.predefined_locations = load_single_column_csv(Path(PREDEFINED_LOCATIONS_CSV))
+        self.predefined_tp_skills = load_single_column_csv(Path(PREDEFINED_TP_SKILLS_CSV))
+        self.predefined_nontp_skills = load_single_column_csv(Path(PREDEFINED_NONTP_SKILLS_CSV))
+        self.predefined_salaries = self._load_salary_values(Path(PREDEFINED_SALARIES_CSV))
 
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+        self.location_lookup = self._build_location_lookup(self.predefined_locations)
+        self.job_title_lookup = {x.lower(): x for x in self.predefined_job_titles}
 
-_cache_lock = threading.Lock()
-_response_cache: Dict[str, Any] = {}
+    @staticmethod
+    def _load_salary_values(path: Path) -> list[int]:
+        values = []
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row:
+                    continue
+                first = (row[0] or "").strip()
+                if not first:
+                    continue
+                if not re.fullmatch(r"\d+", first):
+                    continue
+                values.append(int(first))
+        return sorted(set(values))
 
+    @staticmethod
+    def _build_location_lookup(locations: list[str]) -> dict[str, str]:
+        lookup = {}
+        for loc in locations:
+            norm = loc.strip().lower()
+            if norm:
+                lookup[norm] = loc
+        return lookup
 
-def clean_whitespace(text: str) -> str:
-    text = text or ""
-    text = text.replace("\xa0", " ")
-    text = re.sub(r"\r", "\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    def _call_model(self, prompt: str) -> str:
+        last_error = None
 
+        for _ in range(MAX_RETRIES + 1):
+            try:
+                response = self.client.responses.create(
+                    model=MAIN_MODEL,
+                    input=prompt,
+                    max_output_tokens=300,
+                )
+                text = response.output_text.strip()
+                if text:
+                    return text
+            except Exception as exc:
+                last_error = exc
 
-def normalize_quotes(text: str) -> str:
-    return (
-        (text or "")
-        .replace("\u2019", "'")
-        .replace("\u2018", "'")
-        .replace("\u201c", '"')
-        .replace("\u201d", '"')
-        .replace("\u2013", "-")
-        .replace("\u2014", "-")
-        .replace("•", "-")
-    )
+        raise RuntimeError(f"model_call_failed: {last_error}")
 
+    def _extract_location_from_text(self, text: str) -> str:
+        t = (text or "").lower()
 
-def canonical_label(text: str) -> str:
-    s = normalize_quotes(text or "").lower().strip()
-    s = s.replace("&", "and")
-    s = s.replace("/", "")
-    s = s.replace("\\", "")
-    s = s.replace(",", "")
-    s = s.replace("-", "")
-    s = re.sub(r"\s+", "", s)
-    return s
+        # exact/predefined location matching first, longest match first
+        for key in sorted(self.location_lookup.keys(), key=len, reverse=True):
+            if key and key in t:
+                return self.location_lookup[key]
 
+        # useful broad fallbacks
+        broad_patterns = [
+            (r"\blondon\b", "London"),
+            (r"\bunited kingdom\b|\buk\b", "United Kingdom"),
+            (r"\bengland\b", "England"),
+            (r"\bscotland\b", "Scotland"),
+            (r"\bwales\b", "Wales"),
+            (r"\bnorthern ireland\b", "Northern Ireland"),
+            (r"\bireland\b", "Ireland"),
+            (r"\bemea\b", "EMEA"),
+            (r"\beurope\b", "Europe"),
+        ]
+        for pattern, label in broad_patterns:
+            if re.search(pattern, t):
+                return label
 
-def safe_json_loads(text: str) -> Dict[str, Any]:
-    text = (text or "").strip()
-
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json|html)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-
-    start_obj = text.find("{")
-    end_obj = text.rfind("}")
-    if start_obj != -1 and end_obj != -1 and end_obj > start_obj:
-        candidate = text[start_obj:end_obj + 1]
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
-
-    return json.loads(text)
-
-
-def normalize_category_for_skills(job_category: str) -> str:
-    low = (job_category or "").strip().lower()
-    if low in {"t&p", "tp", "tech & product", "tech and product", "t&p job"}:
-        return "T&P"
-    if low in {
-        "nont&p",
-        "non-t&p",
-        "non tp",
-        "not t&p",
-        "not tp",
-        "nontp",
-        "non tech",
-        "non-tech",
-        "not t&p job",
-        "not t&p job",
-    }:
-        return "NonT&P"
-    return ""
-
-
-def normalize_job_title_from_list(value: str, allowed_job_titles: List[str]) -> str:
-    value_clean = clean_whitespace(value)
-    if not value_clean:
         return ""
 
-    value_lower = value_clean.lower()
-    for jt in allowed_job_titles:
-        if value_lower == jt.lower():
-            return jt
+    def _extract_location_remote_from_description_or_url(
+        self,
+        description: str,
+        job_url: str,
+    ) -> dict[str, str]:
+        desc = clean_description(description)
 
-    canon_value = canonical_label(value_clean)
-    for jt in allowed_job_titles:
-        if canon_value == canonical_label(jt):
-            return jt
+        job_location = self._extract_location_from_text(desc)
+        remote_preferences_list = extract_remote_preferences(desc)
+        remote_days = extract_remote_days(desc)
 
-    return ""
+        notes = []
 
+        if job_location:
+            notes.append("location from current job description")
+        if remote_preferences_list:
+            notes.append("remote preferences from current job description")
 
-def normalize_remote_preferences_value(value: str) -> str:
-    value = clean_whitespace(value)
-    if not value:
-        return ""
+        should_fetch = (not job_location) or (not remote_preferences_list)
 
-    low = normalize_quotes(value).lower()
-    if low in {"not specified", "not_specified"}:
-        return "not specified"
+        if should_fetch and job_url:
+            fetched = fetch_job_page_text(job_url)
 
-    found = []
-    for pref in ["onsite", "hybrid", "remote"]:
-        if re.search(rf"(?<![a-z]){re.escape(pref)}(?![a-z])", low):
-            found.append(pref)
+            if fetched.ok and fetched.text:
+                page_text = clean_description(fetched.text)
 
-    if not found:
-        return ""
+                if not job_location:
+                    fetched_location = self._extract_location_from_text(page_text)
+                    if fetched_location:
+                        job_location = fetched_location
+                        notes.append("location via link")
 
-    return ", ".join(found)
+                if not remote_preferences_list:
+                    fetched_remote = extract_remote_preferences(page_text)
+                    if fetched_remote:
+                        remote_preferences_list = fetched_remote
+                        notes.append("remote preferences via link")
 
-
-def normalize_job_type(value: str, fallback: str = "") -> str:
-    raw = clean_whitespace(value)
-    if not raw:
-        return fallback
-
-    low = raw.lower()
-    if low in {"permanent", "perm", "full time", "full-time"}:
-        return "Permanent"
-    if low in {"ftc", "fixed term", "fixed-term", "fixed term contract", "contract - fixed term"}:
-        return "FTC"
-    if low in {"part time", "part-time"}:
-        return "Part Time"
-    if low in {"freelance", "contract", "contractor", "freelance/contract"}:
-        return "Freelance/Contract"
-
-    return fallback
-
-
-def normalize_visa_value(value: str, fallback: str = "") -> str:
-    raw = clean_whitespace(value).lower()
-    if raw in {"yes", "no"}:
-        return raw
-    return fallback
-
-
-def normalize_salary_currency(value: str, fallback: str = "") -> str:
-    raw = clean_whitespace(value).upper()
-    if raw in {"GBP", "USD", "EUR", "CAD"}:
-        return raw
-    return fallback
-
-
-def normalize_salary_period(value: str, fallback: str = "") -> str:
-    raw = clean_whitespace(value).lower()
-    if raw in {"year", "day", "hour", "month"}:
-        return raw
-    return fallback
-
-
-def normalize_location_candidate(value: str, fallback: str = "") -> str:
-    raw = clean_whitespace(value)
-    if not raw:
-        return fallback
-
-    low = normalize_quotes(raw).lower()
-    if low in {"not specified", "unknown", "n/a", "na", "multiple", "multiple locations", "various", "various locations", "global", "worldwide"}:
-        return fallback
-
-    return raw
-
-
-def _cache_key(namespace: str, payload: str) -> str:
-    return f"{namespace}:{hashlib.sha1(payload.encode('utf-8')).hexdigest()}"
-
-
-def _cache_get(key: str) -> Optional[Any]:
-    with _cache_lock:
-        return _response_cache.get(key)
-
-
-def _cache_set(key: str, value: Any) -> None:
-    with _cache_lock:
-        _response_cache[key] = value
-
-
-def _truncate_for_model(prompt: str, limit: int = 22000) -> str:
-    prompt = prompt or ""
-    if len(prompt) <= limit:
-        return prompt
-    return prompt[:limit]
-
-
-def _call_openai_text(prompt: str) -> str:
-    if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
-
-    prompt = _truncate_for_model(prompt)
-    last_err = None
-
-    for attempt in range(OPENAI_MAX_RETRIES + 1):
-        try:
-            response = client.with_options(timeout=OPENAI_TIMEOUT_S).responses.create(
-                model=OPENAI_MODEL,
-                input=prompt,
-            )
-            return clean_whitespace(response.output_text)
-        except Exception as e:
-            last_err = e
-            if attempt < OPENAI_MAX_RETRIES:
-                time.sleep(OPENAI_RETRY_SLEEP_S * (attempt + 1))
+                if remote_days == "not specified":
+                    fetched_remote_days = extract_remote_days(page_text)
+                    if fetched_remote_days != "not specified":
+                        remote_days = fetched_remote_days
+                        notes.append("remote days via link")
             else:
-                raise last_err
-
-
-def _call_openai_json_cached(namespace: str, prompt: str) -> Dict[str, Any]:
-    key = _cache_key(namespace, prompt)
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
-
-    text = _call_openai_text(prompt)
-    data = safe_json_loads(text)
-    _cache_set(key, data)
-    return data
-
-
-def ai_check_relevance(
-    job_title: str,
-    role_context_text: str,
-    fallback_role_relevance: str,
-    fallback_reason: str,
-    fallback_job_category: str = "",
-) -> Dict[str, str]:
-    if not client:
-        return {
-            "role_relevance": fallback_role_relevance,
-            "job_category": fallback_job_category,
-            "role_relevance_reason": fallback_reason or "OPENAI_API_KEY missing",
-        }
-
-    prompt = build_relevance_prompt(job_title, role_context_text)
-
-    try:
-        data = _call_openai_json_cached("relevance", prompt)
-
-        role_relevance = str(data.get("role_relevance", "") or "").strip()
-        role_relevance_reason = str(data.get("role_relevance_reason", "") or "").strip()
-        job_category = normalize_category_for_skills(str(data.get("job_category", "") or "").strip())
-
-        if role_relevance not in {"Relevant", "Not relevant"}:
-            role_relevance = fallback_role_relevance
-        if not role_relevance_reason:
-            role_relevance_reason = fallback_reason
-        if not job_category:
-            job_category = fallback_job_category
+                notes.append(f"url_fetch_failed: {fetched.error or fetched.status_code or 'unknown'}")
 
         return {
-            "role_relevance": role_relevance,
-            "job_category": job_category,
-            "role_relevance_reason": role_relevance_reason,
-        }
-    except Exception as e:
-        return {
-            "role_relevance": fallback_role_relevance,
-            "job_category": fallback_job_category,
-            "role_relevance_reason": f"AI error: {e}",
-        }
-
-
-def ai_extract_core_fields(
-    job_title: str,
-    header_text: str,
-    role_body_text: str,
-    allowed_locations: List[str],
-    fallback_job_category: str,
-    fallback_location: str,
-    fallback_remote_preferences: str,
-    fallback_remote_days: str,
-    fallback_salary_min: str,
-    fallback_salary_max: str,
-    fallback_salary_currency: str,
-    fallback_salary_period: str,
-    fallback_visa: str,
-    fallback_job_type: str,
-) -> Dict[str, str]:
-    if not client:
-        return {
-            "job_category": fallback_job_category,
-            "job_location": fallback_location,
-            "remote_preferences": fallback_remote_preferences,
-            "remote_days": fallback_remote_days,
-            "salary_min": fallback_salary_min,
-            "salary_max": fallback_salary_max,
-            "salary_currency": fallback_salary_currency,
-            "salary_period": fallback_salary_period,
-            "visa_sponsorship": fallback_visa,
-            "job_type": fallback_job_type,
-        }
-
-    prompt = build_core_fields_prompt(
-        job_title=job_title,
-        header_text=header_text,
-        role_body_text=role_body_text,
-        allowed_locations=allowed_locations,
-    )
-
-    try:
-        data = _call_openai_json_cached("core_fields", prompt)
-
-        job_category = normalize_category_for_skills(str(data.get("job_category", "") or "").strip()) or fallback_job_category
-        job_location = normalize_location_candidate(str(data.get("job_location", "") or "").strip(), fallback=fallback_location)
-
-        remote_preferences = normalize_remote_preferences_value(str(data.get("remote_preferences", "") or "").strip())
-        if not remote_preferences:
-            remote_preferences = fallback_remote_preferences
-
-        remote_days = str(data.get("remote_days", "") or "").strip()
-        if not remote_days:
-            remote_days = fallback_remote_days
-        elif remote_days.lower() == "not specified":
-            remote_days = "not specified"
-
-        salary_min = str(data.get("salary_min", "") or "").strip() or fallback_salary_min
-        salary_max = str(data.get("salary_max", "") or "").strip() or fallback_salary_max
-        salary_currency = normalize_salary_currency(str(data.get("salary_currency", "") or "").strip(), fallback=fallback_salary_currency)
-        salary_period = normalize_salary_period(str(data.get("salary_period", "") or "").strip(), fallback=fallback_salary_period)
-
-        visa_sponsorship = normalize_visa_value(str(data.get("visa_sponsorship", "") or "").strip(), fallback=fallback_visa)
-        job_type = normalize_job_type(str(data.get("job_type", "") or "").strip(), fallback=fallback_job_type)
-
-        return {
-            "job_category": job_category,
             "job_location": job_location,
-            "remote_preferences": remote_preferences,
+            "remote_preferences": ", ".join(remote_preferences_list) if remote_preferences_list else "",
             "remote_days": remote_days,
-            "salary_min": salary_min,
-            "salary_max": salary_max,
-            "salary_currency": salary_currency,
-            "salary_period": salary_period,
+            "source_notes": "; ".join(notes),
+        }
+
+    def _classify_relevance_and_category(self, position_name: str, job_description: str) -> dict[str, str]:
+        quick_rel, quick_reason = detect_basic_relevance_from_title(position_name)
+        quick_tp = detect_tp_from_title(position_name)
+
+        # Fast reject only when very obvious
+        if quick_rel == "Not Relevant":
+            return {
+                "role_relevance": "Not Relevant",
+                "job_category": quick_tp or "Not T&P",
+                "role_relevance_reason": quick_reason,
+            }
+
+        prompt = build_role_relevance_prompt(
+            position_name=position_name,
+            job_description=job_description,
+            predefined_job_titles=self.predefined_job_titles,
+        )
+        raw = self._call_model(prompt)
+        parsed = parse_role_relevance_response(raw)
+
+        # fallback if model response is imperfect
+        if not parsed["role_relevance"]:
+            parsed["role_relevance"] = quick_rel or ""
+        if not parsed["job_category"]:
+            parsed["job_category"] = quick_tp or ""
+
+        return parsed
+
+    def _classify_job_titles(self, position_name: str, job_description: str) -> list[str]:
+        title_clean = normalize_text(position_name)
+        exact = self.job_title_lookup.get(title_clean.lower())
+        if exact:
+            return [exact]
+
+        prompt = build_job_titles_prompt(
+            position_name=position_name,
+            job_description=job_description,
+            predefined_job_titles=self.predefined_job_titles,
+        )
+        raw = self._call_model(prompt)
+        return validate_job_titles(raw, self.predefined_job_titles, max_items=MAX_JOB_TITLES)
+
+    def _classify_seniority(self, position_name: str, job_description: str) -> list[str]:
+        rule_result = detect_seniority_from_title_and_description(position_name, job_description)
+
+        # If rule is decisive enough, keep it
+        if rule_result in (["leadership"], ["lead"], ["senior"], ["junior"], ["mid"], ["entry"]):
+            return rule_result
+
+        prompt = build_seniority_prompt(position_name=position_name, job_description=job_description)
+        raw = self._call_model(prompt)
+        validated = validate_seniorities(raw, ["entry", "junior", "mid", "senior", "lead", "leadership"], max_items=3)
+
+        if validated:
+            return validated
+        return rule_result
+
+    def _classify_skills(self, position_name: str, job_description: str, job_category: str) -> list[str]:
+        allowed_skills = (
+            self.predefined_tp_skills
+            if job_category == "T&P job"
+            else self.predefined_nontp_skills
+        )
+
+        if not allowed_skills:
+            return []
+
+        prompt = build_skills_prompt(
+            position_name=position_name,
+            job_description=job_description,
+            role_category_label=job_category,
+            allowed_skills=allowed_skills,
+        )
+        raw = self._call_model(prompt)
+        return validate_skills(raw, allowed_skills, max_items=MAX_SKILLS)
+
+    def classify_job(self, row: dict[str, Any]) -> dict[str, Any]:
+        position_name = clean_description(row.get("job_title", row.get("position_name", "")))
+        job_description = clean_description(row.get("job_description", ""))
+        job_url = (row.get("job_url", "") or "").strip()
+
+        notes = []
+
+        # 1) description-only rule-based fields
+        location_remote = self._extract_location_remote_from_description_or_url(
+            description=job_description,
+            job_url=job_url,
+        )
+        notes.append(location_remote.get("source_notes", ""))
+
+        salary = extract_salary(job_description, self.predefined_salaries)
+        visa_sponsorship = extract_visa_status(job_description)
+
+        contract_type = detect_contract_type(job_description)
+        if not contract_type:
+            # AI fallback only if needed
+            raw_contract = self._call_model(build_contract_type_prompt(job_description))
+            contract_type = validate_contract_type(raw_contract)
+
+        # 2) relevance/category
+        relevance_data = self._classify_relevance_and_category(position_name, job_description)
+
+        result = {
+            "role_relevance": relevance_data.get("role_relevance", ""),
+            "role_relevance_reason": relevance_data.get("role_relevance_reason", ""),
+            "job_category": relevance_data.get("job_category", ""),
+
+            "job_location": location_remote.get("job_location", ""),
+            "remote_preferences": location_remote.get("remote_preferences", ""),
+            "remote_days": location_remote.get("remote_days", ""),
+
+            "salary_min": salary.get("salary_min", ""),
+            "salary_max": salary.get("salary_max", ""),
+            "salary_currency": salary.get("salary_currency", ""),
+
             "visa_sponsorship": visa_sponsorship,
-            "job_type": job_type,
-        }
-    except Exception:
-        return {
-            "job_category": fallback_job_category,
-            "job_location": fallback_location,
-            "remote_preferences": fallback_remote_preferences,
-            "remote_days": fallback_remote_days,
-            "salary_min": fallback_salary_min,
-            "salary_max": fallback_salary_max,
-            "salary_currency": fallback_salary_currency,
-            "salary_period": fallback_salary_period,
-            "visa_sponsorship": fallback_visa,
-            "job_type": fallback_job_type,
+            "contract_type": contract_type,
+
+            "job_titles": [],
+            "seniorities": [],
+            "skills": [],
+            "notes": "",
         }
 
+        # 3) early stop
+        if result["role_relevance"] == "Not Relevant":
+            result["notes"] = "; ".join([x for x in notes if x])
+            return result
 
-def ai_map_job_titles_only(position_name: str, description: str, allowed_job_titles: List[str]) -> List[str]:
-    if not client:
-        return []
+        # 4) semantic fields only for relevant jobs
+        result["job_titles"] = self._classify_job_titles(position_name, job_description)
+        result["seniorities"] = self._classify_seniority(position_name, job_description)
 
-    prompt = build_job_titles_prompt(position_name, description, allowed_job_titles)
+        if result["job_category"] in {"T&P job", "Not T&P"}:
+            result["skills"] = self._classify_skills(
+                position_name=position_name,
+                job_description=job_description,
+                job_category=result["job_category"],
+            )
 
-    try:
-        data = _call_openai_json_cached("job_titles_only", prompt)
-        raw_titles = data.get("job_titles", [])
-        if not isinstance(raw_titles, list):
-            return []
-
-        out = []
-        for t in raw_titles:
-            exact = normalize_job_title_from_list(str(t), allowed_job_titles)
-            if exact and exact not in out:
-                out.append(exact)
-
-        return out[:3]
-    except Exception:
-        return []
-
-
-def ai_generate_skills_full(
-    role_category: str,
-    description: str,
-    candidate_skills: List[str],
-    allowed_skills: List[str],
-) -> List[str]:
-    if not client or not role_category or not description or not allowed_skills:
-        return []
-
-    role_category = normalize_category_for_skills(role_category)
-    if role_category not in {"T&P", "NonT&P"}:
-        return []
-
-    prompt = build_skills_full_prompt(
-        role_category=role_category,
-        description=description,
-        candidate_skills=candidate_skills,
-        allowed_skills=allowed_skills,
-    )
-
-    try:
-        data = _call_openai_json_cached("skills_full", prompt)
-
-        out_category = normalize_category_for_skills(str(data.get("role_category", "") or "").strip())
-        if out_category != role_category:
-            return []
-
-        raw_skills = data.get("skills", [])
-        if not isinstance(raw_skills, list):
-            return []
-
-        allowed_lower = {s.lower(): s for s in allowed_skills}
-        out = []
-        for sk in raw_skills:
-            exact = allowed_lower.get(str(sk).strip().lower())
-            if exact and exact not in out:
-                out.append(exact)
-
-        return out[:10]
-    except Exception:
-        return []
-
-
-def ai_generate_additional_skills(
-    role_category: str,
-    description: str,
-    existing_skills: List[str],
-    candidate_skills: List[str],
-    allowed_skills: List[str],
-) -> List[str]:
-    if not client or not role_category or not description or not allowed_skills:
-        return []
-
-    role_category = normalize_category_for_skills(role_category)
-    if role_category not in {"T&P", "NonT&P"}:
-        return []
-
-    prompt = build_skills_additional_prompt(
-        role_category=role_category,
-        description=description,
-        existing_skills=existing_skills,
-        candidate_skills=candidate_skills,
-        allowed_skills=allowed_skills,
-    )
-
-    try:
-        data = _call_openai_json_cached("skills_additional", prompt)
-
-        out_category = normalize_category_for_skills(str(data.get("role_category", "") or "").strip())
-        if out_category != role_category:
-            return []
-
-        raw_skills = data.get("additional_skills", [])
-        if not isinstance(raw_skills, list):
-            return []
-
-        allowed_lower = {s.lower(): s for s in allowed_skills}
-        existing_lower = {s.lower() for s in existing_skills}
-
-        out = []
-        for sk in raw_skills:
-            exact = allowed_lower.get(str(sk).strip().lower())
-            if exact and exact.lower() not in existing_lower and exact not in out:
-                out.append(exact)
-
-        return out[:5]
-    except Exception:
-        return []
-
-
-def ai_extract_salary_only(
-    job_title: str,
-    header_text: str,
-    role_body_text: str,
-    fallback_salary_min: str,
-    fallback_salary_max: str,
-    fallback_salary_currency: str,
-    fallback_salary_period: str,
-) -> Dict[str, str]:
-    return {
-        "salary_min": fallback_salary_min,
-        "salary_max": fallback_salary_max,
-        "salary_currency": fallback_salary_currency,
-        "salary_period": fallback_salary_period,
-    }
-
-
-def ai_map_seniority_only(position_name: str, description: str) -> List[str]:
-    return []
+        result["notes"] = "; ".join([x for x in notes if x])
+        return result
