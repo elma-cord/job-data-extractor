@@ -12,7 +12,6 @@ from config import (
     MAX_SKILLS,
     OPENAI_TIMEOUT_SECONDS,
     PREDEFINED_JOB_TITLES_CSV,
-    PREDEFINED_LOCATIONS_CSV,
     PREDEFINED_NONTP_SKILLS_CSV,
     PREDEFINED_SALARIES_CSV,
     PREDEFINED_TP_SKILLS_CSV,
@@ -55,7 +54,6 @@ class JobClassifier:
     def __init__(self):
         self.client = OpenAI(timeout=OPENAI_TIMEOUT_SECONDS)
         self.predefined_job_titles = load_single_column_csv(Path(PREDEFINED_JOB_TITLES_CSV))
-        self.predefined_locations = load_single_column_csv(Path(PREDEFINED_LOCATIONS_CSV))
         self.predefined_tp_skills = load_single_column_csv(Path(PREDEFINED_TP_SKILLS_CSV))
         self.predefined_nontp_skills = load_single_column_csv(Path(PREDEFINED_NONTP_SKILLS_CSV))
         self.predefined_salaries = self._load_salary_values(Path(PREDEFINED_SALARIES_CSV))
@@ -93,7 +91,7 @@ class JobClassifier:
     def _extract_location_remote_from_description_or_url(self, description: str, job_url: str) -> dict[str, Any]:
         desc = clean_description(description)
 
-        desc_location_candidates = extract_location_candidates(desc, self.predefined_locations)
+        desc_location_candidates = extract_location_candidates(desc)
         desc_job_location = select_best_location(desc_location_candidates)
         desc_remote_preferences_list = extract_remote_preferences(desc)
         desc_remote_days = extract_remote_days(desc)
@@ -118,7 +116,7 @@ class JobClassifier:
             if fetched.ok and fetched.text:
                 page_text = clean_description(fetched.text)
 
-                fetched_location_candidates = extract_location_candidates(page_text, self.predefined_locations)
+                fetched_location_candidates = extract_location_candidates(page_text)
                 fetched_job_location = select_best_location(fetched_location_candidates)
                 fetched_remote_preferences = extract_remote_preferences(page_text)
                 fetched_remote_days = extract_remote_days(page_text)
