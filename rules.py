@@ -10,15 +10,13 @@ CURRENCY_SIGNS = {
     "€": "EUR",
 }
 
-CURRENCY_CODES = {"GBP", "USD", "EUR", "CAD", "AUD", "CHF"}
-
 REMOTE_ORDER = ["onsite", "hybrid", "remote"]
 
 CONTRACT_PATTERNS = {
     "Permanent": [
         r"\bpermanent\b",
         r"\bfull[\s-]?time\b",
-        r"\bfull time\b",
+        r"\bemployment type\s*[:\-]\s*permanent\b",
     ],
     "FTC": [
         r"\bfixed[\s-]?term\b",
@@ -32,10 +30,10 @@ CONTRACT_PATTERNS = {
     ],
     "Freelance/Contract": [
         r"\bfreelance\b",
-        r"\bcontractor\b",
-        r"\bcontracting\b",
         r"\bcontract role\b",
         r"\bcontract position\b",
+        r"\bcontractor\b",
+        r"\bcontracting\b",
     ],
 }
 
@@ -68,10 +66,17 @@ IRRELEVANT_ROLE_HINTS = [
 
 TP_HINTS = [
     "engineer", "developer", "software", "data", "product", "ux", "ui", "devops",
-    "site reliability", "security", "qa", "automation", "backend", "front end",
-    "full stack", "it support", "infrastructure", "architect", "technical",
-    "support engineer", "line support", "systems engineer", "network engineer",
-    "platform", "cloud", "sre", "helpdesk"
+    "site reliability", "security", "qa", "automation", "backend", "back end",
+    "front end", "frontend", "full stack", "it support", "infrastructure",
+    "architect", "technical", "support engineer", "line support", "systems engineer",
+    "network engineer", "platform", "cloud", "sre", "helpdesk",
+]
+
+BUSINESS_RELEVANT_HINTS = [
+    "account executive", "account manager", "account director",
+    "sales", "business development", "customer success",
+    "recruiter", "recruitment", "talent acquisition", "talent partner",
+    "operations", "finance", "marketing", "consultant",
 ]
 
 LOCATION_LABEL_PATTERNS = [
@@ -86,6 +91,16 @@ WORKPLACE_LABEL_PATTERNS = [
     r"(?im)^\s*work type\s*[:\-]\s*(.+?)\s*$",
     r"(?im)^\s*location type\s*[:\-]\s*(.+?)\s*$",
     r"(?im)^\s*remote type\s*[:\-]\s*(.+?)\s*$",
+]
+
+NOISE_LOCATION_PATTERNS = [
+    r"reporting to",
+    r"department",
+    r"employment type",
+    r"salary",
+    r"key responsibilities",
+    r"skills, knowledge",
+    r"about the role",
 ]
 
 
@@ -116,19 +131,15 @@ def split_lines(text: str) -> list[str]:
 
 def dedupe_keep_order(items: list[str]) -> list[str]:
     seen = set()
-    result = []
+    out = []
     for item in items:
         if item not in seen:
             seen.add(item)
-            result.append(item)
-    return result
+            out.append(item)
+    return out
 
 
-def get_primary_text_window(text: str, max_chars: int = 4000) -> str:
-    """
-    Use only the first/main section of the description for location / remote / remote days / contract.
-    This avoids later junk from other jobs or repeated hiring-process blocks.
-    """
+def get_primary_text_window(text: str, max_chars: int = 4500) -> str:
     text = text or ""
 
     cut_markers = [
@@ -139,7 +150,6 @@ def get_primary_text_window(text: str, max_chars: int = 4000) -> str:
         r"(?i)\bmore jobs\b",
         r"(?i)\brelated jobs\b",
     ]
-
     for pattern in cut_markers:
         m = re.search(pattern, text)
         if m:
@@ -156,24 +166,10 @@ def _extract_labeled_values(text: str, patterns: list[str]) -> list[str]:
     values = []
     for pattern in patterns:
         for match in re.finditer(pattern, text):
-            value = (match.group(1) or "").strip()
-            if value:
-                values.append(value)
+            val = (match.group(1) or "").strip()
+            if val:
+                values.append(val)
     return dedupe_keep_order(values)
-
-
-def _looks_like_noise_location_value(value: str) -> bool:
-    v = lower_text(value)
-    noise = [
-        "reporting to",
-        "department",
-        "employment type",
-        "salary",
-        "about the role",
-        "key responsibilities",
-        "skills, knowledge",
-    ]
-    return any(n in v for n in noise)
 
 
 def _clean_location_value(value: str) -> str:
@@ -184,111 +180,81 @@ def _clean_location_value(value: str) -> str:
     return value.strip()
 
 
-def _extract_candidate_location_strings(text: str) -> list[str]:
-    primary = get_primary_text_window(text)
-    values = _extract_labeled_values(primary, LOCATION_LABEL_PATTERNS)
-
-    cleaned = []
-    for value in values:
-        value = _clean_location_value(value)
-        if value and not _looks_like_noise_location_value(value):
-            cleaned.append(value)
-
-    return dedupe_keep_order(cleaned)
+def _looks_like_noise_location_value(value: str) -> bool:
+    v = lower_text(value)
+    return any(re.search(p, v) for p in NOISE_LOCATION_PATTERNS)
 
 
-def _match_locations_from_string(location_text: str, predefined_locations: list[str]) -> list[str]:
-    if not location_text:
-        return []
-
-    t = lower_text(location_text)
+def _match_predefined_locations(text: str, predefined_locations: list[str]) -> list[str]:
+    t = lower_text(text)
     matches = []
-
     for loc in sorted(predefined_locations, key=len, reverse=True):
         loc_norm = lower_text(loc)
         if loc_norm and loc_norm in t:
             matches.append(loc)
-
-    # broad fallbacks only if nothing specific matched
-    if not matches:
-        broad_patterns = [
-            (r"\blondon\b", "London"),
-            (r"\bbrighton\b", "Brighton"),
-            (r"\bwest midlands\b", "West Midlands"),
-            (r"\bunited kingdom\b|\buk\b", "United Kingdom"),
-            (r"\bengland\b", "England"),
-            (r"\bscotland\b", "Scotland"),
-            (r"\bwales\b", "Wales"),
-            (r"\bnorthern ireland\b", "Northern Ireland"),
-            (r"\bireland\b", "Ireland"),
-            (r"\bemea\b", "EMEA"),
-            (r"\beurope\b", "Europe"),
-        ]
-        for pattern, label in broad_patterns:
-            if re.search(pattern, t):
-                matches.append(label)
-
     return dedupe_keep_order(matches)
 
 
 def extract_location_candidates(text: str, predefined_locations: list[str]) -> list[str]:
     """
+    Return ONLY locations from predefined list.
     Priority:
-    1. labeled location fields in the first/main section
-    2. top lines of the text (header area)
-    3. broad fallback only from the first/main section
+    1. labeled location fields in the primary section
+    2. top/header lines in the primary section
+    3. primary-section scan only
     """
     primary = get_primary_text_window(text)
-    candidate_strings = _extract_candidate_location_strings(primary)
+    matches = []
 
-    locations = []
-    for candidate in candidate_strings:
-        locations.extend(_match_locations_from_string(candidate, predefined_locations))
+    labeled_values = _extract_labeled_values(primary, LOCATION_LABEL_PATTERNS)
+    for value in labeled_values:
+        cleaned = _clean_location_value(value)
+        if cleaned and not _looks_like_noise_location_value(cleaned):
+            matches.extend(_match_predefined_locations(cleaned, predefined_locations))
 
-    if locations:
-        return dedupe_keep_order(locations)
+    if matches:
+        return dedupe_keep_order(matches)
 
-    # fallback: scan only the first few non-empty lines, not the whole description
-    top_lines = split_lines(primary)[:18]
-    top_text = "\n".join(top_lines)
+    top_lines = split_lines(primary)[:20]
+    header_blob = "\n".join(top_lines)
+    matches.extend(_match_predefined_locations(header_blob, predefined_locations))
+    if matches:
+        return dedupe_keep_order(matches)
 
-    for loc in sorted(predefined_locations, key=len, reverse=True):
-        loc_norm = lower_text(loc)
-        if loc_norm and loc_norm in lower_text(top_text):
-            locations.append(loc)
-
-    if locations:
-        return dedupe_keep_order(locations)
-
-    # last-resort broad fallback from primary section only
-    locations.extend(_match_locations_from_string(primary, []))
-    return dedupe_keep_order(locations)
+    matches.extend(_match_predefined_locations(primary, predefined_locations))
+    return dedupe_keep_order(matches)
 
 
 def select_best_location(location_candidates: list[str]) -> str:
     if not location_candidates:
         return ""
 
-    # Prefer the most specific location over broad ones.
-    broad = {
-        "United Kingdom", "England", "Scotland", "Wales", "Northern Ireland",
-        "Ireland", "Europe", "EMEA",
+    broad_suffixes = {
+        "United Kingdom",
+        "UK",
+        "England",
+        "Scotland",
+        "Wales",
+        "Northern Ireland",
+        "Ireland",
+        "Europe",
+        "EMEA",
     }
 
-    specific = [loc for loc in location_candidates if loc not in broad]
-    if specific:
-        return specific[0]
+    specific = []
+    broad = []
+    for loc in location_candidates:
+        if any(loc == suffix or loc.endswith(f", {suffix}") is False and loc == suffix for suffix in broad_suffixes):
+            broad.append(loc)
+        elif any(loc.endswith(f", {suffix}") for suffix in broad_suffixes):
+            specific.append(loc)
+        else:
+            specific.append(loc)
 
-    return location_candidates[0]
+    return specific[0] if specific else location_candidates[0]
 
 
 def extract_remote_preferences(text: str) -> list[str]:
-    """
-    Priority:
-    1. workplace-type labels in the top/main section
-    2. clear hybrid / remote / onsite phrases
-    Avoid inferring onsite from casual phrases like 'meet clients on-site as required'.
-    """
     primary = get_primary_text_window(text)
     found = set()
 
@@ -302,24 +268,20 @@ def extract_remote_preferences(text: str) -> list[str]:
             found.add("remote")
         if re.search(r"\bonsite\b|\bon-site\b", labeled_blob):
             found.add("onsite")
-
         if found:
             return [x for x in REMOTE_ORDER if x in found]
 
     t = lower_text(primary)
 
-    if re.search(r"\bhybrid\b|\bflexible hybrid\b|\bworkplace type\s*:\s*hybrid\b", t):
+    if re.search(r"\bhybrid\b|\bflexible hybrid\b", t):
         found.add("hybrid")
-
     if re.search(r"\bfully remote\b|\b100% remote\b|\bremote\b|\bwork from home\b|\bwfh\b|\bhome[- ]based\b", t):
         found.add("remote")
 
-    # only count onsite when explicitly stated as the work arrangement
     onsite_patterns = [
-        r"\bworkplace type\s*:\s*onsite\b",
-        r"\blocation type\s*:\s*onsite\b",
         r"\bthis is an onsite role\b",
         r"\bthis role is onsite\b",
+        r"\bworkplace type\s*:\s*onsite\b",
         r"\boffice[- ]based\b",
         r"\bfully office based\b",
         r"\b5 days (?:a week|per week)? in the office\b",
@@ -342,22 +304,21 @@ def extract_remote_days(text: str) -> str:
         r"\b(\d)(?:\s*-\s*(\d))?\s+days?\s+in office\b",
     ]
     for pattern in office_patterns:
-        office_match = re.search(pattern, primary)
-        if office_match:
-            start = int(office_match.group(1))
-            end = int(office_match.group(2) or office_match.group(1))
-            remote_options = [5 - start, 5 - end]
-            return str(max(remote_options))
+        m = re.search(pattern, primary)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2) or m.group(1))
+            return str(max(5 - start, 5 - end))
 
     remote_patterns = [
         r"\b(\d)(?:\s*-\s*(\d))?\s+days?\s+(?:remote|from home|wfh)\b",
         r"\b(\d)(?:\s*-\s*(\d))?\s+days?\s+working from home\b",
     ]
     for pattern in remote_patterns:
-        remote_match = re.search(pattern, primary)
-        if remote_match:
-            start = int(remote_match.group(1))
-            end = int(remote_match.group(2) or remote_match.group(1))
+        m = re.search(pattern, primary)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2) or m.group(1))
             return str(max(start, end))
 
     return "not specified"
@@ -366,15 +327,14 @@ def extract_remote_days(text: str) -> str:
 def detect_contract_type(text: str) -> str:
     t = lower_text(get_primary_text_window(text))
 
-    # strict priority
     for label in ["Permanent", "FTC", "Part Time", "Freelance/Contract"]:
         for pattern in CONTRACT_PATTERNS[label]:
             if re.search(pattern, t):
                 return label
 
-    # avoid counting generic "contract" references as employment type
-    if re.search(r"\bcontract\b", t) and not re.search(r"\bfull[\s-]?time\b|\bpermanent\b|\bpart[\s-]?time\b|\bfixed[\s-]?term\b", t):
-        return "Freelance/Contract"
+    if re.search(r"\bcontract\b", t):
+        if not re.search(r"\bfull[\s-]?time\b|\bpermanent\b|\bpart[\s-]?time\b|\bfixed[\s-]?term\b", t):
+            return "Freelance/Contract"
 
     return ""
 
@@ -413,13 +373,14 @@ def detect_seniority_from_title_and_description(position_name: str, description:
     if re.search(r"\bmanage\b|\bmanagement\b|\bline manager\b|\bteam leadership\b|\bmentor\b|\bownership\b", full):
         out.append("lead")
 
-    # stronger simple defaults if still empty
     if not out:
         if "manager" in title:
             out.extend(["senior", "lead"])
         elif "consultant" in title:
             out.append("mid")
         elif "engineer" in title or "developer" in title or "analyst" in title:
+            out.append("mid")
+        elif "executive" in title:
             out.append("mid")
 
     order = ["entry", "junior", "mid", "senior", "lead", "leadership"]
@@ -436,14 +397,7 @@ def detect_basic_relevance_from_title(position_name: str) -> tuple[str, str]:
     if any(tp in title for tp in TP_HINTS):
         return "Relevant", "Title appears to match target tech/product scope."
 
-    # some clearly business-relevant families
-    business_hints = [
-        "account executive", "account manager", "account director",
-        "recruiter", "recruitment", "talent acquisition", "customer success",
-        "sales", "business development", "operations", "finance", "marketing",
-        "consultant",
-    ]
-    if any(h in title for h in business_hints):
+    if any(h in title for h in BUSINESS_RELEVANT_HINTS):
         return "Relevant", "Title appears to match target business scope."
 
     return "", ""
@@ -453,14 +407,12 @@ def detect_tp_from_title(position_name: str) -> str:
     title = lower_text(position_name)
     if any(tp in title for tp in TP_HINTS):
         return "T&P job"
-    return "Not T&P" if title else ""
+    if title:
+        return "Not T&P"
+    return ""
 
 
 def extract_salary(text: str, allowed_salaries: list[int]) -> dict:
-    """
-    Only extract numbers when salary context is present.
-    Avoid random years, scores, awards, 30-60-90 pipeline numbers, etc.
-    """
     t = text or ""
     lower = lower_text(t)
 
@@ -469,7 +421,7 @@ def extract_salary(text: str, allowed_salaries: list[int]) -> dict:
         r"\bcompensation\b",
         r"\bpay\b",
         r"\bpackage\b",
-        r"\b£\s*\d",
+        r"£\s*\d",
         r"\bGBP\b",
         r"\bUSD\b",
         r"\bEUR\b",
@@ -479,7 +431,7 @@ def extract_salary(text: str, allowed_salaries: list[int]) -> dict:
         r"\bper year\b",
         r"\bper annum\b",
         r"\bannually\b",
-        r"\bk\b",
+        r"\b\d+\s*k\b",
     ]
     if not any(re.search(p, lower, re.I) for p in salary_context_patterns):
         return {"salary_min": "", "salary_max": "", "salary_currency": ""}
@@ -490,51 +442,45 @@ def extract_salary(text: str, allowed_salaries: list[int]) -> dict:
             currency = code
             break
     if not currency:
-        code_match = re.search(r"\b(GBP|USD|EUR|CAD|AUD|CHF)\b", t, re.I)
-        if code_match:
-            currency = code_match.group(1).upper()
+        m = re.search(r"\b(GBP|USD|EUR|CAD|AUD|CHF)\b", t, re.I)
+        if m:
+            currency = m.group(1).upper()
 
     candidates = []
 
-    # common salary ranges / single values with context
     patterns = [
         r"(?i)(?:salary|pay|package)?\s*[:\-]?\s*[£$€]\s*(\d{2,3}(?:,\d{3})+|\d{2,3})\s*(?:-\s*[£$€]?\s*(\d{2,3}(?:,\d{3})+|\d{2,3}))?\s*(k)?",
         r"(?i)(\d{2,3}(?:,\d{3})+|\d{2,3})\s*(?:-\s*(\d{2,3}(?:,\d{3})+|\d{2,3}))?\s*(k)\b",
         r"(?i)[£$€]\s*(\d{4,6})(?:\s*-\s*[£$€]?\s*(\d{4,6}))?",
     ]
 
+    def parse_amount(raw: str, has_k: bool) -> int:
+        val = int(raw.replace(",", ""))
+        if has_k and val < 1000:
+            val *= 1000
+        return val
+
     for pattern in patterns:
-        for match in re.finditer(pattern, t):
-            g1 = match.group(1)
-            g2 = match.group(2) if len(match.groups()) >= 2 else None
-            k_suffix = match.group(3) if len(match.groups()) >= 3 else None
+        for m in re.finditer(pattern, t):
+            g1 = m.group(1)
+            g2 = m.group(2) if len(m.groups()) >= 2 else None
+            g3 = m.group(3) if len(m.groups()) >= 3 else None
 
-            if not g1:
-                continue
-
-            def parse_amount(raw: str, has_k: bool) -> int:
-                raw = raw.replace(",", "")
-                val = int(raw)
-                if has_k and val < 1000:
-                    val *= 1000
-                return val
-
-            val1 = parse_amount(g1, bool(k_suffix))
-            val2 = parse_amount(g2, bool(k_suffix)) if g2 else None
-
-            if 10000 <= val1 <= 500000:
-                candidates.append(val1)
-            if val2 and 10000 <= val2 <= 500000:
-                candidates.append(val2)
+            if g1:
+                v1 = parse_amount(g1, bool(g3))
+                if 10000 <= v1 <= 500000:
+                    candidates.append(v1)
+            if g2:
+                v2 = parse_amount(g2, bool(g3))
+                if 10000 <= v2 <= 500000:
+                    candidates.append(v2)
 
     candidates = sorted(set(candidates))
     if not candidates:
         return {"salary_min": "", "salary_max": "", "salary_currency": currency}
 
-    if len(candidates) == 1:
-        min_val = max_val = candidates[0]
-    else:
-        min_val, max_val = candidates[0], candidates[1]
+    min_val = candidates[0]
+    max_val = candidates[1] if len(candidates) > 1 else candidates[0]
 
     def closest(val: int) -> int:
         return min(allowed_salaries, key=lambda x: abs(x - val))
@@ -562,14 +508,10 @@ def location_or_remote_missing(description: str, predefined_locations: Optional[
 
 
 def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: list[str]) -> list[str]:
-    """
-    Fast fallback mapping for obvious titles before AI.
-    Only returns titles that exist exactly in predefined list.
-    """
     title = lower_text(position_name)
     allowed_lookup = {lower_text(x): x for x in allowed_job_titles}
 
-    def first_existing(options: list[str]) -> list[str]:
+    def existing(options: list[str]) -> list[str]:
         out = []
         for opt in options:
             key = lower_text(opt)
@@ -577,7 +519,6 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
                 out.append(allowed_lookup[key])
         return dedupe_keep_order(out)
 
-    # exact first
     if title in allowed_lookup:
         return [allowed_lookup[title]]
 
@@ -595,6 +536,10 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
             ["Account Director", "Account Executive", "Account Manager"],
         ),
         (
+            ["account executive"],
+            ["Account Executive", "Sales Executive", "Account Manager"],
+        ),
+        (
             ["back end", "backend"],
             ["Back End", "Software Engineer", "Back End Engineer"],
         ),
@@ -602,42 +547,37 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
 
     for triggers, outputs in alias_groups:
         if any(trigger in title for trigger in triggers):
-            mapped = first_existing(outputs)
+            mapped = existing(outputs)
             if mapped:
                 return mapped[:3]
 
-    # light contains match against predefined list
     contains_matches = []
     for allowed in allowed_job_titles:
-        allowed_norm = lower_text(allowed)
-        if allowed_norm and allowed_norm in title:
+        if lower_text(allowed) in title:
             contains_matches.append(allowed)
 
     return dedupe_keep_order(contains_matches)[:3]
 
 
 def is_location_allowed(locations: list[str], remote_preferences: list[str]) -> bool:
-    """
-    Business rules:
-    - UK / London / England / Scotland / Wales / Northern Ireland: allowed for onsite, hybrid, remote
-    - Ireland: only if remote
-    - Europe / EMEA: only if remote
-    - other specific European countries: not auto-allowed here
-    """
     if not locations:
-        return True  # let AI decide when location is absent
+        return True
 
     remote_set = set(remote_preferences)
 
-    uk_allowed = {"United Kingdom", "London", "England", "Scotland", "Wales", "Northern Ireland", "Brighton", "West Midlands"}
+    uk_markers = [
+        "United Kingdom", "UK", "England", "Scotland", "Wales", "Northern Ireland"
+    ]
     for loc in locations:
-        if loc in uk_allowed:
+        if any(marker in loc for marker in uk_markers):
             return True
 
-    if "Ireland" in locations and "remote" in remote_set:
-        return True
+    for loc in locations:
+        if "Ireland" in loc and "remote" in remote_set:
+            return True
 
-    if any(loc in {"Europe", "EMEA"} for loc in locations) and "remote" in remote_set:
-        return True
+    for loc in locations:
+        if ("Europe" in loc or "EMEA" in loc) and "remote" in remote_set:
+            return True
 
     return False
