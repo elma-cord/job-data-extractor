@@ -57,15 +57,17 @@ def parse_role_relevance_response(response_text: str) -> dict:
 
 
 def validate_job_titles(value: str, allowed_job_titles: list[str], max_items: int = 3) -> list[str]:
-    allowed_set = {normalize_whitespace(x): x for x in allowed_job_titles}
+    allowed_set = {normalize_whitespace(x).lower(): x for x in allowed_job_titles}
     out = []
     for item in split_csv_like_list(value):
-        if item in allowed_set:
-            out.append(allowed_set[item])
+        key = normalize_whitespace(item).lower()
+        if key in allowed_set:
+            out.append(allowed_set[key])
     return dedupe_preserve_order(out)[:max_items]
 
 
 def validate_seniorities(value: str, allowed_seniorities: list[str], max_items: int = 3) -> list[str]:
+    value = value or ""
     allowed = {x.lower(): x.lower() for x in allowed_seniorities}
     ordered = []
     for item in split_csv_like_list(value.lower()):
@@ -86,11 +88,12 @@ def validate_contract_type(value: str) -> str:
 
 
 def validate_skills(value: str, allowed_skills: list[str], max_items: int = 10) -> list[str]:
-    allowed_set = {normalize_whitespace(x): x for x in allowed_skills}
+    allowed_set = {normalize_whitespace(x).lower(): x for x in allowed_skills}
     out = []
     for item in split_csv_like_list(value):
-        if item in allowed_set:
-            out.append(allowed_set[item])
+        key = normalize_whitespace(item).lower()
+        if key in allowed_set:
+            out.append(allowed_set[key])
     return dedupe_preserve_order(out)[:max_items]
 
 
