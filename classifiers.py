@@ -38,7 +38,6 @@ from rules import (
     infer_job_titles_from_position_name,
     is_location_allowed,
     load_single_column_csv,
-    location_or_remote_missing,
     normalize_text,
     select_best_location,
 )
@@ -77,7 +76,6 @@ class JobClassifier:
 
     def _call_model(self, prompt: str) -> str:
         last_error = None
-
         for _ in range(MAX_RETRIES + 1):
             try:
                 response = self.client.responses.create(
@@ -90,29 +88,28 @@ class JobClassifier:
                     return text
             except Exception as exc:
                 last_error = exc
-
         raise RuntimeError(f"model_call_failed: {last_error}")
 
-    def _extract_location_remote_from_description_or_url(
-        self,
-        description: str,
-        job_url: str,
-    ) -> dict[str, Any]:
+    def _extract_location_remote_from_description_or_url(self, description: str, job_url: str) -> dict[str, Any]:
         desc = clean_description(description)
 
-        location_candidates = extract_location_candidates(desc, self.predefined_locations)
-        job_location = select_best_location(location_candidates)
-        remote_preferences_list = extract_remote_preferences(desc)
-        remote_days = extract_remote_days(desc)
+        desc_location_candidates = extract_location_candidates(desc, self.predefined_locations)
+        desc_job_location = select_best_location(desc_location_candidates)
+        desc_remote_preferences_list = extract_remote_preferences(desc)
+        desc_remote_days = extract_remote_days(desc)
+
+        job_location = desc_job_location
+        location_candidates = desc_location_candidates[:]
+        remote_preferences_list = desc_remote_preferences_list[:]
+        remote_days = desc_remote_days
 
         notes = []
-
         if job_location:
             notes.append("location from current job description")
         if remote_preferences_list:
             notes.append("remote preferences from current job description")
 
-        should_fetch = (not job_location) or (not remote_preferences_list)
+        should_fetch = (not desc_job_location) or (not desc_remote_preferences_list)
 
         if should_fetch and job_url:
             fetched = fetch_job_page_text(job_url)
@@ -120,25 +117,24 @@ class JobClassifier:
             if fetched.ok and fetched.text:
                 page_text = clean_description(fetched.text)
 
-                if not job_location:
-                    fetched_locations = extract_location_candidates(page_text, self.predefined_locations)
-                    fetched_location = select_best_location(fetched_locations)
-                    if fetched_location:
-                        job_location = fetched_location
-                        location_candidates = fetched_locations or location_candidates
-                        notes.append("location via link")
+                fetched_location_candidates = extract_location_candidates(page_text, self.predefined_locations)
+                fetched_job_location = select_best_location(fetched_location_candidates)
+                fetched_remote_preferences = extract_remote_preferences(page_text)
+                fetched_remote_days = extract_remote_days(page_text)
 
-                if not remote_preferences_list:
-                    fetched_remote = extract_remote_preferences(page_text)
-                    if fetched_remote:
-                        remote_preferences_list = fetched_remote
-                        notes.append("remote preferences via link")
+                if not job_location and fetched_job_location:
+                    job_location = fetched_job_location
+                    location_candidates = fetched_location_candidates
+                    notes.append("location via link")
 
-                if remote_days == "not specified":
-                    fetched_remote_days = extract_remote_days(page_text)
-                    if fetched_remote_days != "not specified":
-                        remote_days = fetched_remote_days
-                        notes.append("remote days via link")
+                if not remote_preferences_list and fetched_remote_preferences:
+                    remote_preferences_list = fetched_remote_preferences
+                    notes.append("remote preferences via link")
+
+                if remote_days == "not specified" and fetched_remote_days != "not specified":
+                    remote_days = fetched_remote_days
+                    notes.append("remote days via link")
+
             else:
                 notes.append(f"url_fetch_failed: {fetched.error or fetched.status_code or 'unknown'}")
 
@@ -161,7 +157,6 @@ class JobClassifier:
         quick_rel, quick_reason = detect_basic_relevance_from_title(position_name)
         quick_tp = detect_tp_from_title(position_name)
 
-        # Fast reject only for clearly excluded titles
         if quick_rel == "Not Relevant":
             return {
                 "role_relevance": "Not Relevant",
@@ -182,26 +177,30 @@ class JobClassifier:
         if not parsed["job_category"]:
             parsed["job_category"] = quick_tp or ""
 
-        # Rule override: if title is obviously target and at least one extracted location is allowed,
-        # do not let a bad random foreign mention incorrectly make it Not Relevant.
+        # Relevant business/technical roles should not become Not Relevant
+        # just because they are Not T&P.
         if (
             parsed["role_relevance"] == "Not Relevant"
             and quick_rel == "Relevant"
             and is_location_allowed(location_candidates, remote_preferences_list)
         ):
             parsed["role_relevance"] = "Relevant"
-            if not parsed["role_relevance_reason"]:
-                parsed["role_relevance_reason"] = "Title matches target scope and at least one acceptable location was found."
+            parsed["role_relevance_reason"] = (
+                parsed["role_relevance_reason"]
+                or "Title matches target scope and at least one acceptable location was found."
+            )
 
-        # Rule override: if extracted location exists and is clearly disallowed, do not allow Relevant by mistake.
+        # If we have extracted location and it is clearly disallowed, override to Not Relevant.
         if (
             parsed["role_relevance"] == "Relevant"
             and location_candidates
             and not is_location_allowed(location_candidates, remote_preferences_list)
         ):
             parsed["role_relevance"] = "Not Relevant"
-            if not parsed["role_relevance_reason"]:
-                parsed["role_relevance_reason"] = "Extracted location is outside allowed regions/work patterns."
+            parsed["role_relevance_reason"] = (
+                parsed["role_relevance_reason"]
+                or "Extracted location is outside allowed regions/work patterns."
+            )
 
         return parsed
 
@@ -222,11 +221,7 @@ class JobClassifier:
         )
         raw = self._call_model(prompt)
         validated = validate_job_titles(raw, self.predefined_job_titles, max_items=MAX_JOB_TITLES)
-
-        if validated:
-            return validated
-
-        return []
+        return validated if validated else []
 
     def _classify_seniority(self, position_name: str, job_description: str) -> list[str]:
         rule_result = detect_seniority_from_title_and_description(position_name, job_description)
@@ -244,19 +239,10 @@ class JobClassifier:
             ["entry", "junior", "mid", "senior", "lead", "leadership"],
             max_items=3,
         )
-
-        if validated:
-            return validated
-
-        return rule_result
+        return validated if validated else rule_result
 
     def _classify_skills(self, position_name: str, job_description: str, job_category: str) -> list[str]:
-        allowed_skills = (
-            self.predefined_tp_skills
-            if job_category == "T&P job"
-            else self.predefined_nontp_skills
-        )
-
+        allowed_skills = self.predefined_tp_skills if job_category == "T&P job" else self.predefined_nontp_skills
         if not allowed_skills:
             return []
 
