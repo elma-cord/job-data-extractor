@@ -124,13 +124,21 @@ def _extract_structured_text_from_html(soup: BeautifulSoup) -> str:
     return _clean_text("\n".join(lines))
 
 
+def _extract_title_text(soup: BeautifulSoup) -> str:
+    title = soup.title.string.strip() if soup.title and soup.title.string else ""
+    h1 = ""
+    h1_node = soup.find("h1")
+    if h1_node:
+        h1 = _clean_text(h1_node.get_text(" ", strip=True))
+    bits = [x for x in [title, h1] if x]
+    return _clean_text("\n".join(bits))
+
+
 def _html_to_text(html: str) -> str:
     soup = BeautifulSoup(html or "", "html.parser")
 
-    for tag in soup(["script", "style", "noscript", "svg", "img", "picture", "source"]):
-        if tag.get("type") == "application/ld+json":
-            continue
-        tag.decompose()
+    title_text = _extract_title_text(soup)
+    structured_text = _extract_structured_text_from_html(BeautifulSoup(html or "", "html.parser"))
 
     meta_texts = []
     for attr in ("description", "og:description", "twitter:description"):
@@ -138,10 +146,16 @@ def _html_to_text(html: str) -> str:
         if node and node.get("content"):
             meta_texts.append(node.get("content", ""))
 
-    structured_text = _extract_structured_text_from_html(BeautifulSoup(html or "", "html.parser"))
+    for tag in soup(["script", "style", "noscript", "svg", "img", "picture", "source"]):
+        if tag.get("type") == "application/ld+json":
+            continue
+        tag.decompose()
+
     body_text = soup.get_text(separator="\n")
 
     combined_parts = []
+    if title_text:
+        combined_parts.append(title_text)
     if meta_texts:
         combined_parts.append("\n".join(meta_texts))
     if structured_text:
