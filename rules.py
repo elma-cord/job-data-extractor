@@ -87,6 +87,9 @@ LOCATION_LABEL_PATTERNS = [
     r"(?im)^\s*location\s*[:\-]?\s*(.+?)\s*$",
     r"(?im)^\s*job location\s*[:\-]?\s*(.+?)\s*$",
     r"(?im)^\s*based in\s*[:\-]?\s*(.+?)\s*$",
+    r"(?im)^\s*locations\s*[:\-]?\s*(.+?)\s*$",
+    r"(?im)^\s*all locations\s*[:\-]?\s*(.+?)\s*$",
+    r"(?im)^\s*office location\s*[:\-]?\s*(.+?)\s*$",
 ]
 
 WORKPLACE_LABEL_PATTERNS = [
@@ -95,6 +98,8 @@ WORKPLACE_LABEL_PATTERNS = [
     r"(?im)^\s*work type\s*[:\-]?\s*(.+?)\s*$",
     r"(?im)^\s*location type\s*[:\-]?\s*(.+?)\s*$",
     r"(?im)^\s*remote type\s*[:\-]?\s*(.+?)\s*$",
+    r"(?im)^\s*remote status\s*[:\-]?\s*(.+?)\s*$",
+    r"(?im)^\s*workplace\s*[:\-]?\s*(.+?)\s*$",
 ]
 
 NOISE_LOCATION_PATTERNS = [
@@ -105,7 +110,29 @@ NOISE_LOCATION_PATTERNS = [
     r"key responsibilities",
     r"skills, knowledge",
     r"about the role",
+    r"internal advertising end date",
+    r"careers site advertising end date",
+    r"required field",
 ]
+
+LOCATION_FIELD_LABELS = {
+    "location",
+    "job location",
+    "based in",
+    "locations",
+    "all locations",
+    "office location",
+}
+
+WORKPLACE_FIELD_LABELS = {
+    "workplace type",
+    "working pattern",
+    "work type",
+    "location type",
+    "remote type",
+    "remote status",
+    "workplace",
+}
 
 
 def load_single_column_csv(path: Path) -> list[str]:
@@ -166,6 +193,14 @@ def get_primary_text_window(text: str, max_chars: int = 4500) -> str:
     return text.strip()
 
 
+def _normalize_field_label(line: str) -> str:
+    line = (line or "").strip()
+    line = re.sub(r"[*#`_]+", "", line)
+    line = line.replace("：", ":")
+    line = re.sub(r"\s+", " ", line).strip(" :-")
+    return line.lower()
+
+
 def _extract_labeled_values(text: str, patterns: list[str]) -> list[str]:
     values = []
     for pattern in patterns:
@@ -176,8 +211,58 @@ def _extract_labeled_values(text: str, patterns: list[str]) -> list[str]:
     return dedupe_keep_order(values)
 
 
+def _extract_field_values_from_lines(text: str, allowed_labels: set[str]) -> list[str]:
+    values = []
+    lines = split_lines(text)
+
+    for idx, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        normalized = _normalize_field_label(line)
+
+        for label in allowed_labels:
+            if normalized == label:
+                for next_idx in range(idx + 1, min(idx + 4, len(lines))):
+                    nxt = lines[next_idx].strip()
+                    nxt_norm = _normalize_field_label(nxt)
+                    if not nxt:
+                        continue
+                    if nxt_norm in LOCATION_FIELD_LABELS or nxt_norm in WORKPLACE_FIELD_LABELS:
+                        break
+                    if _looks_like_noise_location_value(nxt):
+                        continue
+                    values.append(nxt)
+                    break
+
+                continue
+
+            m = re.match(rf"(?i)^\**\s*{re.escape(label)}\s*[:\-]\s*(.+?)\s*\**$", line)
+            if m:
+                val = (m.group(1) or "").strip()
+                if val:
+                    values.append(val)
+
+    return dedupe_keep_order(values)
+
+
 def _clean_location_value(value: str) -> str:
     value = value or ""
+    value = re.sub(r"[*#`_]+", "", value)
+    value = value.replace("：", ":")
+
+    # Remove obvious trailing labeled sections on the same line.
+    value = re.split(
+        r"(?i)\b(?:salary|job type|employment type|workplace type|remote status|reporting to|department)\b\s*[:\-]",
+        value,
+        maxsplit=1,
+    )[0]
+
+    # Remove bracketed remote/workplace hints from location line.
+    value = re.sub(
+        r"(?i)\((?:[^)]*\bhybrid\b[^)]*|[^)]*\bremote\b[^)]*|[^)]*\bonsite\b[^)]*|[^)]*\bhome\b[^)]*|[^)]*\bclient sites?\b[^)]*)\)",
+        "",
+        value,
+    )
+
     value = re.sub(r"\s*\|\s*", ", ", value)
     value = re.sub(r"\s*/\s*", " / ", value)
     value = re.sub(r"\s+", " ", value).strip(" -,:;")
@@ -246,23 +331,32 @@ def extract_location_candidates(text: str, predefined_locations: list[str]) -> l
     """
     Return ONLY locations from predefined list.
     Priority:
-    1. labeled location fields in the primary section
+    1. explicit labeled location fields in the primary section
     2. top/header lines in the primary section
     3. primary-section scan only
     """
     primary = get_primary_text_window(text)
     matches = []
 
-    labeled_values = _extract_labeled_values(primary, LOCATION_LABEL_PATTERNS)
+    labeled_values = []
+    labeled_values.extend(_extract_labeled_values(primary, LOCATION_LABEL_PATTERNS))
+    labeled_values.extend(_extract_field_values_from_lines(primary, LOCATION_FIELD_LABELS))
+    labeled_values = dedupe_keep_order(labeled_values)
+
     for value in labeled_values:
         cleaned = _clean_location_value(value)
         if cleaned and not _looks_like_noise_location_value(cleaned):
-            matches.extend(_match_predefined_locations(cleaned, predefined_locations))
+            # Support values like "United Kingdom, United Kingdom, Antwerp"
+            parts = [p.strip() for p in re.split(r"[|;/]", cleaned) if p.strip()]
+            if not parts:
+                parts = [cleaned]
+            for part in parts:
+                matches.extend(_match_predefined_locations(part, predefined_locations))
 
     if matches:
         return dedupe_keep_order(matches)
 
-    top_lines = split_lines(primary)[:20]
+    top_lines = split_lines(primary)[:25]
     header_blob = "\n".join(top_lines)
     matches.extend(_match_predefined_locations(header_blob, predefined_locations))
     if matches:
@@ -296,23 +390,36 @@ def extract_remote_preferences(text: str) -> list[str]:
     primary = get_primary_text_window(text)
     found = set()
 
-    labeled_values = _extract_labeled_values(primary, WORKPLACE_LABEL_PATTERNS)
-    labeled_blob = " | ".join(labeled_values).lower()
+    labeled_values = []
+    labeled_values.extend(_extract_labeled_values(primary, WORKPLACE_LABEL_PATTERNS))
+    labeled_values.extend(_extract_field_values_from_lines(primary, WORKPLACE_FIELD_LABELS))
 
-    if labeled_blob:
-        if "hybrid" in labeled_blob:
-            found.add("hybrid")
-        if re.search(r"\bremote\b|\bwork from home\b|\bwfh\b", labeled_blob):
-            found.add("remote")
-        if re.search(r"\bonsite\b|\bon-site\b", labeled_blob):
-            found.add("onsite")
-        if found:
-            return [x for x in REMOTE_ORDER if x in found]
+    # Also inspect location lines because many ATS pages put hybrid/onsite in the location field.
+    location_values = []
+    location_values.extend(_extract_labeled_values(primary, LOCATION_LABEL_PATTERNS))
+    location_values.extend(_extract_field_values_from_lines(primary, LOCATION_FIELD_LABELS))
+
+    combined_labeled_blob = " | ".join(labeled_values + location_values)
+    combined_labeled_blob = combined_labeled_blob.lower()
+
+    if re.search(r"\bhybrid\b", combined_labeled_blob):
+        found.add("hybrid")
+
+    if re.search(r"\bremote\b|\bwork from home\b|\bwfh\b|\bhome[- ]based\b", combined_labeled_blob):
+        found.add("remote")
+
+    if re.search(r"\bonsite\b|\bon-site\b|\boffice[- ]based\b", combined_labeled_blob):
+        found.add("onsite")
+
+    # Location text can imply hybrid even without explicit "workplace type"
+    if re.search(r"\bhome\b", combined_labeled_blob) and re.search(r"\bclient sites?\b|\boffice\b", combined_labeled_blob):
+        found.add("hybrid")
 
     t = lower_text(primary)
 
     if re.search(r"\bhybrid\b|\bflexible hybrid\b", t):
         found.add("hybrid")
+
     if re.search(r"\bfully remote\b|\b100% remote\b|\bremote\b|\bwork from home\b|\bwfh\b|\bhome[- ]based\b", t):
         found.add("remote")
 
@@ -320,9 +427,11 @@ def extract_remote_preferences(text: str) -> list[str]:
         r"\bthis is an onsite role\b",
         r"\bthis role is onsite\b",
         r"\bworkplace type\s*:\s*onsite\b",
+        r"\bremote status\s*:\s*onsite\b",
         r"\boffice[- ]based\b",
         r"\bfully office based\b",
         r"\b5 days (?:a week|per week)? in the office\b",
+        r"\bon[- ]site\b",
     ]
     if not found.intersection({"hybrid", "remote"}):
         if any(re.search(p, t) for p in onsite_patterns):
