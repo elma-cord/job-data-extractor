@@ -201,6 +201,16 @@ def _normalize_field_label(line: str) -> str:
     return line.lower()
 
 
+def _normalize_lookup_key(value: str) -> str:
+    value = value or ""
+    value = value.replace("：", ":")
+    value = value.strip()
+    value = re.sub(r"[*#`_]+", "", value)
+    value = re.sub(r"\s+", " ", value)
+    value = value.strip(" ,;:-")
+    return value.lower()
+
+
 def _extract_labeled_values(text: str, patterns: list[str]) -> list[str]:
     values = []
     for pattern in patterns:
@@ -249,14 +259,12 @@ def _clean_location_value(value: str) -> str:
     value = re.sub(r"[*#`_]+", "", value)
     value = value.replace("：", ":")
 
-    # Remove obvious trailing labeled sections on the same line.
     value = re.split(
         r"(?i)\b(?:salary|job type|employment type|workplace type|remote status|reporting to|department)\b\s*[:\-]",
         value,
         maxsplit=1,
     )[0]
 
-    # Remove bracketed remote/workplace hints from location line.
     value = re.sub(
         r"(?i)\((?:[^)]*\bhybrid\b[^)]*|[^)]*\bremote\b[^)]*|[^)]*\bonsite\b[^)]*|[^)]*\bhome\b[^)]*|[^)]*\bclient sites?\b[^)]*)\)",
         "",
@@ -264,27 +272,26 @@ def _clean_location_value(value: str) -> str:
     )
 
     value = re.sub(r"\s*\|\s*", ", ", value)
-    value = re.sub(r"\s*/\s*", " / ", value)
     value = re.sub(r"\s+", " ", value).strip(" -,:;")
     return value.strip()
 
 
 def _looks_like_noise_location_value(value: str) -> bool:
     v = lower_text(value)
-    return any(re.search(p, v) for p in NOISE_LOCATION_PATTERNS)
-
-
-def _compact_location_token(text: str) -> str:
-    text = lower_text(text)
-    text = re.sub(r"[^a-z0-9]+", "", text)
-    return text
+    if any(re.search(p, v) for p in NOISE_LOCATION_PATTERNS):
+        return True
+    if len(v.split()) > 10:
+        return True
+    if re.search(r"[.!?]", value):
+        return True
+    return False
 
 
 def _build_location_alias_map(predefined_locations: list[str]) -> dict[str, list[str]]:
     alias_map: dict[str, list[str]] = {}
 
     def add(alias: str, target: str) -> None:
-        key = _compact_location_token(alias)
+        key = _normalize_lookup_key(alias)
         if not key:
             return
         alias_map.setdefault(key, [])
@@ -311,29 +318,102 @@ def _build_location_alias_map(predefined_locations: list[str]) -> dict[str, list
     return alias_map
 
 
-def _match_predefined_locations(text: str, predefined_locations: list[str]) -> list[str]:
+def _normalize_raw_location_to_predefined(raw_value: str, predefined_locations: list[str]) -> list[str]:
+    if not raw_value or not predefined_locations:
+        return []
+
     alias_map = _build_location_alias_map(predefined_locations)
-    t = text or ""
-    t_compact = _compact_location_token(t)
+    raw = _clean_location_value(raw_value)
+    if not raw:
+        return []
 
-    scored: list[tuple[int, str]] = []
+    candidates = []
+    seen_raw = set()
 
-    for alias_key, targets in alias_map.items():
-        if alias_key and alias_key in t_compact:
-            for target in targets:
-                scored.append((len(alias_key), target))
+    def add_raw(piece: str) -> None:
+        cleaned = _clean_location_value(piece)
+        if not cleaned or _looks_like_noise_location_value(cleaned):
+            return
+        key = _normalize_lookup_key(cleaned)
+        if key and key not in seen_raw:
+            seen_raw.add(key)
+            candidates.append(cleaned)
 
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return dedupe_keep_order([target for _, target in scored])
+    add_raw(raw)
+
+    for part in re.split(r"[|;/]", raw):
+        add_raw(part)
+
+    comma_parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if comma_parts:
+        add_raw(comma_parts[0])
+        add_raw(comma_parts[-1])
+
+    matches = []
+    for candidate in candidates:
+        key = _normalize_lookup_key(candidate)
+        if key in alias_map:
+            matches.extend(alias_map[key])
+
+    return dedupe_keep_order(matches)
+
+
+def _is_standalone_location_line(line: str) -> bool:
+    raw = (line or "").strip()
+    if not raw:
+        return False
+    if raw.startswith(("-", "*", "•", "+")):
+        return False
+    if re.search(r"[.!?]", raw):
+        return False
+    if len(raw) > 80:
+        return False
+
+    words = raw.split()
+    if len(words) > 6:
+        return False
+
+    lowered = raw.lower()
+    banned = [
+        "salary", "benefits", "about", "apply", "overview", "description",
+        "responsibilities", "experience", "department", "reporting to",
+        "employment type", "job type", "workplace type", "remote status",
+        "full time", "part time", "per annum", "ote", "bonus"
+    ]
+    if any(term in lowered for term in banned):
+        return False
+
+    return True
+
+
+def _extract_standalone_location_lines(text: str, predefined_locations: list[str]) -> list[str]:
+    if not predefined_locations:
+        return []
+
+    alias_map = _build_location_alias_map(predefined_locations)
+    matches = []
+
+    for line in split_lines(text):
+        if not _is_standalone_location_line(line):
+            continue
+
+        cleaned = _clean_location_value(line)
+        if not cleaned:
+            continue
+
+        key = _normalize_lookup_key(cleaned)
+        if key in alias_map:
+            matches.extend(alias_map[key])
+
+    return dedupe_keep_order(matches)
 
 
 def extract_location_candidates(text: str, predefined_locations: list[str]) -> list[str]:
     """
-    Return ONLY locations from predefined list.
-    Priority:
-    1. explicit labeled location fields in the primary section
-    2. top/header lines in the primary section
-    3. primary-section scan only
+    Strict approach:
+    1. explicit labeled location fields only
+    2. standalone location-like lines only
+    3. no broad full-text matching
     """
     primary = get_primary_text_window(text)
     matches = []
@@ -345,24 +425,20 @@ def extract_location_candidates(text: str, predefined_locations: list[str]) -> l
 
     for value in labeled_values:
         cleaned = _clean_location_value(value)
-        if cleaned and not _looks_like_noise_location_value(cleaned):
-            # Support values like "United Kingdom, United Kingdom, Antwerp"
-            parts = [p.strip() for p in re.split(r"[|;/]", cleaned) if p.strip()]
-            if not parts:
-                parts = [cleaned]
-            for part in parts:
-                matches.extend(_match_predefined_locations(part, predefined_locations))
+        if not cleaned or _looks_like_noise_location_value(cleaned):
+            continue
+
+        parts = [p.strip() for p in re.split(r"[|;/]", cleaned) if p.strip()]
+        if not parts:
+            parts = [cleaned]
+
+        for part in parts:
+            matches.extend(_normalize_raw_location_to_predefined(part, predefined_locations))
 
     if matches:
         return dedupe_keep_order(matches)
 
-    top_lines = split_lines(primary)[:25]
-    header_blob = "\n".join(top_lines)
-    matches.extend(_match_predefined_locations(header_blob, predefined_locations))
-    if matches:
-        return dedupe_keep_order(matches)
-
-    matches.extend(_match_predefined_locations(primary, predefined_locations))
+    matches.extend(_extract_standalone_location_lines(primary, predefined_locations))
     return dedupe_keep_order(matches)
 
 
@@ -394,48 +470,76 @@ def extract_remote_preferences(text: str) -> list[str]:
     labeled_values.extend(_extract_labeled_values(primary, WORKPLACE_LABEL_PATTERNS))
     labeled_values.extend(_extract_field_values_from_lines(primary, WORKPLACE_FIELD_LABELS))
 
-    # Also inspect location lines because many ATS pages put hybrid/onsite in the location field.
     location_values = []
     location_values.extend(_extract_labeled_values(primary, LOCATION_LABEL_PATTERNS))
     location_values.extend(_extract_field_values_from_lines(primary, LOCATION_FIELD_LABELS))
 
     combined_labeled_blob = " | ".join(labeled_values + location_values)
     combined_labeled_blob = combined_labeled_blob.lower()
+    t = lower_text(primary)
 
-    if re.search(r"\bhybrid\b", combined_labeled_blob):
+    explicit_hybrid_patterns = [
+        r"\bworkplace type\s*[:\-]?\s*hybrid\b",
+        r"\bworking pattern\s*[:\-]?\s*hybrid\b",
+        r"\bremote status\s*[:\-]?\s*hybrid\b",
+        r"\bhybrid working\b",
+        r"\bhybrid role\b",
+        r"\bhybrid:\s*home\b",
+    ]
+    explicit_remote_patterns = [
+        r"\bworkplace type\s*[:\-]?\s*remote\b",
+        r"\bremote status\s*[:\-]?\s*remote\b",
+        r"\bfully remote\b",
+        r"\b100% remote\b",
+        r"\bremote[- ]first\b",
+        r"\bthis is a remote role\b",
+        r"\bthis role is remote\b",
+        r"\bhome[- ]based\b",
+    ]
+    explicit_onsite_patterns = [
+        r"\bworkplace type\s*[:\-]?\s*onsite\b",
+        r"\bremote status\s*[:\-]?\s*onsite\b",
+        r"\bthis is an onsite role\b",
+        r"\bthis role is onsite\b",
+        r"\boffice[- ]based\b",
+        r"\bfully office based\b",
+        r"\bon[- ]site\b",
+    ]
+
+    if any(re.search(p, combined_labeled_blob) for p in explicit_hybrid_patterns) or re.search(r"\bhybrid\b", combined_labeled_blob):
         found.add("hybrid")
 
-    if re.search(r"\bremote\b|\bwork from home\b|\bwfh\b|\bhome[- ]based\b", combined_labeled_blob):
-        found.add("remote")
-
-    if re.search(r"\bonsite\b|\bon-site\b|\boffice[- ]based\b", combined_labeled_blob):
+    if any(re.search(p, combined_labeled_blob) for p in explicit_onsite_patterns):
         found.add("onsite")
 
-    # Location text can imply hybrid even without explicit "workplace type"
+    # Add remote only for clearly remote-working signals, not generic "remote support"
+    if any(re.search(p, combined_labeled_blob) for p in explicit_remote_patterns):
+        found.add("remote")
+
+    # Location lines like: "Location: Littlehampton, West Sussex (Hybrid: Home, Client Sites)"
+    if re.search(r"\bhybrid\b", combined_labeled_blob):
+        found.add("hybrid")
     if re.search(r"\bhome\b", combined_labeled_blob) and re.search(r"\bclient sites?\b|\boffice\b", combined_labeled_blob):
         found.add("hybrid")
 
-    t = lower_text(primary)
-
-    if re.search(r"\bhybrid\b|\bflexible hybrid\b", t):
+    # Description-level fallback only for strong workplace phrases.
+    if any(re.search(p, t) for p in explicit_hybrid_patterns):
         found.add("hybrid")
 
-    if re.search(r"\bfully remote\b|\b100% remote\b|\bremote\b|\bwork from home\b|\bwfh\b|\bhome[- ]based\b", t):
+    if any(re.search(p, t) for p in explicit_remote_patterns):
         found.add("remote")
 
-    onsite_patterns = [
-        r"\bthis is an onsite role\b",
-        r"\bthis role is onsite\b",
-        r"\bworkplace type\s*:\s*onsite\b",
-        r"\bremote status\s*:\s*onsite\b",
-        r"\boffice[- ]based\b",
-        r"\bfully office based\b",
-        r"\b5 days (?:a week|per week)? in the office\b",
-        r"\bon[- ]site\b",
-    ]
-    if not found.intersection({"hybrid", "remote"}):
-        if any(re.search(p, t) for p in onsite_patterns):
-            found.add("onsite")
+    if any(re.search(p, t) for p in explicit_onsite_patterns):
+        found.add("onsite")
+
+    if re.search(r"\b\d(?:\s*-\s*\d)?\s+days?\s+(?:in|from)\s+the\s+office\b", t) or re.search(r"\b\d(?:\s*-\s*\d)?\s+days?\s+in office\b", t):
+        found.add("hybrid")
+
+    if "hybrid" in found and "remote" in found:
+        # In most job ads, hybrid already captures home/office split.
+        # Keep remote only when there is a strong fully-remote signal.
+        if not re.search(r"\bfully remote\b|\b100% remote\b|\bremote[- ]first\b", t):
+            found.discard("remote")
 
     return [x for x in REMOTE_ORDER if x in found]
 
@@ -474,7 +578,6 @@ def extract_remote_days(text: str) -> str:
 def detect_contract_type(text: str) -> str:
     t = lower_text(get_primary_text_window(text))
 
-    # Strong priority: if full time/permanent exists anywhere in main section, return Permanent.
     if re.search(r"\bpermanent\b", t) or re.search(r"\bfull[\s-]?time\b", t):
         return "Permanent"
 
@@ -487,7 +590,6 @@ def detect_contract_type(text: str) -> str:
     if re.search(r"\bfreelance\b|\bcontract role\b|\bcontract position\b|\bcontractor\b|\bcontracting\b", t):
         return "Freelance/Contract"
 
-    # Only very explicit standalone contract-employment phrasing should fallback to contract.
     if re.search(r"\b(?:12|6|3)[\s-]?month contract\b", t):
         return "Freelance/Contract"
 
