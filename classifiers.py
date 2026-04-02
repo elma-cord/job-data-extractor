@@ -62,6 +62,7 @@ class JobClassifier:
         self.predefined_salaries = self._load_salary_values(Path(PREDEFINED_SALARIES_CSV))
         self.job_title_lookup = {x.lower(): x for x in self.predefined_job_titles}
         self.location_lookup = {x.lower(): x for x in self.predefined_locations}
+        self.location_records = self._build_location_records(self.predefined_locations)
 
     @staticmethod
     def _load_salary_values(path: Path) -> list[int]:
@@ -75,6 +76,25 @@ class JobClassifier:
                 if first and re.fullmatch(r"\d+", first):
                     values.append(int(first))
         return sorted(set(values))
+
+    def _build_location_records(self, locations: list[str]) -> list[dict[str, Any]]:
+        records = []
+        for loc in locations:
+            parts = [p.strip() for p in loc.split(",") if p.strip()]
+            first_part = parts[0] if parts else loc
+            records.append(
+                {
+                    "value": loc,
+                    "key": self._canonical_location_key(loc),
+                    "parts": parts,
+                    "part_keys": {self._canonical_location_key(p) for p in parts if p.strip()},
+                    "first_part_key": self._canonical_location_key(first_part),
+                    "tokens": set(self._canonical_location_key(loc).split()),
+                    "is_uk": "uk" in self._canonical_location_key(loc),
+                    "len": len(loc),
+                }
+            )
+        return records
 
     def _call_model(self, prompt: str) -> str:
         last_error = None
@@ -186,11 +206,150 @@ Source text:
 {text}
 """.strip()
 
-    def _normalize_model_location(self, value: str) -> str:
+    @staticmethod
+    def _clean_location_candidate_text(value: str) -> str:
         value = (value or "").strip()
-        if not value or value.lower() == "unknown":
+        if not value:
             return ""
-        return self.location_lookup.get(value.lower(), "")
+
+        value = re.sub(r"<[^>]+>", " ", value)
+        value = value.replace("|", ",")
+        value = value.replace(";", ",")
+        value = re.sub(r"(?i)\bunavailable\b", " ", value)
+        value = re.sub(r"(?i)\bremote\s*-\s*", "", value)
+        value = re.sub(r"(?i)\buk\s*-\s*", "", value)
+        value = re.sub(r"(?i)\bgreat britain\b", "United Kingdom", value)
+        value = re.sub(r"(?i)\bu\.?k\.?\b", "UK", value)
+        value = re.sub(r"\s*-\s*", ", ", value)
+        value = re.sub(r"\s+", " ", value)
+        value = re.sub(r"\s*,\s*", ", ", value)
+        value = value.strip(" ,:-")
+        return value.strip()
+
+    @staticmethod
+    def _canonical_location_key(value: str) -> str:
+        value = (value or "").lower()
+        value = re.sub(r"<[^>]+>", " ", value)
+        value = value.replace("&", " and ")
+        value = re.sub(r"(?i)\bunavailable\b", " ", value)
+        value = re.sub(r"(?i)\bgreat britain\b", " united kingdom ", value)
+        value = re.sub(r"(?i)\bu\.?k\.?\b", " uk ", value)
+        value = re.sub(r"(?i)\bengland\b", " uk ", value)
+        value = re.sub(r"(?i)\bscotland\b", " uk ", value)
+        value = re.sub(r"(?i)\bwales\b", " uk ", value)
+        value = re.sub(r"(?i)\bnorthern ireland\b", " uk ", value)
+        value = re.sub(r"(?i)\bremote\b", " ", value)
+        value = re.sub(r"[^a-z0-9]+", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
+
+    @staticmethod
+    def _looks_like_bad_location_candidate(value: str) -> bool:
+        if not value:
+            return True
+
+        lowered = value.lower()
+        bad_phrases = [
+            "diversity",
+            "equity",
+            "inclusion",
+            "account executive",
+            "as an ",
+            "you will",
+            "insurance brokers",
+            "mgas",
+            "insurers",
+            "benefits",
+            "about us",
+            "job description",
+            "responsibilities",
+            "experience",
+            "department",
+            "reporting to",
+        ]
+        if any(p in lowered for p in bad_phrases):
+            return True
+
+        words = re.findall(r"[a-zA-Z]+", value)
+        if len(words) > 8:
+            return True
+
+        return False
+
+    def _normalize_location_candidate(self, value: str) -> str:
+        value = self._clean_location_candidate_text(value)
+        if not value:
+            return ""
+        if value.lower() == "unknown":
+            return ""
+        if self._looks_like_bad_location_candidate(value):
+            return ""
+
+        direct = self.location_lookup.get(value.lower())
+        if direct:
+            return direct
+
+        cand_key = self._canonical_location_key(value)
+        if not cand_key:
+            return ""
+
+        for record in self.location_records:
+            if cand_key == record["key"]:
+                return record["value"]
+
+        for record in self.location_records:
+            if cand_key == record["first_part_key"]:
+                return record["value"]
+
+        cand_tokens = set(cand_key.split())
+        if not cand_tokens:
+            return ""
+
+        best_value = ""
+        best_score = -1
+
+        for record in self.location_records:
+            score = 0
+
+            if cand_key in record["part_keys"]:
+                score += 180
+
+            if record["first_part_key"] and (
+                cand_key == record["first_part_key"]
+                or cand_key in record["first_part_key"]
+                or record["first_part_key"] in cand_key
+            ):
+                score += 140
+
+            overlap = len(cand_tokens & record["tokens"])
+            if overlap:
+                score += overlap * 20
+
+            if cand_tokens and cand_tokens.issubset(record["tokens"]):
+                score += 60
+
+            if "uk" in cand_tokens and record["is_uk"]:
+                score += 10
+
+            if score > best_score or (score == best_score and score > 0 and record["len"] < len(best_value or "zzzzzz")):
+                best_score = score
+                best_value = record["value"]
+
+        if best_score >= 80:
+            return best_value
+
+        return ""
+
+    def _normalize_location_candidates(self, candidates: list[str]) -> list[str]:
+        out = []
+        for candidate in candidates:
+            normalized = self._normalize_location_candidate(candidate)
+            if normalized and normalized not in out:
+                out.append(normalized)
+        return out
+
+    def _normalize_model_location(self, value: str) -> str:
+        return self._normalize_location_candidate(value)
 
     def _normalize_model_remote_preferences(self, value: Any) -> list[str]:
         allowed = {"onsite", "hybrid", "remote"}
@@ -262,15 +421,14 @@ Source text:
     ) -> dict[str, Any]:
         desc = clean_description(description)
 
-        # AI on description first
         desc_ai = self._extract_location_remote_with_ai(
             position_name=position_name,
             text=desc,
             source_name="job description",
         )
 
-        # rules fallback on description
-        desc_rule_location_candidates = extract_location_candidates(desc, self.predefined_locations)
+        desc_rule_location_candidates_raw = extract_location_candidates(desc, self.predefined_locations)
+        desc_rule_location_candidates = self._normalize_location_candidates(desc_rule_location_candidates_raw)
         desc_rule_job_location = select_best_location(desc_rule_location_candidates)
         desc_rule_remote_preferences = extract_remote_preferences(desc)
         desc_rule_remote_days = extract_remote_days(desc)
@@ -313,15 +471,14 @@ Source text:
             if fetched.ok and fetched.text:
                 page_text = clean_description(fetched.text)
 
-                # AI on page text
                 page_ai = self._extract_location_remote_with_ai(
                     position_name=position_name,
                     text=page_text,
                     source_name="job page text",
                 )
 
-                # rules fallback on page
-                page_rule_location_candidates = extract_location_candidates(page_text, self.predefined_locations)
+                page_rule_location_candidates_raw = extract_location_candidates(page_text, self.predefined_locations)
+                page_rule_location_candidates = self._normalize_location_candidates(page_rule_location_candidates_raw)
                 page_rule_job_location = select_best_location(page_rule_location_candidates)
                 page_rule_remote_preferences = extract_remote_preferences(page_text)
                 page_rule_remote_days = extract_remote_days(page_text)
