@@ -21,7 +21,6 @@ from fetch_extract import fetch_job_page_text
 from prompts import (
     build_contract_type_prompt,
     build_job_titles_prompt,
-    build_location_prompt,
     build_role_relevance_prompt,
     build_seniority_prompt,
     build_skills_prompt,
@@ -31,6 +30,7 @@ from rules import (
     detect_contract_type,
     detect_seniority_from_title_and_description,
     detect_tp_from_title,
+    extract_location_candidates,
     extract_remote_days,
     extract_remote_preferences,
     extract_salary,
@@ -39,6 +39,7 @@ from rules import (
     is_location_allowed,
     load_single_column_csv,
     normalize_text,
+    select_best_location,
 )
 from validators import (
     clean_description,
@@ -59,7 +60,6 @@ class JobClassifier:
         self.predefined_nontp_skills = load_single_column_csv(Path(PREDEFINED_NONTP_SKILLS_CSV))
         self.predefined_salaries = self._load_salary_values(Path(PREDEFINED_SALARIES_CSV))
         self.job_title_lookup = {x.lower(): x for x in self.predefined_job_titles}
-        self.location_lookup = {x.lower(): x for x in self.predefined_locations}
 
     @staticmethod
     def _load_salary_values(path: Path) -> list[int]:
@@ -90,23 +90,6 @@ class JobClassifier:
                 last_error = exc
         raise RuntimeError(f"model_call_failed: {last_error}")
 
-    def _classify_location_with_model(self, position_name: str, text: str) -> str:
-        text = clean_description(text)
-        if not text:
-            return ""
-
-        prompt = build_location_prompt(
-            position_name=position_name,
-            job_description=text,
-            predefined_locations=self.predefined_locations,
-        )
-        raw = self._call_model(prompt).strip()
-
-        if not raw or raw.lower() == "unknown":
-            return ""
-
-        return self.location_lookup.get(raw.lower(), "")
-
     def _extract_location_remote_from_description_or_url(
         self,
         position_name: str,
@@ -115,47 +98,58 @@ class JobClassifier:
     ) -> dict[str, Any]:
         desc = clean_description(description)
 
-        desc_job_location = self._classify_location_with_model(position_name, desc)
+        desc_location_candidates = extract_location_candidates(desc, self.predefined_locations)
+        desc_job_location = select_best_location(desc_location_candidates)
         desc_remote_preferences_list = extract_remote_preferences(desc)
         desc_remote_days = extract_remote_days(desc)
 
-        job_location = desc_job_location
-        location_candidates = [desc_job_location] if desc_job_location else []
-        remote_preferences_list = desc_remote_preferences_list[:]
-        remote_days = desc_remote_days
+        job_location = ""
+        location_candidates: list[str] = []
+        remote_preferences_list: list[str] = []
+        remote_days = "not specified"
 
         notes = []
-        if job_location:
-            notes.append("location from current job description")
-        if remote_preferences_list:
-            notes.append("remote preferences from current job description")
 
-        should_fetch = (not desc_job_location) or (not desc_remote_preferences_list)
-
-        if should_fetch and job_url:
+        # Page-first for location / remote
+        if job_url:
             fetched = fetch_job_page_text(job_url)
 
             if fetched.ok and fetched.text:
                 page_text = clean_description(fetched.text)
 
-                fetched_job_location = self._classify_location_with_model(position_name, page_text)
-                fetched_remote_preferences = extract_remote_preferences(page_text)
-                fetched_remote_days = extract_remote_days(page_text)
+                page_location_candidates = extract_location_candidates(page_text, self.predefined_locations)
+                page_job_location = select_best_location(page_location_candidates)
+                page_remote_preferences = extract_remote_preferences(page_text)
+                page_remote_days = extract_remote_days(page_text)
 
-                if not job_location and fetched_job_location:
-                    job_location = fetched_job_location
-                    location_candidates = [fetched_job_location]
+                if page_job_location:
+                    job_location = page_job_location
+                    location_candidates = page_location_candidates[:]
                     notes.append("location via link")
 
-                if not remote_preferences_list and fetched_remote_preferences:
-                    remote_preferences_list = fetched_remote_preferences
+                if page_remote_preferences:
+                    remote_preferences_list = page_remote_preferences[:]
                     notes.append("remote preferences via link")
 
-                if remote_days == "not specified" and fetched_remote_days != "not specified":
-                    remote_days = fetched_remote_days
+                if page_remote_days != "not specified":
+                    remote_days = page_remote_days
                     notes.append("remote days via link")
             else:
                 notes.append(f"url_fetch_failed: {fetched.error or fetched.status_code or 'unknown'}")
+
+        # Fallback to description only when page did not give the field
+        if not job_location and desc_job_location:
+            job_location = desc_job_location
+            location_candidates = desc_location_candidates[:]
+            notes.append("location from current job description")
+
+        if not remote_preferences_list and desc_remote_preferences_list:
+            remote_preferences_list = desc_remote_preferences_list[:]
+            notes.append("remote preferences from current job description")
+
+        if remote_days == "not specified" and desc_remote_days != "not specified":
+            remote_days = desc_remote_days
+            notes.append("remote days from current job description")
 
         return {
             "job_location": job_location,
