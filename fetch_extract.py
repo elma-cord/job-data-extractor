@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -53,21 +54,102 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
+def _join_address_parts(parts: list[str]) -> str:
+    clean = []
+    for part in parts:
+        part = (part or "").strip()
+        if part and part not in clean:
+            clean.append(part)
+    return ", ".join(clean)
+
+
+def _collect_structured_lines(obj, out: list[str]) -> None:
+    if isinstance(obj, dict):
+        address_locality = obj.get("addressLocality")
+        address_region = obj.get("addressRegion")
+        address_country = obj.get("addressCountry")
+
+        if any([address_locality, address_region, address_country]):
+            location_line = _join_address_parts([
+                str(address_locality or ""),
+                str(address_region or ""),
+                str(address_country or ""),
+            ])
+            if location_line:
+                out.append(f"Location: {location_line}")
+
+        for key, value in obj.items():
+            key_l = str(key).lower()
+
+            if key_l in {"location", "joblocation", "baselocation", "locations"} and isinstance(value, str):
+                out.append(f"Location: {value}")
+
+            elif key_l in {"workplacetype", "remotestatus", "locationtype", "remote_type", "workplace"} and isinstance(value, str):
+                out.append(f"Workplace type: {value}")
+
+            elif key_l == "applicantlocationrequirements":
+                if isinstance(value, str):
+                    out.append(f"Location: {value}")
+                elif isinstance(value, dict):
+                    _collect_structured_lines(value, out)
+                elif isinstance(value, list):
+                    for item in value:
+                        _collect_structured_lines(item, out)
+
+            elif key_l in {"address", "joblocation"} and isinstance(value, dict):
+                _collect_structured_lines(value, out)
+
+            elif isinstance(value, (dict, list)):
+                _collect_structured_lines(value, out)
+
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_structured_lines(item, out)
+
+
+def _extract_structured_text_from_html(soup: BeautifulSoup) -> str:
+    lines = []
+
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = script.string or script.get_text() or ""
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+            _collect_structured_lines(data, lines)
+        except Exception:
+            continue
+
+    return _clean_text("\n".join(lines))
+
+
 def _html_to_text(html: str) -> str:
     soup = BeautifulSoup(html or "", "html.parser")
 
     for tag in soup(["script", "style", "noscript", "svg", "img", "picture", "source"]):
+        if tag.get("type") == "application/ld+json":
+            continue
         tag.decompose()
 
-    # keep meta content if useful
     meta_texts = []
     for attr in ("description", "og:description", "twitter:description"):
         node = soup.find("meta", attrs={"name": attr}) or soup.find("meta", attrs={"property": attr})
         if node and node.get("content"):
             meta_texts.append(node.get("content", ""))
 
+    structured_text = _extract_structured_text_from_html(BeautifulSoup(html or "", "html.parser"))
     body_text = soup.get_text(separator="\n")
-    combined = "\n".join(meta_texts + [body_text])
+
+    combined_parts = []
+    if meta_texts:
+        combined_parts.append("\n".join(meta_texts))
+    if structured_text:
+        combined_parts.append(structured_text)
+    if body_text:
+        combined_parts.append(body_text)
+
+    combined = "\n".join(combined_parts)
     return _clean_text(combined)
 
 
