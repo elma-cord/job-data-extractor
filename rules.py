@@ -292,7 +292,6 @@ def _split_possible_locations(raw: str) -> list[str]:
         if part:
             pieces.append(part)
 
-    # Handle values like: "United Kingdom, United Kingdom, Antwerp"
     comma_parts = [p.strip() for p in raw.split(",") if p.strip()]
     if len(comma_parts) >= 2:
         pieces.append(", ".join(comma_parts[:2]))
@@ -329,7 +328,6 @@ def _is_standalone_location_line(line: str) -> bool:
     if any(term in lowered for term in banned):
         return False
 
-    # Needs at least one letter and should look like a place-ish line.
     if not re.search(r"[A-Za-z]", raw):
         return False
 
@@ -349,12 +347,8 @@ def _extract_standalone_location_lines(text: str) -> list[str]:
 
 def extract_location_candidates(text: str, predefined_locations: list[str]) -> list[str]:
     """
-    Strict raw extraction only.
-    Do NOT compare against predefined_locations here.
-    Priority:
-    1. explicit labeled location fields
-    2. standalone short location lines
-    3. no broad full-text guessing
+    Light explicit fallback only.
+    Primary location extraction is handled by the model in classifiers.py.
     """
     primary = get_primary_text_window(text)
     matches = []
@@ -406,8 +400,7 @@ def extract_remote_preferences(text: str) -> list[str]:
     location_values.extend(_extract_labeled_values(primary, LOCATION_LABEL_PATTERNS))
     location_values.extend(_extract_field_values_from_lines(primary, LOCATION_FIELD_LABELS))
 
-    combined_labeled_blob = " | ".join(labeled_values + location_values)
-    combined_labeled_blob = combined_labeled_blob.lower()
+    combined_labeled_blob = " | ".join(labeled_values + location_values).lower()
     t = lower_text(primary)
 
     explicit_hybrid_patterns = [
@@ -417,7 +410,6 @@ def extract_remote_preferences(text: str) -> list[str]:
         r"\bhybrid working\b",
         r"\bhybrid role\b",
         r"\bhybrid:\s*home\b",
-        r"\bhybrid\b",
     ]
     explicit_remote_patterns = [
         r"\bworkplace type\s*[:\-]?\s*remote\b",
@@ -428,6 +420,8 @@ def extract_remote_preferences(text: str) -> list[str]:
         r"\bthis is a remote role\b",
         r"\bthis role is remote\b",
         r"\bhome[- ]based\b",
+        r"\bwork from home\b",
+        r"\bwfh\b",
     ]
     explicit_onsite_patterns = [
         r"\bworkplace type\s*[:\-]?\s*onsite\b",
@@ -440,14 +434,14 @@ def extract_remote_preferences(text: str) -> list[str]:
         r"\bonsite\b",
     ]
 
-    if any(re.search(p, combined_labeled_blob) for p in explicit_hybrid_patterns):
+    if any(re.search(p, combined_labeled_blob) for p in explicit_hybrid_patterns) or re.search(r"\bhybrid\b", combined_labeled_blob):
         found.add("hybrid")
-
-    if any(re.search(p, combined_labeled_blob) for p in explicit_onsite_patterns):
-        found.add("onsite")
 
     if any(re.search(p, combined_labeled_blob) for p in explicit_remote_patterns):
         found.add("remote")
+
+    if any(re.search(p, combined_labeled_blob) for p in explicit_onsite_patterns):
+        found.add("onsite")
 
     if re.search(r"\bhome\b", combined_labeled_blob) and re.search(r"\bclient sites?\b|\boffice\b", combined_labeled_blob):
         found.add("hybrid")
@@ -772,7 +766,6 @@ def is_location_allowed(locations: list[str], remote_preferences: list[str]) -> 
         if any(marker in loc_l for marker in broad_remote_markers) and "remote" in remote_set:
             return True
 
-        # Raw city/region like "Brighton", "Worcester", "London" should not be rejected.
         if "," not in loc and 1 <= len(loc.split()) <= 4:
             if not any(marker in loc_l for marker in disallowed_country_markers):
                 return True
