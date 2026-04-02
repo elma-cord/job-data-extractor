@@ -170,7 +170,7 @@ def dedupe_keep_order(items: list[str]) -> list[str]:
     return out
 
 
-def get_primary_text_window(text: str, max_chars: int = 4500) -> str:
+def get_primary_text_window(text: str, max_chars: int = 7000) -> str:
     text = text or ""
 
     cut_markers = [
@@ -221,7 +221,7 @@ def _extract_field_values_from_lines(text: str, allowed_labels: set[str]) -> lis
 
         for label in allowed_labels:
             if normalized == label:
-                for next_idx in range(idx + 1, min(idx + 4, len(lines))):
+                for next_idx in range(idx + 1, min(idx + 5, len(lines))):
                     nxt = lines[next_idx].strip()
                     nxt_norm = _normalize_field_label(nxt)
                     if not nxt:
@@ -264,6 +264,7 @@ def _clean_location_value(value: str) -> str:
     value = re.sub(r"(?i)\bremote status\s*:\s*.+$", "", value)
     value = re.sub(r"(?i)\bworkplace type\s*:\s*.+$", "", value)
 
+    value = re.sub(r"^\s*:\s*", "", value)
     value = re.sub(r"\s*\|\s*", ", ", value)
     value = re.sub(r"\s+", " ", value).strip(" -,:;")
     return value.strip()
@@ -346,10 +347,6 @@ def _extract_standalone_location_lines(text: str) -> list[str]:
 
 
 def extract_location_candidates(text: str, predefined_locations: list[str]) -> list[str]:
-    """
-    Light explicit fallback only.
-    Primary location extraction is handled by the model in classifiers.py.
-    """
     primary = get_primary_text_window(text)
     matches = []
 
@@ -410,6 +407,7 @@ def extract_remote_preferences(text: str) -> list[str]:
         r"\bhybrid working\b",
         r"\bhybrid role\b",
         r"\bhybrid:\s*home\b",
+        r"\bhybrid\b",
     ]
     explicit_remote_patterns = [
         r"\bworkplace type\s*[:\-]?\s*remote\b",
@@ -434,7 +432,7 @@ def extract_remote_preferences(text: str) -> list[str]:
         r"\bonsite\b",
     ]
 
-    if any(re.search(p, combined_labeled_blob) for p in explicit_hybrid_patterns) or re.search(r"\bhybrid\b", combined_labeled_blob):
+    if any(re.search(p, combined_labeled_blob) for p in explicit_hybrid_patterns):
         found.add("hybrid")
 
     if any(re.search(p, combined_labeled_blob) for p in explicit_remote_patterns):
