@@ -65,6 +65,44 @@ def build_role_relevance_prompt(position_name: str, job_description: str, predef
     """).strip()
 
 
+def build_location_prompt(position_name: str, job_description: str, predefined_locations: list[str]) -> str:
+    locations_str = ", ".join(predefined_locations)
+
+    return dedent(f"""
+    You will receive two inputs: position name and job description.
+
+    Perform the following tasks carefully and output the result exactly as described below.
+
+    1. Position Location
+
+    a) Read the entire description carefully to find the actual work location for this job.
+    b) Focus especially on locations near keywords like:
+       "location:", "locations:", "all locations:", "job location", "office location", "based in", "office in", "work location".
+    c) Prefer the location stated in the main role header or labeled job fields over lower-page text.
+    d) If multiple locations appear, select the most specific real job location (city/town over region/country).
+    e) Do not use company office lists, global presence text, benefits text, diversity text, legal text, footer text, or unrelated place names as the job location.
+    f) Do not guess a location from random body text if the job posting does not clearly state one.
+    g) If the extracted location does not exactly exist in the acceptable list, select the closest broader location from the list.
+    h) If none of the acceptable locations match, output "Unknown".
+
+    Important rules:
+    1. If multiple acceptable locations match, select the most specific one.
+    2. If the posting clearly labels a location, strongly prefer that value.
+    3. Ignore skills, tools, departments, slogans, culture/benefits text, and unrelated sections.
+    4. Output only one exact value from the acceptable locations list, or "Unknown".
+    5. Do not add any explanation.
+
+    The list of acceptable locations is:
+    {locations_str}
+
+    Position name:
+    {position_name}
+
+    Job description:
+    {job_description}
+    """).strip()
+
+
 def build_job_titles_prompt(position_name: str, job_description: str, predefined_job_titles: list[str]) -> str:
     titles_str = ", ".join(predefined_job_titles)
 
