@@ -303,65 +303,18 @@ def _split_possible_locations(raw: str) -> list[str]:
     return dedupe_keep_order([p for p in pieces if p and not _looks_like_noise_location_value(p)])
 
 
-def _is_standalone_location_line(line: str) -> bool:
-    raw = (line or "").strip()
-    if not raw:
-        return False
-    if raw.startswith(("-", "*", "•", "+")):
-        return False
-    if re.search(r"[.!?]", raw):
-        return False
-    if len(raw) > 80:
-        return False
-
-    words = raw.split()
-    if len(words) > 6:
-        return False
-
-    lowered = raw.lower()
-    banned = [
-        "salary", "benefits", "about", "apply", "overview", "description",
-        "responsibilities", "experience", "department", "reporting to",
-        "employment type", "job type", "workplace type", "remote status",
-        "full time", "part time", "per annum", "ote", "bonus",
-        "consultant", "engineer", "analyst", "manager"
-    ]
-    if any(term in lowered for term in banned):
-        return False
-
-    if not re.search(r"[A-Za-z]", raw):
-        return False
-
-    return True
-
-
-def _extract_standalone_location_lines(text: str) -> list[str]:
-    matches = []
-    for line in split_lines(text):
-        if not _is_standalone_location_line(line):
-            continue
-        cleaned = _clean_location_value(line)
-        if cleaned and not _looks_like_noise_location_value(cleaned):
-            matches.append(cleaned)
-    return dedupe_keep_order(matches)
-
-
 def extract_location_candidates(text: str, predefined_locations: list[str]) -> list[str]:
     primary = get_primary_text_window(text)
-    matches = []
 
     labeled_values = []
     labeled_values.extend(_extract_labeled_values(primary, LOCATION_LABEL_PATTERNS))
     labeled_values.extend(_extract_field_values_from_lines(primary, LOCATION_FIELD_LABELS))
     labeled_values = dedupe_keep_order(labeled_values)
 
+    matches = []
     for value in labeled_values:
         matches.extend(_split_possible_locations(value))
 
-    if matches:
-        return dedupe_keep_order(matches)
-
-    matches.extend(_extract_standalone_location_lines(primary))
     return dedupe_keep_order(matches)
 
 
