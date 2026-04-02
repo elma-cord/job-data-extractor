@@ -201,16 +201,6 @@ def _normalize_field_label(line: str) -> str:
     return line.lower()
 
 
-def _normalize_lookup_key(value: str) -> str:
-    value = value or ""
-    value = value.replace("：", ":")
-    value = value.strip()
-    value = re.sub(r"[*#`_]+", "", value)
-    value = re.sub(r"\s+", " ", value)
-    value = value.strip(" ,;:-")
-    return value.lower()
-
-
 def _extract_labeled_values(text: str, patterns: list[str]) -> list[str]:
     values = []
     for pattern in patterns:
@@ -242,7 +232,6 @@ def _extract_field_values_from_lines(text: str, allowed_labels: set[str]) -> lis
                         continue
                     values.append(nxt)
                     break
-
                 continue
 
             m = re.match(rf"(?i)^\**\s*{re.escape(label)}\s*[:\-]\s*(.+?)\s*\**$", line)
@@ -271,6 +260,10 @@ def _clean_location_value(value: str) -> str:
         value,
     )
 
+    value = re.sub(r"(?i)\bhybrid\s*:\s*home\s*,?\s*client sites?\b", "", value)
+    value = re.sub(r"(?i)\bremote status\s*:\s*.+$", "", value)
+    value = re.sub(r"(?i)\bworkplace type\s*:\s*.+$", "", value)
+
     value = re.sub(r"\s*\|\s*", ", ", value)
     value = re.sub(r"\s+", " ", value).strip(" -,:;")
     return value.strip()
@@ -287,75 +280,27 @@ def _looks_like_noise_location_value(value: str) -> bool:
     return False
 
 
-def _build_location_alias_map(predefined_locations: list[str]) -> dict[str, list[str]]:
-    alias_map: dict[str, list[str]] = {}
-
-    def add(alias: str, target: str) -> None:
-        key = _normalize_lookup_key(alias)
-        if not key:
-            return
-        alias_map.setdefault(key, [])
-        if target not in alias_map[key]:
-            alias_map[key].append(target)
-
-    for loc in predefined_locations:
-        add(loc, loc)
-
-        parts = [p.strip() for p in loc.split(",") if p.strip()]
-        if parts:
-            city = parts[0]
-            add(city, loc)
-
-            if len(parts) >= 2:
-                add(f"{city}, {parts[-1]}", loc)
-
-        loc_l = lower_text(loc)
-        if "united kingdom" in loc_l:
-            add(loc.replace("United Kingdom", "UK"), loc)
-        if loc_l.endswith(", uk"):
-            add(loc.replace(", UK", ""), loc)
-
-    return alias_map
-
-
-def _normalize_raw_location_to_predefined(raw_value: str, predefined_locations: list[str]) -> list[str]:
-    if not raw_value or not predefined_locations:
-        return []
-
-    alias_map = _build_location_alias_map(predefined_locations)
-    raw = _clean_location_value(raw_value)
+def _split_possible_locations(raw: str) -> list[str]:
+    raw = _clean_location_value(raw)
     if not raw:
         return []
 
-    candidates = []
-    seen_raw = set()
-
-    def add_raw(piece: str) -> None:
-        cleaned = _clean_location_value(piece)
-        if not cleaned or _looks_like_noise_location_value(cleaned):
-            return
-        key = _normalize_lookup_key(cleaned)
-        if key and key not in seen_raw:
-            seen_raw.add(key)
-            candidates.append(cleaned)
-
-    add_raw(raw)
+    pieces = [raw]
 
     for part in re.split(r"[|;/]", raw):
-        add_raw(part)
+        part = _clean_location_value(part)
+        if part:
+            pieces.append(part)
 
+    # Handle values like: "United Kingdom, United Kingdom, Antwerp"
     comma_parts = [p.strip() for p in raw.split(",") if p.strip()]
-    if comma_parts:
-        add_raw(comma_parts[0])
-        add_raw(comma_parts[-1])
+    if len(comma_parts) >= 2:
+        pieces.append(", ".join(comma_parts[:2]))
+        pieces.append(", ".join(comma_parts[-2:]))
+        pieces.append(comma_parts[0])
+        pieces.append(comma_parts[-1])
 
-    matches = []
-    for candidate in candidates:
-        key = _normalize_lookup_key(candidate)
-        if key in alias_map:
-            matches.extend(alias_map[key])
-
-    return dedupe_keep_order(matches)
+    return dedupe_keep_order([p for p in pieces if p and not _looks_like_noise_location_value(p)])
 
 
 def _is_standalone_location_line(line: str) -> bool:
@@ -378,42 +323,38 @@ def _is_standalone_location_line(line: str) -> bool:
         "salary", "benefits", "about", "apply", "overview", "description",
         "responsibilities", "experience", "department", "reporting to",
         "employment type", "job type", "workplace type", "remote status",
-        "full time", "part time", "per annum", "ote", "bonus"
+        "full time", "part time", "per annum", "ote", "bonus",
+        "consultant", "engineer", "analyst", "manager"
     ]
     if any(term in lowered for term in banned):
+        return False
+
+    # Needs at least one letter and should look like a place-ish line.
+    if not re.search(r"[A-Za-z]", raw):
         return False
 
     return True
 
 
-def _extract_standalone_location_lines(text: str, predefined_locations: list[str]) -> list[str]:
-    if not predefined_locations:
-        return []
-
-    alias_map = _build_location_alias_map(predefined_locations)
+def _extract_standalone_location_lines(text: str) -> list[str]:
     matches = []
-
     for line in split_lines(text):
         if not _is_standalone_location_line(line):
             continue
-
         cleaned = _clean_location_value(line)
-        if not cleaned:
-            continue
-
-        key = _normalize_lookup_key(cleaned)
-        if key in alias_map:
-            matches.extend(alias_map[key])
-
+        if cleaned and not _looks_like_noise_location_value(cleaned):
+            matches.append(cleaned)
     return dedupe_keep_order(matches)
 
 
 def extract_location_candidates(text: str, predefined_locations: list[str]) -> list[str]:
     """
-    Strict approach:
-    1. explicit labeled location fields only
-    2. standalone location-like lines only
-    3. no broad full-text matching
+    Strict raw extraction only.
+    Do NOT compare against predefined_locations here.
+    Priority:
+    1. explicit labeled location fields
+    2. standalone short location lines
+    3. no broad full-text guessing
     """
     primary = get_primary_text_window(text)
     matches = []
@@ -424,21 +365,12 @@ def extract_location_candidates(text: str, predefined_locations: list[str]) -> l
     labeled_values = dedupe_keep_order(labeled_values)
 
     for value in labeled_values:
-        cleaned = _clean_location_value(value)
-        if not cleaned or _looks_like_noise_location_value(cleaned):
-            continue
-
-        parts = [p.strip() for p in re.split(r"[|;/]", cleaned) if p.strip()]
-        if not parts:
-            parts = [cleaned]
-
-        for part in parts:
-            matches.extend(_normalize_raw_location_to_predefined(part, predefined_locations))
+        matches.extend(_split_possible_locations(value))
 
     if matches:
         return dedupe_keep_order(matches)
 
-    matches.extend(_extract_standalone_location_lines(primary, predefined_locations))
+    matches.extend(_extract_standalone_location_lines(primary))
     return dedupe_keep_order(matches)
 
 
@@ -485,6 +417,7 @@ def extract_remote_preferences(text: str) -> list[str]:
         r"\bhybrid working\b",
         r"\bhybrid role\b",
         r"\bhybrid:\s*home\b",
+        r"\bhybrid\b",
     ]
     explicit_remote_patterns = [
         r"\bworkplace type\s*[:\-]?\s*remote\b",
@@ -504,25 +437,21 @@ def extract_remote_preferences(text: str) -> list[str]:
         r"\boffice[- ]based\b",
         r"\bfully office based\b",
         r"\bon[- ]site\b",
+        r"\bonsite\b",
     ]
 
-    if any(re.search(p, combined_labeled_blob) for p in explicit_hybrid_patterns) or re.search(r"\bhybrid\b", combined_labeled_blob):
+    if any(re.search(p, combined_labeled_blob) for p in explicit_hybrid_patterns):
         found.add("hybrid")
 
     if any(re.search(p, combined_labeled_blob) for p in explicit_onsite_patterns):
         found.add("onsite")
 
-    # Add remote only for clearly remote-working signals, not generic "remote support"
     if any(re.search(p, combined_labeled_blob) for p in explicit_remote_patterns):
         found.add("remote")
 
-    # Location lines like: "Location: Littlehampton, West Sussex (Hybrid: Home, Client Sites)"
-    if re.search(r"\bhybrid\b", combined_labeled_blob):
-        found.add("hybrid")
     if re.search(r"\bhome\b", combined_labeled_blob) and re.search(r"\bclient sites?\b|\boffice\b", combined_labeled_blob):
         found.add("hybrid")
 
-    # Description-level fallback only for strong workplace phrases.
     if any(re.search(p, t) for p in explicit_hybrid_patterns):
         found.add("hybrid")
 
@@ -536,8 +465,6 @@ def extract_remote_preferences(text: str) -> list[str]:
         found.add("hybrid")
 
     if "hybrid" in found and "remote" in found:
-        # In most job ads, hybrid already captures home/office split.
-        # Keep remote only when there is a strong fully-remote signal.
         if not re.search(r"\bfully remote\b|\b100% remote\b|\bremote[- ]first\b", t):
             found.discard("remote")
 
@@ -823,18 +750,34 @@ def is_location_allowed(locations: list[str], remote_preferences: list[str]) -> 
     remote_set = set(remote_preferences)
 
     uk_markers = [
-        "United Kingdom", "UK", "England", "Scotland", "Wales", "Northern Ireland"
+        "united kingdom", "uk", "england", "scotland", "wales", "northern ireland"
     ]
-    for loc in locations:
-        if any(marker in loc for marker in uk_markers):
-            return True
+    broad_remote_markers = ["europe", "emea", "ireland"]
+
+    disallowed_country_markers = [
+        "spain", "france", "germany", "italy", "portugal", "poland", "latvia",
+        "lithuania", "estonia", "romania", "bulgaria", "croatia", "serbia",
+        "bosnia", "netherlands", "belgium", "sweden", "norway", "denmark",
+        "finland", "switzerland", "austria", "czech", "slovakia", "hungary",
+        "greece", "turkey", "india", "singapore", "japan", "china", "australia",
+        "canada", "united states", "usa"
+    ]
 
     for loc in locations:
-        if "Ireland" in loc and "remote" in remote_set:
+        loc_l = lower_text(loc)
+
+        if any(marker in loc_l for marker in uk_markers):
             return True
 
-    for loc in locations:
-        if ("Europe" in loc or "EMEA" in loc) and "remote" in remote_set:
+        if any(marker in loc_l for marker in broad_remote_markers) and "remote" in remote_set:
+            return True
+
+        # Raw city/region like "Brighton", "Worcester", "London" should not be rejected.
+        if "," not in loc and 1 <= len(loc.split()) <= 4:
+            if not any(marker in loc_l for marker in disallowed_country_markers):
+                return True
+
+        if "ireland" in loc_l and "remote" in remote_set:
             return True
 
     return False
