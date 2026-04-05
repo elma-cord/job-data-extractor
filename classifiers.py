@@ -63,6 +63,19 @@ class JobClassifier:
         self.job_title_lookup = {x.lower(): x for x in self.predefined_job_titles}
         self.location_lookup = {x.lower(): x for x in self.predefined_locations}
         self.location_records = self._build_location_records(self.predefined_locations)
+        self.broad_location_keys = {
+            "united kingdom",
+            "uk",
+            "england",
+            "scotland",
+            "wales",
+            "northern ireland",
+            "ireland",
+            "europe",
+            "emea",
+            "global",
+            "worldwide",
+        }
 
     @staticmethod
     def _load_salary_values(path: Path) -> list[int]:
@@ -82,16 +95,24 @@ class JobClassifier:
         for loc in locations:
             parts = [p.strip() for p in loc.split(",") if p.strip()]
             first_part = parts[0] if parts else loc
+            key = self._canonical_location_key(loc)
+            first_part_key = self._canonical_location_key(first_part)
+            part_keys = {self._canonical_location_key(p) for p in parts if p.strip()}
             records.append(
                 {
                     "value": loc,
-                    "key": self._canonical_location_key(loc),
+                    "key": key,
                     "parts": parts,
-                    "part_keys": {self._canonical_location_key(p) for p in parts if p.strip()},
-                    "first_part_key": self._canonical_location_key(first_part),
-                    "tokens": set(self._canonical_location_key(loc).split()),
-                    "is_uk": "uk" in self._canonical_location_key(loc),
+                    "part_keys": part_keys,
+                    "first_part_key": first_part_key,
+                    "tokens": set(key.split()),
+                    "is_uk": "uk" in key or "united kingdom" in key,
                     "len": len(loc),
+                    "specificity": max(len(parts), 1),
+                    "is_broad": first_part_key in {
+                        "united kingdom", "uk", "england", "scotland", "wales",
+                        "northern ireland", "ireland", "europe", "emea"
+                    },
                 }
             )
         return records
@@ -213,16 +234,45 @@ Source text:
             return ""
 
         value = re.sub(r"<[^>]+>", " ", value)
+        value = value.replace("｜", "|")
+        value = value.replace("／", "/")
+        value = value.replace("&amp;", "&")
+
+        # Common ATS/location formatting cleanup
+        value = re.sub(r"(?i)^\s*locations?\s*:\s*", "", value)
+        value = re.sub(r"(?i)^\s*all locations?\s*:\s*", "", value)
+        value = re.sub(r"(?i)^\s*job location\s*:\s*", "", value)
+        value = re.sub(r"(?i)^\s*office location\s*:\s*", "", value)
+
+        # Remove work arrangement words from candidate location text
+        value = re.sub(r"(?i)\bhybrid\b", " ", value)
+        value = re.sub(r"(?i)\bonsite\b", " ", value)
+        value = re.sub(r"(?i)\bremote\b", " ", value)
+        value = re.sub(r"(?i)\bhome[- ]based\b", " ", value)
+        value = re.sub(r"(?i)\bworking pattern\b", " ", value)
+        value = re.sub(r"(?i)\bworkplace type\b", " ", value)
+        value = re.sub(r"(?i)\bremote status\b", " ", value)
+
+        # Handle UK-Birmingham like forms
+        value = re.sub(r"(?i)\buk\s*-\s*([A-Za-z][A-Za-z\s\-]+)\b", r"\1, UK", value)
+        value = re.sub(r"(?i)\bunited kingdom\s*-\s*([A-Za-z][A-Za-z\s\-]+)\b", r"\1, United Kingdom", value)
+
+        # Remove junk placeholders
+        value = re.sub(r"(?i)\bunavailable\b", " ", value)
+        value = re.sub(r"(?i)\{\{[^}]+\}\}", " ", value)
+
+        # Reorder "United Kingdom, London" -> "London, United Kingdom"
+        m = re.match(r"(?i)^\s*(united kingdom|uk|england|scotland|wales|northern ireland)\s*,\s*([A-Za-z][A-Za-z\s\-]+)\s*$", value)
+        if m:
+            value = f"{m.group(2)}, {m.group(1)}"
+
         value = value.replace("|", ",")
         value = value.replace(";", ",")
-        value = re.sub(r"(?i)\bunavailable\b", " ", value)
-        value = re.sub(r"(?i)\bremote\s*-\s*", "", value)
-        value = re.sub(r"(?i)\buk\s*-\s*", "", value)
-        value = re.sub(r"(?i)\bgreat britain\b", "United Kingdom", value)
-        value = re.sub(r"(?i)\bu\.?k\.?\b", "UK", value)
         value = re.sub(r"\s*-\s*", ", ", value)
+        value = re.sub(r"\s*/\s*", ", ", value)
         value = re.sub(r"\s+", " ", value)
         value = re.sub(r"\s*,\s*", ", ", value)
+        value = re.sub(r"(,\s*){2,}", ", ", value)
         value = value.strip(" ,:-")
         return value.strip()
 
@@ -238,6 +288,8 @@ Source text:
         value = re.sub(r"(?i)\bscotland\b", " uk ", value)
         value = re.sub(r"(?i)\bwales\b", " uk ", value)
         value = re.sub(r"(?i)\bnorthern ireland\b", " uk ", value)
+        value = re.sub(r"(?i)\bhybrid\b", " ", value)
+        value = re.sub(r"(?i)\bonsite\b", " ", value)
         value = re.sub(r"(?i)\bremote\b", " ", value)
         value = re.sub(r"[^a-z0-9]+", " ", value)
         value = re.sub(r"\s+", " ", value).strip()
@@ -266,6 +318,11 @@ Source text:
             "experience",
             "department",
             "reporting to",
+            "posted today",
+            "job requisition",
+            "full time",
+            "regular",
+            "fixed term",
         ]
         if any(p in lowered for p in bad_phrases):
             return True
@@ -276,66 +333,117 @@ Source text:
 
         return False
 
-    def _normalize_location_candidate(self, value: str) -> str:
+    def _candidate_variants(self, value: str) -> list[str]:
         value = self._clean_location_candidate_text(value)
         if not value:
-            return ""
-        if value.lower() == "unknown":
-            return ""
-        if self._looks_like_bad_location_candidate(value):
-            return ""
+            return []
 
-        direct = self.location_lookup.get(value.lower())
-        if direct:
-            return direct
+        variants: list[str] = []
 
-        cand_key = self._canonical_location_key(value)
-        if not cand_key:
-            return ""
+        def add(v: str) -> None:
+            v = self._clean_location_candidate_text(v)
+            if v and v not in variants and not self._looks_like_bad_location_candidate(v):
+                variants.append(v)
 
-        for record in self.location_records:
-            if cand_key == record["key"]:
-                return record["value"]
+        add(value)
 
-        for record in self.location_records:
-            if cand_key == record["first_part_key"]:
-                return record["value"]
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+        if len(parts) >= 2:
+            # More specific to broader
+            add(", ".join(parts))
+            add(", ".join(parts[:2]))
+            add(", ".join(parts[-2:]))
+            add(parts[0])
 
-        cand_tokens = set(cand_key.split())
-        if not cand_tokens:
+            # Prefer non-country part when first part is broad
+            if self._canonical_location_key(parts[0]) in self.broad_location_keys and len(parts) >= 2:
+                add(", ".join(parts[1:]))
+
+            # Prefer region/city part before country if last part is broad
+            if self._canonical_location_key(parts[-1]) in self.broad_location_keys:
+                add(", ".join(parts[:-1]))
+                if len(parts) >= 2:
+                    add(parts[-2])
+
+        # Handle "West Midlands United Kingdom" type leftovers
+        tokens = value.split()
+        if len(tokens) >= 2:
+            add(" ".join(tokens))
+
+        return variants
+
+    def _score_location_record(self, cand_key: str, cand_tokens: set[str], record: dict[str, Any]) -> int:
+        score = 0
+
+        if cand_key == record["key"]:
+            score += 1000
+
+        if cand_key == record["first_part_key"]:
+            score += 900
+
+        if cand_key in record["part_keys"]:
+            score += 850
+
+        if record["first_part_key"] and (
+            cand_key in record["first_part_key"] or record["first_part_key"] in cand_key
+        ):
+            score += 250
+
+        overlap = len(cand_tokens & record["tokens"])
+        if overlap:
+            score += overlap * 40
+
+        if cand_tokens and cand_tokens.issubset(record["tokens"]):
+            score += 180
+
+        # Specificity bonus: prefer city/region over country-only values
+        if not record["is_broad"]:
+            score += 80 + (record["specificity"] * 10)
+        else:
+            score -= 120
+
+        if "uk" in cand_tokens and record["is_uk"]:
+            score += 15
+
+        # Penalize very broad matches when candidate is more specific
+        if len(cand_tokens) >= 2 and record["is_broad"]:
+            score -= 180
+
+        return score
+
+    def _normalize_location_candidate(self, value: str) -> str:
+        variants = self._candidate_variants(value)
+        if not variants:
             return ""
 
         best_value = ""
-        best_score = -1
+        best_score = -10**9
 
-        for record in self.location_records:
-            score = 0
+        for variant in variants:
+            direct = self.location_lookup.get(variant.lower())
+            if direct:
+                return direct
 
-            if cand_key in record["part_keys"]:
-                score += 180
+            cand_key = self._canonical_location_key(variant)
+            if not cand_key:
+                continue
 
-            if record["first_part_key"] and (
-                cand_key == record["first_part_key"]
-                or cand_key in record["first_part_key"]
-                or record["first_part_key"] in cand_key
-            ):
-                score += 140
+            cand_tokens = set(cand_key.split())
+            if not cand_tokens:
+                continue
 
-            overlap = len(cand_tokens & record["tokens"])
-            if overlap:
-                score += overlap * 20
+            for record in self.location_records:
+                score = self._score_location_record(cand_key, cand_tokens, record)
 
-            if cand_tokens and cand_tokens.issubset(record["tokens"]):
-                score += 60
+                if score > best_score or (
+                    score == best_score
+                    and score > -10**8
+                    and record["len"] < len(best_value or "z" * 999)
+                ):
+                    best_score = score
+                    best_value = record["value"]
 
-            if "uk" in cand_tokens and record["is_uk"]:
-                score += 10
-
-            if score > best_score or (score == best_score and score > 0 and record["len"] < len(best_value or "zzzzzz")):
-                best_score = score
-                best_value = record["value"]
-
-        if best_score >= 80:
+        if best_score >= 220:
             return best_value
 
         return ""
