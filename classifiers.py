@@ -272,6 +272,7 @@ Source text:
         value = re.sub(r"(?i)\btime type\b", " ", value)
 
         value = re.sub(r"(?i)\buk\s*-\s*([A-Za-z][A-Za-z\s\-]+)\b", r"\1, UK", value)
+        value = re.sub(r"(?i)\buk\s+([A-Za-z][A-Za-z\s\-]+)\b", r"\1, UK", value)
         value = re.sub(r"(?i)\bunited kingdom\s*-\s*([A-Za-z][A-Za-z\s\-]+)\b", r"\1, United Kingdom", value)
 
         value = re.sub(r"(?i)\bunavailable\b", " ", value)
@@ -367,7 +368,10 @@ Source text:
 
         if "usa" in tokens or "united states" in value_l:
             return "usa"
-        if re.search(r"(?i),\s*(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV)\s*(,|$)", value):
+        if re.search(
+            r"(?i),\s*(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV)\s*(,|$)",
+            value,
+        ):
             return "usa"
 
         return ""
@@ -412,7 +416,6 @@ Source text:
         cleaned_key = self._canonical_location_key(cleaned)
         tokens = set(cleaned_key.split())
 
-        # Broad country / region style strings should stay broad, never be forced into a city.
         broad_markers = {
             "uk", "united", "kingdom", "usa", "states",
             "england", "scotland", "wales", "ireland",
@@ -420,13 +423,21 @@ Source text:
         }
         non_broad_tokens = {t for t in tokens if t not in broad_markers}
 
+        if len(non_broad_tokens) >= 1:
+            specific_candidates = self._normalize_location_candidates([raw, cleaned])
+            specific_candidates = [
+                x for x in specific_candidates
+                if self._canonical_location_key(x) not in self.broad_location_keys
+            ]
+            if specific_candidates:
+                return ""
+
         if self._contains_home_style_marker(raw):
             return self._country_value(country_group)
 
         if not non_broad_tokens:
             return self._country_value(country_group)
 
-        # Examples like "United Kingdom Home" or "UK Remote"
         if country_group == "uk" and re.search(r"\b(united kingdom|uk)\b", raw_l):
             if len(non_broad_tokens) <= 1:
                 return self._country_value("uk")
@@ -492,10 +503,12 @@ Source text:
             cand_key == record["key"]
             or cand_key == record["first_part_key"]
             or cand_key in record["part_keys"]
-            or (record["first_part_key"] and (cand_key in record["first_part_key"] or record["first_part_key"] in cand_key))
+            or (
+                record["first_part_key"]
+                and (cand_key in record["first_part_key"] or record["first_part_key"] in cand_key)
+            )
         )
 
-        # Prevent weak fuzzy matches from turning broad UK/USA strings into random cities.
         if not strong_match and overlap == 0:
             return -10**6
 
@@ -545,22 +558,17 @@ Source text:
         return score
 
     def _normalize_location_candidate(self, value: str) -> str:
-        broad_only = self._extract_broad_location_only(value)
-        if broad_only:
-            return broad_only
-
         variants = self._candidate_variants(value)
         if not variants:
+            broad_only = self._extract_broad_location_only(value)
+            if broad_only:
+                return broad_only
             return ""
 
         best_value = ""
         best_score = -10**9
 
         for variant in variants:
-            broad_variant = self._extract_broad_location_only(variant)
-            if broad_variant:
-                return broad_variant
-
             direct = self.location_lookup.get(variant.lower())
             if direct:
                 return direct
@@ -589,7 +597,10 @@ Source text:
         if best_score >= 220:
             return best_value
 
-        # Safe fallback for weak broad-country strings.
+        broad_only = self._extract_broad_location_only(value)
+        if broad_only:
+            return broad_only
+
         fallback_country_group = self._detect_country_group_from_text(value)
         if fallback_country_group:
             return self._country_value(fallback_country_group)
@@ -680,20 +691,10 @@ Source text:
         candidates: list[str] = []
 
         for snippet in snippets:
-            broad_only = self._extract_broad_location_only(snippet)
-            if broad_only:
-                candidates.append(broad_only)
-                continue
-
             raw_parts = re.split(r"\s*\|\s*|\s*;\s*|\s+or\s+|\n", snippet)
             for raw_part in raw_parts:
                 part = raw_part.strip()
                 if not part:
-                    continue
-
-                broad_part = self._extract_broad_location_only(part)
-                if broad_part:
-                    candidates.append(broad_part)
                     continue
 
                 comma_parts = [x.strip() for x in re.split(r"\s*,\s*", part) if x.strip()]
