@@ -339,25 +339,19 @@ Source text:
         return False
 
     def _detect_country_group_from_text(self, value: str) -> str:
+        value_l = (value or "").lower()
         key = self._canonical_location_key(value)
         tokens = set(key.split())
 
-        uk_markers = {"uk", "united", "kingdom", "england", "scotland", "wales", "northern", "ireland"}
-        usa_markers = {"usa", "united", "states", "al", "mi", "ca"}
-
-        # Strong UK indicators
-        if "uk" in tokens:
+        # UK signals
+        if "uk" in tokens or "united kingdom" in value_l:
             return "uk"
-        if "england" in value.lower() or "scotland" in value.lower() or "wales" in value.lower() or "northern ireland" in value.lower():
-            return "uk"
-        if "united kingdom" in value.lower():
+        if "england" in value_l or "scotland" in value_l or "wales" in value_l or "northern ireland" in value_l:
             return "uk"
 
-        # Strong USA indicators
-        if "usa" in tokens or "united states" in value.lower():
+        # USA signals
+        if "usa" in tokens or "united states" in value_l:
             return "usa"
-
-        # State abbreviations only matter if we already have a city/state-like comma structure
         if re.search(r"(?i),\s*(AL|MI|CA)\s*(,|$)", value):
             return "usa"
 
@@ -398,11 +392,19 @@ Source text:
 
         return variants
 
+    def _effective_country_group(self, candidate_country_group: str) -> str:
+        # User rule:
+        # - if UK is present -> UK
+        # - if USA is present -> USA
+        # - if nothing is present -> prioritize UK
+        return candidate_country_group or "uk"
+
     def _score_location_record(self, cand_key: str, cand_tokens: set[str], record: dict[str, Any], candidate_country_group: str) -> int:
+        effective_country_group = self._effective_country_group(candidate_country_group)
+
         # Hard country filter first
-        if candidate_country_group:
-            if record["country_group"] and record["country_group"] != candidate_country_group:
-                return -10**6
+        if record["country_group"] and record["country_group"] != effective_country_group:
+            return -10**6
 
         score = 0
 
@@ -432,24 +434,20 @@ Source text:
         else:
             score -= 120
 
-        if candidate_country_group == "uk" and record["country_group"] == "uk":
-            score += 80
+        if effective_country_group == "uk" and record["country_group"] == "uk":
+            score += 120
 
-        if candidate_country_group == "usa" and record["country_group"] == "usa":
-            score += 80
+        if effective_country_group == "usa" and record["country_group"] == "usa":
+            score += 120
 
-        # Prefer clean city-level entry when candidate looks like city + country
-        candidate_is_city_country = (
-            len(cand_tokens) >= 2 and
-            candidate_country_group in {"uk", "usa"}
-        )
-        if candidate_is_city_country:
+        # Prefer clean city-level entry when candidate looks like city + country or city-only
+        candidate_is_city_like = len(cand_tokens) >= 1
+        if candidate_is_city_like:
             if record["is_city_level"]:
                 score += 160
             elif record["specificity"] > 2:
                 score -= 90
 
-        # Penalize broad matches when candidate is more specific
         if len(cand_tokens) >= 2 and record["is_broad"]:
             score -= 180
 
