@@ -188,7 +188,7 @@ Extract exactly these three fields:
 Rules for job_location:
 1. Read the text carefully and find the ACTUAL job location.
 2. Prefer explicit location fields such as:
-   "Location", "Locations", "All Locations", "Job Location", "Office Location", "Based in".
+   "Location", "Locations", "All Locations", "Job Location", "Office Location", "Office Locations", "Based in".
 3. Ignore unrelated text such as:
    benefits, DEI text, company office lists, slogans, skills, tools, generic company text, headings, random short lines.
 4. If multiple locations appear, choose the most specific real job location for the role.
@@ -209,12 +209,15 @@ Rules for remote_preferences:
 Rules for remote_days:
 1. Return a string.
 2. If not specified, return "not specified"
-3. If the text says 1 day in office, return "4"
-4. If it says 2 days in office, return "3"
-5. If it says 1-2 days in office, return "3"
-6. If it says 2-3 days in office, return "2"
-7. If it says fully remote, return "not specified"
-8. Only return a number when clearly supported.
+3. Only use remote-days logic when there is explicit work-pattern evidence such as:
+   "days in office", "office days", "x days per week in the office", "hybrid working", "work from home x days"
+4. If the text says 1 day in office, return "4"
+5. If it says 2 days in office, return "3"
+6. If it says 1-2 days in office, return "3"
+7. If it says 2-3 days in office, return "2"
+8. If it says fully remote, return "not specified"
+9. Never use salary numbers, compensation numbers, quota numbers, team size numbers, or generic numbers.
+10. Only return a number when clearly supported by work-pattern wording.
 
 Output:
 Return ONLY valid JSON in exactly this format:
@@ -252,6 +255,9 @@ Source text:
         value = re.sub(r"(?i)^\s*all locations?\s*:\s*", "", value)
         value = re.sub(r"(?i)^\s*job location\s*:\s*", "", value)
         value = re.sub(r"(?i)^\s*office location\s*:\s*", "", value)
+        value = re.sub(r"(?i)^\s*office locations\s*:\s*", "", value)
+        value = re.sub(r"(?i)^\s*based in\s*:\s*", "", value)
+        value = re.sub(r"(?i)^\s*based in\s+", "", value)
 
         value = re.sub(r"(?i)\bhybrid\b", " ", value)
         value = re.sub(r"(?i)\bonsite\b", " ", value)
@@ -267,7 +273,10 @@ Source text:
         value = re.sub(r"(?i)\bunavailable\b", " ", value)
         value = re.sub(r"(?i)\{\{[^}]+\}\}", " ", value)
 
-        m = re.match(r"(?i)^\s*(united kingdom|uk|england|scotland|wales|northern ireland)\s*,\s*([A-Za-z][A-Za-z\s\-]+)\s*$", value)
+        m = re.match(
+            r"(?i)^\s*(united kingdom|uk|england|scotland|wales|northern ireland)\s*,\s*([A-Za-z][A-Za-z\s\-]+)\s*$",
+            value,
+        )
         if m:
             value = f"{m.group(2)}, {m.group(1)}"
 
@@ -343,16 +352,14 @@ Source text:
         key = self._canonical_location_key(value)
         tokens = set(key.split())
 
-        # UK signals
         if "uk" in tokens or "united kingdom" in value_l:
             return "uk"
         if "england" in value_l or "scotland" in value_l or "wales" in value_l or "northern ireland" in value_l:
             return "uk"
 
-        # USA signals
         if "usa" in tokens or "united states" in value_l:
             return "usa"
-        if re.search(r"(?i),\s*(AL|MI|CA)\s*(,|$)", value):
+        if re.search(r"(?i),\s*(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV)\s*(,|$)", value):
             return "usa"
 
         return ""
@@ -393,16 +400,17 @@ Source text:
         return variants
 
     def _effective_country_group(self, candidate_country_group: str) -> str:
-        # User rule:
-        # - if UK is present -> UK
-        # - if USA is present -> USA
-        # - if nothing is present -> prioritize UK
         return candidate_country_group or "uk"
 
-    def _score_location_record(self, cand_key: str, cand_tokens: set[str], record: dict[str, Any], candidate_country_group: str) -> int:
+    def _score_location_record(
+        self,
+        cand_key: str,
+        cand_tokens: set[str],
+        record: dict[str, Any],
+        candidate_country_group: str,
+    ) -> int:
         effective_country_group = self._effective_country_group(candidate_country_group)
 
-        # Hard country filter first
         if record["country_group"] and record["country_group"] != effective_country_group:
             return -10**6
 
@@ -440,7 +448,6 @@ Source text:
         if effective_country_group == "usa" and record["country_group"] == "usa":
             score += 120
 
-        # Prefer clean city-level entry when candidate looks like city + country or city-only
         candidate_is_city_like = len(cand_tokens) >= 1
         if candidate_is_city_like:
             if record["is_city_level"]:
@@ -537,6 +544,168 @@ Source text:
             return value
         return "not specified"
 
+    @staticmethod
+    def _extract_explicit_location_snippets(text: str) -> list[str]:
+        text = clean_description(text)
+        if not text:
+            return []
+
+        snippets: list[str] = []
+
+        patterns = [
+            r"(?im)^\s*office locations?\s*:\s*(.+)$",
+            r"(?im)^\s*office location\s*:\s*(.+)$",
+            r"(?im)^\s*all locations?\s*:\s*(.+)$",
+            r"(?im)^\s*job locations?\s*:\s*(.+)$",
+            r"(?im)^\s*job location\s*:\s*(.+)$",
+            r"(?im)^\s*locations?\s*:\s*(.+)$",
+            r"(?im)^\s*based in\s*:\s*(.+)$",
+            r"(?im)^\s*based in\s+(.+)$",
+        ]
+
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                value = (match.group(1) or "").strip()
+                if not value:
+                    continue
+                value = re.split(
+                    r"(?i)\b(workplace type|work type|working pattern|remote status|salary|job type|employment type|team|department)\b",
+                    value,
+                    maxsplit=1,
+                )[0].strip(" |,-:")
+                if value:
+                    snippets.append(value)
+
+        return snippets
+
+    def _extract_explicit_location_candidates(self, text: str) -> list[str]:
+        snippets = self._extract_explicit_location_snippets(text)
+        candidates: list[str] = []
+
+        for snippet in snippets:
+            raw_parts = re.split(r"\s*\|\s*|\s*;\s*|\s+or\s+|\s+\band\b\s+|\n", snippet)
+            for raw_part in raw_parts:
+                part = raw_part.strip()
+                if not part:
+                    continue
+
+                comma_parts = [x.strip() for x in re.split(r"\s*,\s*", part) if x.strip()]
+                if len(comma_parts) >= 3:
+                    candidates.append(", ".join(comma_parts[:2]))
+                candidates.append(part)
+
+        normalized = self._normalize_location_candidates(candidates)
+
+        direct_country_mentions = []
+        for snippet in snippets:
+            snippet_l = snippet.lower()
+            if re.search(r"\b(uk|united kingdom|england|scotland|wales|northern ireland)\b", snippet_l):
+                if "UK" in self.location_lookup.values():
+                    direct_country_mentions.append("UK")
+                else:
+                    direct_country_mentions.append("United Kingdom")
+            if re.search(r"\b(usa|united states)\b", snippet_l):
+                if "USA" in self.location_lookup.values():
+                    direct_country_mentions.append("USA")
+                else:
+                    direct_country_mentions.append("United States")
+
+        out: list[str] = []
+        for x in normalized + direct_country_mentions:
+            if x and x not in out:
+                out.append(x)
+        return out
+
+    def _choose_best_explicit_location(self, candidates: list[str]) -> str:
+        if not candidates:
+            return ""
+
+        def score(loc: str) -> tuple[int, int]:
+            loc_key = self._canonical_location_key(loc)
+            is_broad = loc_key in self.broad_location_keys
+            is_uk = self._detect_country_group_from_text(loc) == "uk"
+            is_usa = self._detect_country_group_from_text(loc) == "usa"
+
+            rank = 0
+            if not is_broad:
+                rank += 100
+            if is_uk:
+                rank += 20
+            if is_usa:
+                rank += 10
+
+            return (rank, len(loc))
+
+        return sorted(candidates, key=score, reverse=True)[0]
+
+    @staticmethod
+    def _has_remote_days_evidence(text: str) -> bool:
+        text = clean_description(text).lower()
+        if not text:
+            return False
+
+        evidence_patterns = [
+            r"\b\d+\s*-\s*\d+\s*days?\s+(?:a|per)?\s*week\s+in\s+the\s+office\b",
+            r"\b\d+\s*-\s*\d+\s*days?\s+in\s+the\s+office\b",
+            r"\b\d+\s*days?\s+(?:a|per)?\s*week\s+in\s+the\s+office\b",
+            r"\b\d+\s*days?\s+in\s+the\s+office\b",
+            r"\bin\s+office\s+\d+\s*-\s*\d+\s*days?\b",
+            r"\bin\s+office\s+\d+\s*days?\b",
+            r"\boffice\s+attendance\s+of\s+\d+\s*-\s*\d+\s*days?\b",
+            r"\boffice\s+attendance\s+of\s+\d+\s*days?\b",
+            r"\bhybrid\b.{0,60}\b\d+\s*-\s*\d+\s*days?\b",
+            r"\bhybrid\b.{0,60}\b\d+\s*days?\b",
+            r"\bwork\s+from\s+home\b.{0,60}\b\d+\s*days?\b",
+            r"\b\d+\s*-\s*\d+\s*days?\s+from\s+home\b",
+            r"\b\d+\s*days?\s+from\s+home\b",
+        ]
+
+        return any(re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL) for pattern in evidence_patterns)
+
+    @staticmethod
+    def _looks_like_salary_or_comp_number_context(text: str) -> bool:
+        text = clean_description(text).lower()
+        if not text:
+            return False
+
+        bad_patterns = [
+            r"£\s*\d",
+            r"\$\s*\d",
+            r"€\s*\d",
+            r"\bgbp\b",
+            r"\busd\b",
+            r"\beur\b",
+            r"\bsalary\b",
+            r"\bote\b",
+            r"\bcommission\b",
+            r"\bbonus\b",
+            r"\bcompensation\b",
+            r"\bquota\b",
+            r"\bon-target earnings\b",
+        ]
+        return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in bad_patterns)
+
+    def _safe_remote_days_from_text(self, text: str) -> str:
+        text = clean_description(text)
+        if not text:
+            return "not specified"
+
+        text_l = text.lower()
+
+        if re.search(r"\bfully remote\b|\bremote-first\b|\b100%\s*remote\b", text_l):
+            return "not specified"
+
+        if not self._has_remote_days_evidence(text):
+            return "not specified"
+
+        value = extract_remote_days(text)
+        value = str(value or "").strip().lower()
+
+        if re.fullmatch(r"[0-5]", value):
+            return value
+
+        return "not specified"
+
     def _extract_location_remote_with_ai(
         self,
         position_name: str,
@@ -559,10 +728,17 @@ Source text:
         raw = self._call_model(prompt)
         data = self._extract_json_object(raw)
 
+        ai_location = self._normalize_model_location(data.get("job_location", ""))
+        ai_remote_preferences = self._normalize_model_remote_preferences(data.get("remote_preferences", []))
+        ai_remote_days = self._normalize_model_remote_days(data.get("remote_days", "not specified"))
+
+        if ai_remote_days != "not specified" and not self._has_remote_days_evidence(text):
+            ai_remote_days = "not specified"
+
         return {
-            "job_location": self._normalize_model_location(data.get("job_location", "")),
-            "remote_preferences_list": self._normalize_model_remote_preferences(data.get("remote_preferences", [])),
-            "remote_days": self._normalize_model_remote_days(data.get("remote_days", "not specified")),
+            "job_location": ai_location,
+            "remote_preferences_list": ai_remote_preferences,
+            "remote_days": ai_remote_days,
         }
 
     def _extract_location_remote_from_description_or_url(
@@ -572,6 +748,9 @@ Source text:
         job_url: str,
     ) -> dict[str, Any]:
         desc = clean_description(description)
+
+        desc_explicit_location_candidates = self._extract_explicit_location_candidates(desc)
+        desc_explicit_location = self._choose_best_explicit_location(desc_explicit_location_candidates)
 
         desc_ai = self._extract_location_remote_with_ai(
             position_name=position_name,
@@ -583,10 +762,14 @@ Source text:
         desc_rule_location_candidates = self._normalize_location_candidates(desc_rule_location_candidates_raw)
         desc_rule_job_location = select_best_location(desc_rule_location_candidates)
         desc_rule_remote_preferences = extract_remote_preferences(desc)
-        desc_rule_remote_days = extract_remote_days(desc)
+        desc_rule_remote_days = self._safe_remote_days_from_text(desc)
 
-        desc_job_location = desc_ai["job_location"] or desc_rule_job_location
-        desc_location_candidates = [desc_job_location] if desc_job_location else desc_rule_location_candidates[:]
+        desc_job_location = desc_explicit_location or desc_ai["job_location"] or desc_rule_job_location
+        desc_location_candidates = (
+            [desc_explicit_location]
+            if desc_explicit_location
+            else ([desc_job_location] if desc_job_location else desc_rule_location_candidates[:])
+        )
 
         desc_remote_preferences_list = (
             desc_ai["remote_preferences_list"] if desc_ai["remote_preferences_list"] else desc_rule_remote_preferences
@@ -623,6 +806,9 @@ Source text:
             if fetched.ok and fetched.text:
                 page_text = clean_description(fetched.text)
 
+                page_explicit_location_candidates = self._extract_explicit_location_candidates(page_text)
+                page_explicit_location = self._choose_best_explicit_location(page_explicit_location_candidates)
+
                 page_ai = self._extract_location_remote_with_ai(
                     position_name=position_name,
                     text=page_text,
@@ -633,10 +819,14 @@ Source text:
                 page_rule_location_candidates = self._normalize_location_candidates(page_rule_location_candidates_raw)
                 page_rule_job_location = select_best_location(page_rule_location_candidates)
                 page_rule_remote_preferences = extract_remote_preferences(page_text)
-                page_rule_remote_days = extract_remote_days(page_text)
+                page_rule_remote_days = self._safe_remote_days_from_text(page_text)
 
-                page_job_location = page_ai["job_location"] or page_rule_job_location
-                page_location_candidates = [page_job_location] if page_job_location else page_rule_location_candidates[:]
+                page_job_location = page_explicit_location or page_ai["job_location"] or page_rule_job_location
+                page_location_candidates = (
+                    [page_explicit_location]
+                    if page_explicit_location
+                    else ([page_job_location] if page_job_location else page_rule_location_candidates[:])
+                )
 
                 page_remote_preferences = (
                     page_ai["remote_preferences_list"]
@@ -650,7 +840,7 @@ Source text:
                     else page_rule_remote_days
                 )
 
-                if not job_location and page_job_location:
+                if (not job_location or job_location in {"UK", "United Kingdom", "USA", "United States"}) and page_job_location:
                     job_location = page_job_location
                     location_candidates = page_location_candidates[:]
                     notes.append("location via link")
