@@ -192,14 +192,15 @@ Rules for job_location:
 3. Ignore unrelated text such as:
    benefits, DEI text, company office lists, slogans, skills, tools, generic company text, headings, random short lines.
 4. If multiple locations appear, choose the most specific real job location for the role.
-5. Normalize the result to EXACTLY one value from the acceptable locations list below.
-6. If no acceptable location can be identified, return "Unknown".
+5. If a field says things like "United Kingdom Home", "UK Home", "Home Based", or "Remote, UK", treat that as broad UK location, not a city.
+6. Normalize the result to EXACTLY one value from the acceptable locations list below.
+7. If no acceptable location can be identified, return "Unknown".
 
 Rules for remote_preferences:
 1. Allowed values are only: onsite, hybrid, remote
 2. Return an array.
 3. Prefer explicit labels like:
-   "Workplace type", "Remote status", "Working pattern", "Work type"
+   "Workplace type", "Remote status", "Working pattern", "Work type", "remote type"
 4. If text says hybrid, return ["hybrid"]
 5. If text says onsite, return ["onsite"]
 6. If text says fully remote / remote-first / home-based, return ["remote"]
@@ -263,9 +264,12 @@ Source text:
         value = re.sub(r"(?i)\bonsite\b", " ", value)
         value = re.sub(r"(?i)\bremote\b", " ", value)
         value = re.sub(r"(?i)\bhome[- ]based\b", " ", value)
+        value = re.sub(r"(?i)\bhome based\b", " ", value)
         value = re.sub(r"(?i)\bworking pattern\b", " ", value)
         value = re.sub(r"(?i)\bworkplace type\b", " ", value)
         value = re.sub(r"(?i)\bremote status\b", " ", value)
+        value = re.sub(r"(?i)\bremote type\b", " ", value)
+        value = re.sub(r"(?i)\btime type\b", " ", value)
 
         value = re.sub(r"(?i)\buk\s*-\s*([A-Za-z][A-Za-z\s\-]+)\b", r"\1, UK", value)
         value = re.sub(r"(?i)\bunited kingdom\s*-\s*([A-Za-z][A-Za-z\s\-]+)\b", r"\1, United Kingdom", value)
@@ -305,6 +309,10 @@ Source text:
         value = re.sub(r"(?i)\bhybrid\b", " ", value)
         value = re.sub(r"(?i)\bonsite\b", " ", value)
         value = re.sub(r"(?i)\bremote\b", " ", value)
+        value = re.sub(r"(?i)\bhome[- ]based\b", " ", value)
+        value = re.sub(r"(?i)\bhome based\b", " ", value)
+        value = re.sub(r"(?i)\bhome\b", " ", value)
+        value = re.sub(r"(?i)\bbased\b", " ", value)
         value = re.sub(r"[^a-z0-9]+", " ", value)
         value = re.sub(r"\s+", " ", value).strip()
         return value
@@ -364,6 +372,71 @@ Source text:
 
         return ""
 
+    def _country_value(self, group: str) -> str:
+        if group == "uk":
+            for candidate in ["UK", "United Kingdom"]:
+                if candidate.lower() in self.location_lookup:
+                    return self.location_lookup[candidate.lower()]
+            return "UK"
+
+        if group == "usa":
+            for candidate in ["USA", "United States"]:
+                if candidate.lower() in self.location_lookup:
+                    return self.location_lookup[candidate.lower()]
+            return "USA"
+
+        return ""
+
+    @staticmethod
+    def _contains_home_style_marker(value: str) -> bool:
+        value_l = (value or "").lower()
+        return bool(
+            re.search(
+                r"\b(home|home based|home-based|remote|remote-first|work from home|wfh)\b",
+                value_l,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _extract_broad_location_only(self, value: str) -> str:
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+
+        raw_l = raw.lower()
+        country_group = self._detect_country_group_from_text(raw)
+        if not country_group:
+            return ""
+
+        cleaned = self._clean_location_candidate_text(raw)
+        cleaned_key = self._canonical_location_key(cleaned)
+        tokens = set(cleaned_key.split())
+
+        # Broad country / region style strings should stay broad, never be forced into a city.
+        broad_markers = {
+            "uk", "united", "kingdom", "usa", "states",
+            "england", "scotland", "wales", "ireland",
+            "home", "based", "remote"
+        }
+        non_broad_tokens = {t for t in tokens if t not in broad_markers}
+
+        if self._contains_home_style_marker(raw):
+            return self._country_value(country_group)
+
+        if not non_broad_tokens:
+            return self._country_value(country_group)
+
+        # Examples like "United Kingdom Home" or "UK Remote"
+        if country_group == "uk" and re.search(r"\b(united kingdom|uk)\b", raw_l):
+            if len(non_broad_tokens) <= 1:
+                return self._country_value("uk")
+
+        if country_group == "usa" and re.search(r"\b(united states|usa)\b", raw_l):
+            if len(non_broad_tokens) <= 1:
+                return self._country_value("usa")
+
+        return ""
+
     def _candidate_variants(self, value: str) -> list[str]:
         value = self._clean_location_candidate_text(value)
         if not value:
@@ -414,6 +487,18 @@ Source text:
         if record["country_group"] and record["country_group"] != effective_country_group:
             return -10**6
 
+        overlap = len(cand_tokens & record["tokens"])
+        strong_match = (
+            cand_key == record["key"]
+            or cand_key == record["first_part_key"]
+            or cand_key in record["part_keys"]
+            or (record["first_part_key"] and (cand_key in record["first_part_key"] or record["first_part_key"] in cand_key))
+        )
+
+        # Prevent weak fuzzy matches from turning broad UK/USA strings into random cities.
+        if not strong_match and overlap == 0:
+            return -10**6
+
         score = 0
 
         if cand_key == record["key"]:
@@ -430,7 +515,6 @@ Source text:
         ):
             score += 250
 
-        overlap = len(cand_tokens & record["tokens"])
         if overlap:
             score += overlap * 40
 
@@ -461,6 +545,10 @@ Source text:
         return score
 
     def _normalize_location_candidate(self, value: str) -> str:
+        broad_only = self._extract_broad_location_only(value)
+        if broad_only:
+            return broad_only
+
         variants = self._candidate_variants(value)
         if not variants:
             return ""
@@ -469,6 +557,10 @@ Source text:
         best_score = -10**9
 
         for variant in variants:
+            broad_variant = self._extract_broad_location_only(variant)
+            if broad_variant:
+                return broad_variant
+
             direct = self.location_lookup.get(variant.lower())
             if direct:
                 return direct
@@ -496,6 +588,11 @@ Source text:
 
         if best_score >= 220:
             return best_value
+
+        # Safe fallback for weak broad-country strings.
+        fallback_country_group = self._detect_country_group_from_text(value)
+        if fallback_country_group:
+            return self._country_value(fallback_country_group)
 
         return ""
 
@@ -569,7 +666,7 @@ Source text:
                 if not value:
                     continue
                 value = re.split(
-                    r"(?i)\b(workplace type|work type|working pattern|remote status|salary|job type|employment type|team|department)\b",
+                    r"(?i)\b(workplace type|work type|working pattern|remote status|remote type|salary|job type|employment type|team|department|time type|posted on)\b",
                     value,
                     maxsplit=1,
                 )[0].strip(" |,-:")
@@ -583,10 +680,20 @@ Source text:
         candidates: list[str] = []
 
         for snippet in snippets:
-            raw_parts = re.split(r"\s*\|\s*|\s*;\s*|\s+or\s+|\s+\band\b\s+|\n", snippet)
+            broad_only = self._extract_broad_location_only(snippet)
+            if broad_only:
+                candidates.append(broad_only)
+                continue
+
+            raw_parts = re.split(r"\s*\|\s*|\s*;\s*|\s+or\s+|\n", snippet)
             for raw_part in raw_parts:
                 part = raw_part.strip()
                 if not part:
+                    continue
+
+                broad_part = self._extract_broad_location_only(part)
+                if broad_part:
+                    candidates.append(broad_part)
                     continue
 
                 comma_parts = [x.strip() for x in re.split(r"\s*,\s*", part) if x.strip()]
@@ -596,22 +703,8 @@ Source text:
 
         normalized = self._normalize_location_candidates(candidates)
 
-        direct_country_mentions = []
-        for snippet in snippets:
-            snippet_l = snippet.lower()
-            if re.search(r"\b(uk|united kingdom|england|scotland|wales|northern ireland)\b", snippet_l):
-                if "UK" in self.location_lookup.values():
-                    direct_country_mentions.append("UK")
-                else:
-                    direct_country_mentions.append("United Kingdom")
-            if re.search(r"\b(usa|united states)\b", snippet_l):
-                if "USA" in self.location_lookup.values():
-                    direct_country_mentions.append("USA")
-                else:
-                    direct_country_mentions.append("United States")
-
         out: list[str] = []
-        for x in normalized + direct_country_mentions:
+        for x in normalized:
             if x and x not in out:
                 out.append(x)
         return out
@@ -661,29 +754,6 @@ Source text:
         ]
 
         return any(re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL) for pattern in evidence_patterns)
-
-    @staticmethod
-    def _looks_like_salary_or_comp_number_context(text: str) -> bool:
-        text = clean_description(text).lower()
-        if not text:
-            return False
-
-        bad_patterns = [
-            r"£\s*\d",
-            r"\$\s*\d",
-            r"€\s*\d",
-            r"\bgbp\b",
-            r"\busd\b",
-            r"\beur\b",
-            r"\bsalary\b",
-            r"\bote\b",
-            r"\bcommission\b",
-            r"\bbonus\b",
-            r"\bcompensation\b",
-            r"\bquota\b",
-            r"\bon-target earnings\b",
-        ]
-        return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in bad_patterns)
 
     def _safe_remote_days_from_text(self, text: str) -> str:
         text = clean_description(text)
