@@ -75,6 +75,8 @@ class JobClassifier:
             "emea",
             "global",
             "worldwide",
+            "usa",
+            "united states",
         }
 
     @staticmethod
@@ -98,6 +100,14 @@ class JobClassifier:
             key = self._canonical_location_key(loc)
             first_part_key = self._canonical_location_key(first_part)
             part_keys = {self._canonical_location_key(p) for p in parts if p.strip()}
+
+            country_group = self._detect_country_group_from_text(loc)
+            is_broad = first_part_key in {
+                "united kingdom", "uk", "england", "scotland", "wales",
+                "northern ireland", "ireland", "europe", "emea",
+                "usa", "united states"
+            }
+
             records.append(
                 {
                     "value": loc,
@@ -106,13 +116,13 @@ class JobClassifier:
                     "part_keys": part_keys,
                     "first_part_key": first_part_key,
                     "tokens": set(key.split()),
-                    "is_uk": "uk" in key or "united kingdom" in key,
+                    "country_group": country_group,
+                    "is_uk": country_group == "uk",
+                    "is_usa": country_group == "usa",
                     "len": len(loc),
                     "specificity": max(len(parts), 1),
-                    "is_broad": first_part_key in {
-                        "united kingdom", "uk", "england", "scotland", "wales",
-                        "northern ireland", "ireland", "europe", "emea"
-                    },
+                    "is_broad": is_broad,
+                    "is_city_level": len(parts) == 2 and not is_broad,
                 }
             )
         return records
@@ -238,13 +248,11 @@ Source text:
         value = value.replace("／", "/")
         value = value.replace("&amp;", "&")
 
-        # Common ATS/location formatting cleanup
         value = re.sub(r"(?i)^\s*locations?\s*:\s*", "", value)
         value = re.sub(r"(?i)^\s*all locations?\s*:\s*", "", value)
         value = re.sub(r"(?i)^\s*job location\s*:\s*", "", value)
         value = re.sub(r"(?i)^\s*office location\s*:\s*", "", value)
 
-        # Remove work arrangement words from candidate location text
         value = re.sub(r"(?i)\bhybrid\b", " ", value)
         value = re.sub(r"(?i)\bonsite\b", " ", value)
         value = re.sub(r"(?i)\bremote\b", " ", value)
@@ -253,15 +261,12 @@ Source text:
         value = re.sub(r"(?i)\bworkplace type\b", " ", value)
         value = re.sub(r"(?i)\bremote status\b", " ", value)
 
-        # Handle UK-Birmingham like forms
         value = re.sub(r"(?i)\buk\s*-\s*([A-Za-z][A-Za-z\s\-]+)\b", r"\1, UK", value)
         value = re.sub(r"(?i)\bunited kingdom\s*-\s*([A-Za-z][A-Za-z\s\-]+)\b", r"\1, United Kingdom", value)
 
-        # Remove junk placeholders
         value = re.sub(r"(?i)\bunavailable\b", " ", value)
         value = re.sub(r"(?i)\{\{[^}]+\}\}", " ", value)
 
-        # Reorder "United Kingdom, London" -> "London, United Kingdom"
         m = re.match(r"(?i)^\s*(united kingdom|uk|england|scotland|wales|northern ireland)\s*,\s*([A-Za-z][A-Za-z\s\-]+)\s*$", value)
         if m:
             value = f"{m.group(2)}, {m.group(1)}"
@@ -333,6 +338,31 @@ Source text:
 
         return False
 
+    def _detect_country_group_from_text(self, value: str) -> str:
+        key = self._canonical_location_key(value)
+        tokens = set(key.split())
+
+        uk_markers = {"uk", "united", "kingdom", "england", "scotland", "wales", "northern", "ireland"}
+        usa_markers = {"usa", "united", "states", "al", "mi", "ca"}
+
+        # Strong UK indicators
+        if "uk" in tokens:
+            return "uk"
+        if "england" in value.lower() or "scotland" in value.lower() or "wales" in value.lower() or "northern ireland" in value.lower():
+            return "uk"
+        if "united kingdom" in value.lower():
+            return "uk"
+
+        # Strong USA indicators
+        if "usa" in tokens or "united states" in value.lower():
+            return "usa"
+
+        # State abbreviations only matter if we already have a city/state-like comma structure
+        if re.search(r"(?i),\s*(AL|MI|CA)\s*(,|$)", value):
+            return "usa"
+
+        return ""
+
     def _candidate_variants(self, value: str) -> list[str]:
         value = self._clean_location_candidate_text(value)
         if not value:
@@ -349,30 +379,31 @@ Source text:
 
         parts = [p.strip() for p in value.split(",") if p.strip()]
         if len(parts) >= 2:
-            # More specific to broader
             add(", ".join(parts))
             add(", ".join(parts[:2]))
             add(", ".join(parts[-2:]))
             add(parts[0])
 
-            # Prefer non-country part when first part is broad
             if self._canonical_location_key(parts[0]) in self.broad_location_keys and len(parts) >= 2:
                 add(", ".join(parts[1:]))
 
-            # Prefer region/city part before country if last part is broad
             if self._canonical_location_key(parts[-1]) in self.broad_location_keys:
                 add(", ".join(parts[:-1]))
                 if len(parts) >= 2:
                     add(parts[-2])
 
-        # Handle "West Midlands United Kingdom" type leftovers
         tokens = value.split()
         if len(tokens) >= 2:
             add(" ".join(tokens))
 
         return variants
 
-    def _score_location_record(self, cand_key: str, cand_tokens: set[str], record: dict[str, Any]) -> int:
+    def _score_location_record(self, cand_key: str, cand_tokens: set[str], record: dict[str, Any], candidate_country_group: str) -> int:
+        # Hard country filter first
+        if candidate_country_group:
+            if record["country_group"] and record["country_group"] != candidate_country_group:
+                return -10**6
+
         score = 0
 
         if cand_key == record["key"]:
@@ -396,16 +427,29 @@ Source text:
         if cand_tokens and cand_tokens.issubset(record["tokens"]):
             score += 180
 
-        # Specificity bonus: prefer city/region over country-only values
         if not record["is_broad"]:
             score += 80 + (record["specificity"] * 10)
         else:
             score -= 120
 
-        if "uk" in cand_tokens and record["is_uk"]:
-            score += 15
+        if candidate_country_group == "uk" and record["country_group"] == "uk":
+            score += 80
 
-        # Penalize very broad matches when candidate is more specific
+        if candidate_country_group == "usa" and record["country_group"] == "usa":
+            score += 80
+
+        # Prefer clean city-level entry when candidate looks like city + country
+        candidate_is_city_country = (
+            len(cand_tokens) >= 2 and
+            candidate_country_group in {"uk", "usa"}
+        )
+        if candidate_is_city_country:
+            if record["is_city_level"]:
+                score += 160
+            elif record["specificity"] > 2:
+                score -= 90
+
+        # Penalize broad matches when candidate is more specific
         if len(cand_tokens) >= 2 and record["is_broad"]:
             score -= 180
 
@@ -432,8 +476,10 @@ Source text:
             if not cand_tokens:
                 continue
 
+            candidate_country_group = self._detect_country_group_from_text(variant)
+
             for record in self.location_records:
-                score = self._score_location_record(cand_key, cand_tokens, record)
+                score = self._score_location_record(cand_key, cand_tokens, record, candidate_country_group)
 
                 if score > best_score or (
                     score == best_score
