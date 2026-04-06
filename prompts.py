@@ -15,9 +15,27 @@ def build_role_relevance_prompt(position_name: str, job_description: str, predef
     Relevant roles match any in this list or close synonyms/specializations. Use the predefined list as the main source of truth:
     {titles_str}
 
+    Also treat these as relevant business-scope roles when they are genuine business/corporate jobs:
+    - finance
+    - accounting
+    - FP&A
+    - treasury
+    - audit
+    - tax
+    - investment
+    - private equity
+    - asset management
+    - acquisitions
+    - analyst / business analyst / commercial analyst / finance analyst
+    - operations / change / transformation / program style roles
+
     If the role is clearly outside tech or business functions (for example teacher, nurse, waiter), mark Not Relevant, even if some criteria partially match.
 
-    Exclude any roles related to construction, civil engineering, retail, electrical, mechanical, manufacturing, microbiology, maritime, injection molding, and beauty brands.
+    Exclude any roles related to construction, civil engineering, retail sales/store/shop/showroom sales, electrical, mechanical, manufacturing, factory/plant/shop-floor work, microbiology, maritime, injection molding, and beauty brands.
+
+    Retail sales rule:
+    Sales jobs are allowed only when they are business/corporate sales roles.
+    If the role is clearly retail/in-store/store/showroom/branch/customer-floor sales, mark Not Relevant.
 
     Technical support / infrastructure rule:
     Technical roles such as Support Engineer, Technical Support Engineer, 2nd Line Engineer, 3rd Line Support Engineer, IT Support, Infrastructure Engineer, Systems Engineer and similar technical support / infrastructure / escalation roles should be treated as relevant target roles when the work is technical.
@@ -123,8 +141,11 @@ def build_job_titles_prompt(position_name: str, job_description: str, predefined
 
     Important:
     - Prefer the most precise business/technical title.
+    - It is better to output one or two sensible titles than three noisy or weak titles.
+    - For high-seniority roles such as Head of, Director, Technical Director, or Engineering Manager, avoid adding unrelated extra titles.
     - For recruiter / recruitment consultant / talent roles, prefer the closest talent acquisition / recruiter style title from the predefined list.
     - For support engineer / line support / infrastructure support roles, prefer the closest technical support / IT support / infrastructure style title from the predefined list.
+    - Do not upgrade a plain "Administrator" role into Support Engineer, System Administrator, Systems Engineer, or similar engineering titles unless the text clearly and explicitly supports that exact technical admin role.
     - Do not guess unrelated titles.
     - Do not output titles that do not exist exactly in the predefined list.
 
@@ -159,7 +180,9 @@ def build_seniority_prompt(position_name: str, job_description: str) -> str:
 
     b) If the title contains leadership indicators such as head of, director, VP, vice president, chief, C-level, or similar, output leadership only.
 
-    c) If the title contains engineering manager, product manager with people management, team lead, lead engineer, or similar people-management responsibility, prefer lead or leadership as appropriate.
+    c) If the title contains Engineering Manager or Technical Director, output leadership only.
+
+    d) If the title contains product manager with people management, team lead, lead engineer, or similar people-management responsibility, prefer lead or leadership as appropriate.
 
     If seniority is not clearly indicated by the title, analyze both title and description together.
 
@@ -176,11 +199,11 @@ def build_seniority_prompt(position_name: str, job_description: str) -> str:
     - 2 years: junior, mid
     - 3-5 years: senior
     - 5+ years or clear ownership/mentoring responsibility: senior, lead
-    - Director, head of, VP, chief, C-level, engineering manager and similar leadership terms: leadership only
+    - Director, head of, VP, chief, C-level, Engineering Manager, Technical Director and similar leadership terms: leadership only
 
     Important:
-    - Do not include mid if the role is clearly senior managerial level.
-    - For PMO Manager, People Operations Manager, Engineering Manager, Head of X, Director roles, avoid junior or mid unless the description clearly supports that.
+    - Do not include junior or mid for clearly senior leadership roles.
+    - For PMO Manager, People Operations Manager, Engineering Manager, Head of X, Director roles, avoid junior or mid unless the description overwhelmingly proves otherwise.
     - If the role is clearly managerial with ownership and cross-functional leadership, prefer senior/lead or leadership.
     - If the title is neutral but experienced, mid or senior is acceptable. Do not leave it blank without reason.
 
