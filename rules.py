@@ -44,6 +44,7 @@ CONTRACT_PATTERNS = {
 LEADERSHIP_TERMS = [
     "head of",
     "director",
+    "technical director",
     "vice president",
     "vp ",
     "chief ",
@@ -66,6 +67,13 @@ IRRELEVANT_ROLE_HINTS = [
     "teacher", "nurse", "waiter", "chef", "warehouse", "cleaner", "receptionist",
     "construction", "civil engineer", "mechanical", "electrical", "manufacturing",
     "beauty therapist", "maritime", "microbiology", "injection moulding", "retail assistant",
+    "production operator", "factory manager", "plant operator", "assembly technician",
+]
+
+RETAIL_SALES_HINTS = [
+    "retail", "store", "shop", "showroom", "branch", "counter", "cashier",
+    "sales assistant", "sales associate", "customer advisor", "merchandising",
+    "in-store", "instore", "point of sale",
 ]
 
 TP_HINTS = [
@@ -80,7 +88,10 @@ BUSINESS_RELEVANT_HINTS = [
     "account executive", "account manager", "account director",
     "sales", "business development", "customer success",
     "recruiter", "recruitment", "talent acquisition", "talent partner",
-    "operations", "finance", "marketing", "consultant",
+    "operations", "finance", "financial analyst", "accounting", "accountant",
+    "fp&a", "fp and a", "treasury", "audit", "tax", "controller",
+    "investment", "private equity", "asset management", "acquisitions",
+    "marketing", "consultant", "analyst", "business analyst", "commercial analyst",
 ]
 
 LOCATION_LABEL_PATTERNS = [
@@ -473,6 +484,10 @@ def detect_seniority_from_title_and_description(position_name: str, description:
     desc = lower_text(description)
     full = f"{title} {desc}"
 
+    hard_leadership_terms = ["head of", "technical director", "engineering manager"]
+    if any(term in title for term in hard_leadership_terms):
+        return ["leadership"]
+
     if any(term in title for term in LEADERSHIP_TERMS):
         return ["leadership"]
 
@@ -522,6 +537,10 @@ def detect_basic_relevance_from_title(position_name: str) -> tuple[str, str]:
 
     if any(bad in title for bad in IRRELEVANT_ROLE_HINTS):
         return "Not Relevant", "Title clearly points to an excluded non-target function."
+
+    sales_terms = ["sales", "account executive", "account manager", "business development"]
+    if any(s in title for s in sales_terms) and any(r in title for r in RETAIL_SALES_HINTS):
+        return "Not Relevant", "Retail sales title is out of scope."
 
     if any(tp in title for tp in TP_HINTS):
         return "Relevant", "Title appears to match target tech/product scope."
@@ -650,6 +669,23 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
 
     if title in allowed_lookup:
         return [allowed_lookup[title]]
+
+    if "administrator" in title and not any(
+        term in title for term in [
+            "system administrator", "systems administrator", "network administrator",
+            "database administrator", "linux administrator", "windows administrator",
+            "cloud administrator", "security administrator", "it administrator",
+        ]
+    ):
+        mapped = existing([
+            "Administrator",
+            "Operations",
+            "Operations Coordinator",
+            "Business Operations",
+            "Office Manager",
+        ])
+        if mapped:
+            return mapped[:3]
 
     alias_groups = [
         (
