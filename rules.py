@@ -65,9 +65,10 @@ LEAD_TERMS = ["lead", "team lead"]
 
 IRRELEVANT_ROLE_HINTS = [
     "teacher", "nurse", "waiter", "chef", "warehouse", "cleaner", "receptionist",
-    "construction", "civil engineer", "mechanical", "electrical", "manufacturing",
+    "construction", "civil engineer", "mechanical", "electrical",
     "beauty therapist", "maritime", "microbiology", "injection moulding", "retail assistant",
     "production operator", "factory manager", "plant operator", "assembly technician",
+    "machine operator", "manufacturing technician", "shop floor", "production line",
 ]
 
 RETAIL_SALES_HINTS = [
@@ -300,6 +301,11 @@ def _split_possible_locations(raw: str) -> list[str]:
     pieces = [raw]
 
     for part in re.split(r"[|;/]", raw):
+        part = _clean_location_value(part)
+        if part:
+            pieces.append(part)
+
+    for part in re.split(r"(?i)\s+or\s+", raw):
         part = _clean_location_value(part)
         if part:
             pieces.append(part)
