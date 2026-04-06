@@ -165,6 +165,105 @@ class JobClassifier:
         except Exception:
             return {}
 
+    @staticmethod
+    def _blank_result(role_relevance: str = "", role_relevance_reason: str = "", job_category: str = "") -> dict[str, Any]:
+        return {
+            "role_relevance": role_relevance,
+            "role_relevance_reason": role_relevance_reason,
+            "job_category": job_category,
+            "job_location": "",
+            "remote_preferences": "",
+            "remote_days": "",
+            "salary_min": "",
+            "salary_max": "",
+            "salary_currency": "",
+            "visa_sponsorship": "",
+            "contract_type": "",
+            "job_titles": [],
+            "seniorities": [],
+            "skills": [],
+            "notes": "",
+        }
+
+    @staticmethod
+    def _is_retail_sales_role(position_name: str, job_description: str) -> bool:
+        full = clean_description(f"{position_name} {job_description}").lower()
+        sales_terms = [
+            "sales", "sales executive", "sales advisor", "sales consultant", "sales associate",
+            "account executive", "account manager", "business development",
+        ]
+        retail_terms = [
+            "retail", "store", "shop", "showroom", "branch", "counter", "cashier",
+            "merchandising", "in-store", "instore", "point of sale", "customer floor",
+        ]
+        return any(term in full for term in sales_terms) and any(term in full for term in retail_terms)
+
+    @staticmethod
+    def _is_manufacturing_focused_role(position_name: str, job_description: str) -> bool:
+        full = clean_description(f"{position_name} {job_description}").lower()
+        terms = [
+            "manufacturing", "factory", "plant", "production line", "shop floor",
+            "assembly", "injection mould", "injection mold", "cnc", "machining",
+            "production operator", "production technician",
+        ]
+        return any(term in full for term in terms)
+
+    @staticmethod
+    def _is_finance_relevant_role(position_name: str, job_description: str) -> bool:
+        full = clean_description(f"{position_name} {job_description}").lower()
+        finance_terms = [
+            "finance", "financial analyst", "fp&a", "fp and a", "accounting",
+            "accountant", "controller", "treasury", "audit", "tax",
+            "private equity", "investment", "asset management", "acquisitions",
+            "fund", "portfolio", "corporate finance", "real estate analyst",
+            "analyst", "finance analyst", "commercial analyst", "business analyst",
+        ]
+        negative_terms = ["manufacturing", "retail assistant", "teacher", "nurse", "chef"]
+        return any(term in full for term in finance_terms) and not any(term in full for term in negative_terms)
+
+    @staticmethod
+    def _is_high_leadership_title(position_name: str) -> bool:
+        title = clean_description(position_name).lower()
+        leadership_terms = [
+            "head of",
+            "director",
+            "technical director",
+            "engineering manager",
+            "vice president",
+            "vp ",
+            "chief ",
+            "cto",
+            "cfo",
+            "coo",
+            "cio",
+            "cmo",
+            "cro",
+            "cpo",
+        ]
+        return any(term in title for term in leadership_terms)
+
+    @staticmethod
+    def _is_plain_administrator_role(position_name: str, job_description: str) -> bool:
+        title = clean_description(position_name).lower()
+        desc = clean_description(job_description).lower()
+
+        if "administrator" not in title:
+            return False
+
+        strong_tech_terms = [
+            "system administrator", "systems administrator", "network administrator",
+            "database administrator", "linux administrator", "windows administrator",
+            "cloud administrator", "azure administrator", "security administrator",
+            "it administrator", "infrastructure administrator",
+        ]
+        if any(term in title for term in strong_tech_terms):
+            return False
+
+        if any(term in desc for term in strong_tech_terms):
+            return False
+
+        return True
+
     def _build_location_remote_prompt(
         self,
         position_name: str,
@@ -939,9 +1038,26 @@ Source text:
         self,
         position_name: str,
         job_description: str,
-        location_candidates: list[str],
-        remote_preferences_list: list[str],
+        location_candidates: list[str] | None = None,
+        remote_preferences_list: list[str] | None = None,
     ) -> dict[str, str]:
+        location_candidates = location_candidates or []
+        remote_preferences_list = remote_preferences_list or []
+
+        if self._is_retail_sales_role(position_name, job_description):
+            return {
+                "role_relevance": "Not Relevant",
+                "job_category": "Not T&P",
+                "role_relevance_reason": "Retail sales role is out of scope.",
+            }
+
+        if self._is_manufacturing_focused_role(position_name, job_description):
+            return {
+                "role_relevance": "Not Relevant",
+                "job_category": "Not T&P",
+                "role_relevance_reason": "Manufacturing-focused role is out of scope.",
+            }
+
         quick_rel, quick_reason = detect_basic_relevance_from_title(position_name)
         quick_tp = detect_tp_from_title(position_name)
 
@@ -967,6 +1083,18 @@ Source text:
 
         if (
             parsed["role_relevance"] == "Not Relevant"
+            and self._is_finance_relevant_role(position_name, job_description)
+            and is_location_allowed(location_candidates, remote_preferences_list)
+        ):
+            parsed["role_relevance"] = "Relevant"
+            parsed["job_category"] = parsed["job_category"] or "Not T&P"
+            parsed["role_relevance_reason"] = (
+                parsed["role_relevance_reason"]
+                or "Finance or analyst role is within target business scope."
+            )
+
+        if (
+            parsed["role_relevance"] == "Not Relevant"
             and quick_rel == "Relevant"
             and is_location_allowed(location_candidates, remote_preferences_list)
         ):
@@ -989,15 +1117,40 @@ Source text:
 
         return parsed
 
+    def _filter_job_titles(self, position_name: str, job_description: str, titles: list[str]) -> list[str]:
+        if not titles:
+            return []
+
+        out = titles[:]
+
+        if self._is_plain_administrator_role(position_name, job_description):
+            banned = {
+                "support engineer",
+                "technical support engineer",
+                "system administrator",
+                "systems engineer",
+                "system engineer",
+                "infrastructure engineer",
+                "it support",
+            }
+            filtered = [t for t in out if t.strip().lower() not in banned]
+            if filtered:
+                out = filtered
+
+        if self._is_high_leadership_title(position_name) and len(out) > 2:
+            out = out[:2]
+
+        return out[:MAX_JOB_TITLES]
+
     def _classify_job_titles(self, position_name: str, job_description: str) -> list[str]:
         title_clean = normalize_text(position_name)
         exact = self.job_title_lookup.get(title_clean.lower())
         if exact:
-            return [exact]
+            return self._filter_job_titles(position_name, job_description, [exact])
 
         fast_rule_titles = infer_job_titles_from_position_name(position_name, self.predefined_job_titles)
         if fast_rule_titles:
-            return fast_rule_titles[:MAX_JOB_TITLES]
+            return self._filter_job_titles(position_name, job_description, fast_rule_titles[:MAX_JOB_TITLES])
 
         prompt = build_job_titles_prompt(
             position_name=position_name,
@@ -1006,9 +1159,12 @@ Source text:
         )
         raw = self._call_model(prompt)
         validated = validate_job_titles(raw, self.predefined_job_titles, max_items=MAX_JOB_TITLES)
-        return validated if validated else []
+        return self._filter_job_titles(position_name, job_description, validated if validated else [])
 
     def _classify_seniority(self, position_name: str, job_description: str) -> list[str]:
+        if self._is_high_leadership_title(position_name):
+            return ["leadership"]
+
         rule_result = detect_seniority_from_title_and_description(position_name, job_description)
 
         if rule_result in (
@@ -1024,7 +1180,13 @@ Source text:
             ["entry", "junior", "mid", "senior", "lead", "leadership"],
             max_items=3,
         )
-        return validated if validated else rule_result
+
+        if validated:
+            if self._is_high_leadership_title(position_name):
+                return ["leadership"]
+            return validated
+
+        return rule_result
 
     def _classify_skills(self, position_name: str, job_description: str, job_category: str) -> list[str]:
         allowed_skills = self.predefined_tp_skills if job_category == "T&P job" else self.predefined_nontp_skills
@@ -1045,6 +1207,20 @@ Source text:
         job_description = clean_description(row.get("job_description", ""))
         job_url = (row.get("job_url", "") or "").strip()
 
+        precheck_relevance = self._classify_relevance_and_category(
+            position_name=position_name,
+            job_description=job_description,
+            location_candidates=[],
+            remote_preferences_list=[],
+        )
+
+        if precheck_relevance.get("role_relevance") == "Not Relevant":
+            return self._blank_result(
+                role_relevance=precheck_relevance.get("role_relevance", ""),
+                role_relevance_reason=precheck_relevance.get("role_relevance_reason", ""),
+                job_category=precheck_relevance.get("job_category", ""),
+            )
+
         notes = []
 
         location_remote = self._extract_location_remote_from_description_or_url(
@@ -1054,6 +1230,20 @@ Source text:
         )
         notes.append(location_remote.get("source_notes", ""))
 
+        relevance_data = self._classify_relevance_and_category(
+            position_name=position_name,
+            job_description=job_description,
+            location_candidates=location_remote.get("job_location_candidates", []),
+            remote_preferences_list=location_remote.get("remote_preferences_list", []),
+        )
+
+        if relevance_data.get("role_relevance") == "Not Relevant":
+            return self._blank_result(
+                role_relevance=relevance_data.get("role_relevance", ""),
+                role_relevance_reason=relevance_data.get("role_relevance_reason", ""),
+                job_category=relevance_data.get("job_category", ""),
+            )
+
         salary = extract_salary(job_description, self.predefined_salaries)
         visa_sponsorship = extract_visa_status(job_description)
 
@@ -1062,38 +1252,23 @@ Source text:
             raw_contract = self._call_model(build_contract_type_prompt(job_description))
             contract_type = validate_contract_type(raw_contract)
 
-        relevance_data = self._classify_relevance_and_category(
-            position_name=position_name,
-            job_description=job_description,
-            location_candidates=location_remote.get("job_location_candidates", []),
-            remote_preferences_list=location_remote.get("remote_preferences_list", []),
-        )
-
         result = {
             "role_relevance": relevance_data.get("role_relevance", ""),
             "role_relevance_reason": relevance_data.get("role_relevance_reason", ""),
             "job_category": relevance_data.get("job_category", ""),
-
             "job_location": location_remote.get("job_location", ""),
             "remote_preferences": location_remote.get("remote_preferences", ""),
             "remote_days": location_remote.get("remote_days", ""),
-
             "salary_min": salary.get("salary_min", ""),
             "salary_max": salary.get("salary_max", ""),
             "salary_currency": salary.get("salary_currency", ""),
-
             "visa_sponsorship": visa_sponsorship,
             "contract_type": contract_type,
-
             "job_titles": [],
             "seniorities": [],
             "skills": [],
             "notes": "",
         }
-
-        if result["role_relevance"] == "Not Relevant":
-            result["notes"] = "; ".join([x for x in notes if x])
-            return result
 
         result["job_titles"] = self._classify_job_titles(position_name, job_description)
         result["seniorities"] = self._classify_seniority(position_name, job_description)
