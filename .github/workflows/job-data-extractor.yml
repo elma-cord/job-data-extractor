@@ -10,7 +10,7 @@ on:
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
 
     steps:
       - name: Checkout repo
@@ -42,15 +42,136 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      - name: Run extractor
+      - name: Split jobs_input.csv into batches of 100
+        run: |
+          python - <<'PY'
+          import csv
+          import math
+          import os
+          from pathlib import Path
+
+          input_path = Path("jobs_input.csv")
+          batch_dir = Path("batches")
+          batch_dir.mkdir(exist_ok=True)
+
+          batch_size = 100
+
+          with input_path.open("r", encoding="utf-8-sig", newline="") as f:
+              reader = csv.reader(f)
+              rows = list(reader)
+
+          if not rows:
+              raise SystemExit("jobs_input.csv is empty")
+
+          header = rows[0]
+          data_rows = rows[1:]
+
+          if not data_rows:
+              raise SystemExit("jobs_input.csv has header only and no data rows")
+
+          total_batches = math.ceil(len(data_rows) / batch_size)
+
+          for i in range(total_batches):
+              start = i * batch_size
+              end = start + batch_size
+              batch_rows = data_rows[start:end]
+
+              batch_file = batch_dir / f"jobs_input_batch_{i+1:04d}.csv"
+              with batch_file.open("w", encoding="utf-8", newline="") as out:
+                  writer = csv.writer(out)
+                  writer.writerow(header)
+                  writer.writerows(batch_rows)
+
+          print(f"Created {total_batches} batch file(s) from {len(data_rows)} job rows.")
+          PY
+
+      - name: Run extractor batch by batch
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python main.py
+          set -euo pipefail
 
-      - name: Upload results artifact
+          mkdir -p batch_outputs
+          rm -f jobs_output.csv merged_jobs_output.csv
+
+          batch_count=$(find batches -maxdepth 1 -type f -name 'jobs_input_batch_*.csv' | sort | wc -l)
+          echo "Found ${batch_count} batch(es)."
+
+          current=0
+          for batch_file in $(find batches -maxdepth 1 -type f -name 'jobs_input_batch_*.csv' | sort); do
+            current=$((current + 1))
+            echo "========================================"
+            echo "Running batch ${current}/${batch_count}: ${batch_file}"
+            echo "========================================"
+
+            cp "${batch_file}" jobs_input.csv
+            rm -f jobs_output.csv
+
+            python main.py
+
+            if [ ! -f jobs_output.csv ]; then
+              echo "Batch ${current} failed: jobs_output.csv was not created"
+              exit 1
+            fi
+
+            cp jobs_output.csv "batch_outputs/jobs_output_batch_$(printf '%04d' "${current}").csv"
+          done
+
+      - name: Merge batch outputs
+        run: |
+          python - <<'PY'
+          import csv
+          from pathlib import Path
+
+          batch_dir = Path("batch_outputs")
+          output_path = Path("jobs_output.csv")
+
+          batch_files = sorted(batch_dir.glob("jobs_output_batch_*.csv"))
+          if not batch_files:
+              raise SystemExit("No batch output files found to merge.")
+
+          final_header = None
+          all_rows = []
+
+          for i, batch_file in enumerate(batch_files):
+              with batch_file.open("r", encoding="utf-8-sig", newline="") as f:
+                  reader = csv.reader(f)
+                  rows = list(reader)
+
+              if not rows:
+                  continue
+
+              header = rows[0]
+              data = rows[1:]
+
+              if final_header is None:
+                  final_header = header
+              elif header != final_header:
+                  raise SystemExit(f"Header mismatch detected in {batch_file}")
+
+              all_rows.extend(data)
+
+          if final_header is None:
+              raise SystemExit("No valid batch outputs found.")
+
+          with output_path.open("w", encoding="utf-8", newline="") as out:
+              writer = csv.writer(out)
+              writer.writerow(final_header)
+              writer.writerows(all_rows)
+
+          print(f"Merged {len(batch_files)} batch files into jobs_output.csv with {len(all_rows)} rows.")
+          PY
+
+      - name: Upload merged results artifact
         uses: actions/upload-artifact@v4
         with:
           name: job-data-results
           path: jobs_output.csv
+          if-no-files-found: error
+
+      - name: Upload batch results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: job-data-results-batches
+          path: batch_outputs/
           if-no-files-found: error
