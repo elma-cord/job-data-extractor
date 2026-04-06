@@ -28,14 +28,15 @@ def build_role_relevance_prompt(position_name: str, job_description: str, predef
     - acquisitions
     - analyst / business analyst / commercial analyst / finance analyst
     - operations / change / transformation / program style roles
+    - events / venue partnerships / marketing manager style roles when they are corporate, B2B, remote, client, booking, campaign, CRM, or partnership focused
 
     If the role is clearly outside tech or business functions (for example teacher, nurse, waiter), mark Not Relevant, even if some criteria partially match.
 
-    Exclude any roles related to construction, civil engineering, retail sales/store/shop/showroom sales, electrical, mechanical, manufacturing, factory/plant/shop-floor work, microbiology, maritime, injection molding, and beauty brands.
+    Exclude any roles related to construction, civil engineering, retail store/shop/showroom/cashier/shop-floor sales, electrical, mechanical, manufacturing-function work, factory/plant/shop-floor work, microbiology, maritime, injection molding, and beauty brands.
 
     Retail sales rule:
-    Sales jobs are allowed only when they are business/corporate sales roles.
-    If the role is clearly retail/in-store/store/showroom/branch/customer-floor sales, mark Not Relevant.
+    Sales jobs are allowed when they are business/corporate sales, account management, events, partnerships, venue, bookings, CRM, or client-facing business roles.
+    Only mark Not Relevant when the role is clearly retail/in-store/store/showroom/branch/cashier/shop-floor/customer-floor sales.
 
     Technical support / infrastructure rule:
     Technical roles such as Support Engineer, Technical Support Engineer, 2nd Line Engineer, 3rd Line Support Engineer, IT Support, Infrastructure Engineer, Systems Engineer and similar technical support / infrastructure / escalation roles should be treated as relevant target roles when the work is technical.
