@@ -78,6 +78,19 @@ class JobClassifier:
             "usa",
             "united states",
         }
+        self.country_noise_tokens = {
+            "uk",
+            "united",
+            "kingdom",
+            "england",
+            "scotland",
+            "wales",
+            "northern",
+            "ireland",
+            "usa",
+            "states",
+            "state",
+        }
 
     @staticmethod
     def _load_salary_values(path: Path) -> list[int]:
@@ -201,12 +214,42 @@ class JobClassifier:
     @staticmethod
     def _is_manufacturing_focused_role(position_name: str, job_description: str) -> bool:
         full = clean_description(f"{position_name} {job_description}").lower()
-        terms = [
-            "manufacturing", "factory", "plant", "production line", "shop floor",
-            "assembly", "injection mould", "injection mold", "cnc", "machining",
-            "production operator", "production technician",
+
+        clear_manufacturing_function_terms = [
+            "factory", "plant", "shop floor", "production line", "assembly",
+            "machining", "cnc", "tooling", "welding", "fabrication",
+            "production operator", "production technician", "manufacturing technician",
+            "plant operator", "assembly technician", "machine operator",
+            "quality inspector", "maintenance engineer", "process operator",
+            "line operator", "production supervisor", "production manager",
         ]
-        return any(term in full for term in terms)
+        manufacturing_title_terms = [
+            "manufacturing engineer",
+            "manufacturing manager",
+            "production engineer",
+            "production manager",
+            "plant manager",
+            "factory manager",
+            "process technician",
+        ]
+        clear_relevant_override_terms = [
+            "ai", "machine learning", "ml", "software", "data", "scientist",
+            "analytics", "product", "platform", "python", "tensorflow",
+            "pytorch", "jax", "computer vision", "llm", "foundation model",
+            "account executive", "account manager", "business development",
+            "finance", "analyst", "operations", "marketing",
+        ]
+
+        if any(term in full for term in clear_manufacturing_function_terms):
+            if not any(term in full for term in clear_relevant_override_terms):
+                return True
+
+        title = clean_description(position_name).lower()
+        if any(term in title for term in manufacturing_title_terms):
+            if not any(term in full for term in clear_relevant_override_terms):
+                return True
+
+        return False
 
     @staticmethod
     def _is_finance_relevant_role(position_name: str, job_description: str) -> bool:
@@ -218,7 +261,7 @@ class JobClassifier:
             "fund", "portfolio", "corporate finance", "real estate analyst",
             "analyst", "finance analyst", "commercial analyst", "business analyst",
         ]
-        negative_terms = ["manufacturing", "retail assistant", "teacher", "nurse", "chef"]
+        negative_terms = ["retail assistant", "teacher", "nurse", "chef"]
         return any(term in full for term in finance_terms) and not any(term in full for term in negative_terms)
 
     @staticmethod
@@ -585,6 +628,9 @@ Source text:
     def _effective_country_group(self, candidate_country_group: str) -> str:
         return candidate_country_group or "uk"
 
+    def _specific_tokens(self, key: str) -> set[str]:
+        return {t for t in key.split() if t and t not in self.country_noise_tokens}
+
     def _score_location_record(
         self,
         cand_key: str,
@@ -608,6 +654,13 @@ Source text:
             )
         )
 
+        cand_specific = self._specific_tokens(cand_key)
+        record_specific = self._specific_tokens(record["key"])
+        specific_overlap = len(cand_specific & record_specific)
+
+        if cand_specific and specific_overlap == 0 and not strong_match:
+            return -10**6
+
         if not strong_match and overlap == 0:
             return -10**6
 
@@ -630,8 +683,14 @@ Source text:
         if overlap:
             score += overlap * 40
 
+        if specific_overlap:
+            score += specific_overlap * 220
+
         if cand_tokens and cand_tokens.issubset(record["tokens"]):
             score += 180
+
+        if cand_specific and cand_specific.issubset(record_specific):
+            score += 240
 
         if not record["is_broad"]:
             score += 80 + (record["specificity"] * 10)
@@ -644,7 +703,7 @@ Source text:
         if effective_country_group == "usa" and record["country_group"] == "usa":
             score += 120
 
-        candidate_is_city_like = len(cand_tokens) >= 1
+        candidate_is_city_like = len(cand_specific) >= 1
         if candidate_is_city_like:
             if record["is_city_level"]:
                 score += 160
@@ -1055,7 +1114,7 @@ Source text:
             return {
                 "role_relevance": "Not Relevant",
                 "job_category": "Not T&P",
-                "role_relevance_reason": "Manufacturing-focused role is out of scope.",
+                "role_relevance_reason": "Manufacturing-function role is out of scope.",
             }
 
         quick_rel, quick_reason = detect_basic_relevance_from_title(position_name)
