@@ -201,15 +201,47 @@ class JobClassifier:
     @staticmethod
     def _is_retail_sales_role(position_name: str, job_description: str) -> bool:
         full = clean_description(f"{position_name} {job_description}").lower()
+
+        strong_retail_terms = [
+            "retail assistant",
+            "sales assistant",
+            "sales associate",
+            "cashier",
+            "shop assistant",
+            "shop floor",
+            "store manager",
+            "store assistant",
+            "showroom sales",
+            "branch sales",
+            "point of sale",
+            "pos system",
+            "fitting room",
+            "visual merchandising",
+            "in-store",
+            "instore",
+        ]
+        store_context_terms = [
+            "store", "shop", "showroom", "branch", "counter", "cashier",
+            "merchandising", "customer floor",
+        ]
         sales_terms = [
             "sales", "sales executive", "sales advisor", "sales consultant", "sales associate",
             "account executive", "account manager", "business development",
         ]
-        retail_terms = [
-            "retail", "store", "shop", "showroom", "branch", "counter", "cashier",
-            "merchandising", "in-store", "instore", "point of sale", "customer floor",
+        corporate_override_terms = [
+            "marketing manager", "events", "event", "venue", "venues",
+            "crm", "bookings", "enquiries", "clients", "partners",
+            "campaign", "b2b", "corporate", "remote", "digital marketing",
+            "account management", "client relationship",
         ]
-        return any(term in full for term in sales_terms) and any(term in full for term in retail_terms)
+
+        if any(term in full for term in corporate_override_terms):
+            return False
+
+        if any(term in full for term in strong_retail_terms):
+            return True
+
+        return any(term in full for term in sales_terms) and any(term in full for term in store_context_terms)
 
     @staticmethod
     def _is_manufacturing_focused_role(position_name: str, job_description: str) -> bool:
@@ -1107,7 +1139,7 @@ Source text:
             return {
                 "role_relevance": "Not Relevant",
                 "job_category": "Not T&P",
-                "role_relevance_reason": "Retail sales role is out of scope.",
+                "role_relevance_reason": "Retail store or shop-floor sales role is out of scope.",
             }
 
         if self._is_manufacturing_focused_role(position_name, job_description):
