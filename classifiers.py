@@ -246,6 +246,7 @@ class JobClassifier:
     @staticmethod
     def _is_manufacturing_focused_role(position_name: str, job_description: str) -> bool:
         full = clean_description(f"{position_name} {job_description}").lower()
+        title = clean_description(position_name).lower()
 
         clear_manufacturing_function_terms = [
             "factory", "plant", "shop floor", "production line", "assembly",
@@ -254,6 +255,7 @@ class JobClassifier:
             "plant operator", "assembly technician", "machine operator",
             "quality inspector", "maintenance engineer", "process operator",
             "line operator", "production supervisor", "production manager",
+            "production engineer", "multi-skilled engineer", "multiskilled engineer",
         ]
         manufacturing_title_terms = [
             "manufacturing engineer",
@@ -263,6 +265,8 @@ class JobClassifier:
             "plant manager",
             "factory manager",
             "process technician",
+            "multi-skilled engineer",
+            "multiskilled engineer",
         ]
         clear_relevant_override_terms = [
             "ai", "machine learning", "ml", "software", "data", "scientist",
@@ -276,7 +280,6 @@ class JobClassifier:
             if not any(term in full for term in clear_relevant_override_terms):
                 return True
 
-        title = clean_description(position_name).lower()
         if any(term in title for term in manufacturing_title_terms):
             if not any(term in full for term in clear_relevant_override_terms):
                 return True
@@ -339,6 +342,93 @@ class JobClassifier:
 
         return True
 
+    @staticmethod
+    def _is_non_job_content(position_name: str, job_description: str) -> bool:
+        text = clean_description(f"{position_name}\n{job_description}").lower()
+        if not text:
+            return True
+
+        hard_non_job_terms = [
+            "module", "course module", "learning module", "training module",
+            "lesson", "curriculum", "course content", "educational content",
+            "study guide", "how to become", "what is", "career guide",
+            "salary guide", "news article", "informational article",
+            "blog post", "guide only", "learning objectives",
+        ]
+        job_signals = [
+            "job title", "responsibilities", "requirements", "experience",
+            "about the role", "about you", "apply", "job type",
+            "salary", "location", "benefits", "we are looking for",
+            "candidate", "team", "reporting to",
+        ]
+
+        if any(term in text for term in hard_non_job_terms) and not any(term in text for term in job_signals):
+            return True
+
+        if "learning objectives" in text and "apply" not in text and "responsibilities" not in text:
+            return True
+
+        if "module" in text and "job requisition" not in text and "we are hiring" not in text and "apply" not in text:
+            if "responsibilities" not in text and "requirements" not in text and "job type" not in text:
+                return True
+
+        return False
+
+    @staticmethod
+    def _is_medical_or_clinical_role(position_name: str, job_description: str) -> bool:
+        text = clean_description(f"{position_name}\n{job_description}").lower()
+        medical_terms = [
+            "medical", "clinical", "clinician", "psychiatrist", "psychiatry",
+            "doctor", "physician", "surgeon", "nurse", "therapist",
+            "occupational therapist", "pharmacist", "dentist",
+            "patient care", "hospital", "ward", "consultant psychiatrist",
+            "healthcare assistant", "medical consultant",
+        ]
+        override_terms = [
+            "medical writer", "clinical data", "healthtech", "health tech",
+            "medical software", "clinical systems", "ehr", "emr",
+        ]
+        if any(term in text for term in override_terms):
+            return False
+        return any(term in text for term in medical_terms)
+
+    @staticmethod
+    def _reason_strongly_says_not_relevant(reason: str) -> bool:
+        reason_l = clean_description(reason).lower()
+        if not reason_l:
+            return False
+
+        strong_signals = [
+            "outside allowed tech and business functions",
+            "outside allowed tech/business scope",
+            "outside allowed tech business scope",
+            "not a real job posting",
+            "not a job posting",
+            "informational article",
+            "educational module",
+            "content is educational",
+            "location is not allowed",
+            "outside allowed regions",
+            "retail",
+            "in-store",
+            "shop-floor",
+            "cashier",
+            "medical consultant psychiatrist",
+            "medical",
+            "clinical",
+            "construction sector",
+            "construction/civil engineering",
+            "mechanical design engineering",
+            "manufacturing and product development outside allowed tech/business scope",
+            "excluded construction sector roles",
+            "not a tech or product role",
+            "not a tech or business position",
+            "not a business or tech function",
+            "excluded non-target function",
+            "out of scope",
+        ]
+        return any(signal in reason_l for signal in strong_signals)
+
     def _build_location_remote_prompt(
         self,
         position_name: str,
@@ -367,8 +457,9 @@ Rules for job_location:
    benefits, DEI text, company office lists, slogans, skills, tools, generic company text, headings, random short lines.
 4. If multiple locations appear, choose the most specific real job location for the role.
 5. If a field says things like "United Kingdom Home", "UK Home", "Home Based", or "Remote, UK", treat that as broad UK location, not a city.
-6. Normalize the result to EXACTLY one value from the acceptable locations list below.
-7. If no acceptable location can be identified, return "Unknown".
+6. If a location contains clear Canada or province evidence such as ON, Ontario, BC, Alberta, Toronto, Vancouver, or Canada, do not map it to a UK city.
+7. Normalize the result to EXACTLY one value from the acceptable locations list below.
+8. If no acceptable location can be identified, return "Unknown".
 
 Rules for remote_preferences:
 1. Allowed values are only: onsite, hybrid, remote
@@ -547,6 +638,14 @@ Source text:
             value,
         ):
             return "usa"
+
+        if (
+            "canada" in value_l
+            or "ontario" in value_l
+            or re.search(r"(?i),\s*ON\s*(,|$)", value)
+            or re.search(r"(?i),\s*(BC|AB|MB|NB|NL|NS|NT|NU|PE|QC|SK|YT)\s*(,|$)", value)
+        ):
+            return "canada"
 
         return ""
 
@@ -1135,6 +1234,20 @@ Source text:
         location_candidates = location_candidates or []
         remote_preferences_list = remote_preferences_list or []
 
+        if self._is_non_job_content(position_name, job_description):
+            return {
+                "role_relevance": "Not Relevant",
+                "job_category": "Not T&P",
+                "role_relevance_reason": "No real job role or location specified; content is educational, informational, or not a real job posting.",
+            }
+
+        if self._is_medical_or_clinical_role(position_name, job_description):
+            return {
+                "role_relevance": "Not Relevant",
+                "job_category": "Not T&P",
+                "role_relevance_reason": "Medical or clinical role is outside allowed tech and business functions.",
+            }
+
         if self._is_retail_sales_role(position_name, job_description):
             return {
                 "role_relevance": "Not Relevant",
@@ -1167,6 +1280,9 @@ Source text:
         raw = self._call_model(prompt)
         parsed = parse_role_relevance_response(raw)
 
+        if self._reason_strongly_says_not_relevant(parsed.get("role_relevance_reason", "")):
+            parsed["role_relevance"] = "Not Relevant"
+
         if not parsed["role_relevance"]:
             parsed["role_relevance"] = quick_rel or ""
         if not parsed["job_category"]:
@@ -1188,6 +1304,7 @@ Source text:
             parsed["role_relevance"] == "Not Relevant"
             and quick_rel == "Relevant"
             and is_location_allowed(location_candidates, remote_preferences_list)
+            and not self._reason_strongly_says_not_relevant(parsed.get("role_relevance_reason", ""))
         ):
             parsed["role_relevance"] = "Relevant"
             parsed["role_relevance_reason"] = (
