@@ -426,6 +426,15 @@ class JobClassifier:
             "not a business or tech function",
             "excluded non-target function",
             "out of scope",
+            "not matching allowed tech or business core roles",
+            "not matching allowed tech or business roles",
+            "not matching allowed business core roles",
+            "project controls in infrastructure",
+            "cost and document management",
+            "outside target business scope",
+            "does not match allowed tech or business core roles",
+            "does not match allowed tech or business roles",
+            "outside allowed target scope",
         ]
         return any(signal in reason_l for signal in strong_signals)
 
