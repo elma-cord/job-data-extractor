@@ -28,10 +28,17 @@ def dedupe_preserve_order(items: Iterable[str]) -> list[str]:
 
 def normalize_relevance_label(value: str) -> str:
     v = normalize_whitespace(value).lower()
-    if "not relevant" in v:
+
+    if re.fullmatch(r"not relevant", v):
         return "Not Relevant"
-    if "relevant" in v:
+    if re.fullmatch(r"relevant", v):
         return "Relevant"
+
+    if re.search(r"(^|[^a-z])not relevant([^a-z]|$)", v):
+        return "Not Relevant"
+    if re.search(r"(^|[^a-z])relevant([^a-z]|$)", v):
+        return "Relevant"
+
     return ""
 
 
@@ -39,20 +46,39 @@ def normalize_tp_label(value: str) -> str:
     v = normalize_whitespace(value).lower()
     if "not t&p" in v or "not tp" in v:
         return "Not T&P"
-    if "t&p" in v or "tp job" in v:
+    if v in {"t&p", "t&p job", "tp", "tp job"} or "t&p" in v or "tp job" in v:
         return "T&P job"
     return ""
 
 
 def parse_role_relevance_response(response_text: str) -> dict:
     text = normalize_whitespace(response_text)
-    parts = [p.strip() for p in text.split(" | ")]
+
+    parts = re.split(r"\s*\|\s*", text, maxsplit=2)
     while len(parts) < 3:
         parts.append("")
+
+    role_relevance = normalize_relevance_label(parts[0])
+    job_category = normalize_tp_label(parts[1])
+    role_relevance_reason = parts[2]
+
+    if not role_relevance:
+        start_match = re.match(r"^(not relevant|relevant)\b", text, flags=re.IGNORECASE)
+        if start_match:
+            role_relevance = normalize_relevance_label(start_match.group(1))
+
+    if not job_category:
+        tp_match = re.search(r"\b(not t&p|not tp|t&p job|tp job|t&p)\b", text, flags=re.IGNORECASE)
+        if tp_match:
+            job_category = normalize_tp_label(tp_match.group(1))
+
+    if not role_relevance_reason and len(parts) >= 3:
+        role_relevance_reason = normalize_whitespace(parts[2])
+
     return {
-        "role_relevance": normalize_relevance_label(parts[0]),
-        "job_category": normalize_tp_label(parts[1]),
-        "role_relevance_reason": parts[2],
+        "role_relevance": role_relevance,
+        "job_category": job_category,
+        "role_relevance_reason": role_relevance_reason,
     }
 
 
