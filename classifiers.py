@@ -219,6 +219,8 @@ class JobClassifier:
             "visual merchandising",
             "in-store",
             "instore",
+            "customer assistant",
+            "picking and packing orders",
         ]
         store_context_terms = [
             "store", "shop", "showroom", "branch", "counter", "cashier",
@@ -256,6 +258,7 @@ class JobClassifier:
             "quality inspector", "maintenance engineer", "process operator",
             "line operator", "production supervisor", "production manager",
             "production engineer", "multi-skilled engineer", "multiskilled engineer",
+            "manufacturing production team lead", "shop-floor assembly",
         ]
         manufacturing_title_terms = [
             "manufacturing engineer",
@@ -267,6 +270,7 @@ class JobClassifier:
             "process technician",
             "multi-skilled engineer",
             "multiskilled engineer",
+            "production team lead",
         ]
         clear_relevant_override_terms = [
             "ai", "machine learning", "ml", "software", "data", "scientist",
@@ -354,12 +358,14 @@ class JobClassifier:
             "study guide", "how to become", "what is", "career guide",
             "salary guide", "news article", "informational article",
             "blog post", "guide only", "learning objectives",
+            "administrative checklist", "checklist only",
         ]
         job_signals = [
             "job title", "responsibilities", "requirements", "experience",
             "about the role", "about you", "apply", "job type",
             "salary", "location", "benefits", "we are looking for",
-            "candidate", "team", "reporting to",
+            "candidate", "team", "reporting to", "job requisition",
+            "full time", "part time", "contract type",
         ]
 
         if any(term in text for term in hard_non_job_terms) and not any(term in text for term in job_signals):
@@ -372,25 +378,84 @@ class JobClassifier:
             if "responsibilities" not in text and "requirements" not in text and "job type" not in text:
                 return True
 
+        if "administrative checklist" in text and "apply" not in text and "responsibilities" not in text:
+            return True
+
         return False
 
     @staticmethod
     def _is_medical_or_clinical_role(position_name: str, job_description: str) -> bool:
-        text = clean_description(f"{position_name}\n{job_description}").lower()
-        medical_terms = [
-            "medical", "clinical", "clinician", "psychiatrist", "psychiatry",
-            "doctor", "physician", "surgeon", "nurse", "therapist",
-            "occupational therapist", "pharmacist", "dentist",
-            "patient care", "hospital", "ward", "consultant psychiatrist",
-            "healthcare assistant", "medical consultant",
+        title = clean_description(position_name).lower()
+        desc = clean_description(job_description).lower()
+        full = f"{title}\n{desc}"
+
+        strong_medical_title_terms = [
+            "psychiatrist", "psychiatry", "doctor", "physician", "surgeon",
+            "nurse", "therapist", "occupational therapist", "pharmacist",
+            "dentist", "clinical psychologist", "medical consultant",
+            "consultant psychiatrist", "healthcare assistant",
+        ]
+        strong_medical_context_terms = [
+            "patient care", "hospital", "ward", "clinical practice",
+            "medical practice", "diagnosis", "treatment plan", "surgical",
+            "mental health service", "registered nurse",
         ]
         override_terms = [
             "medical writer", "clinical data", "healthtech", "health tech",
             "medical software", "clinical systems", "ehr", "emr",
+            "repair consultant", "vehicle damage", "automotive", "body repair",
+            "claims", "engineering technician", "customer consultant",
+            "solus", "repair methodology",
         ]
-        if any(term in text for term in override_terms):
+
+        if any(term in full for term in override_terms):
             return False
-        return any(term in text for term in medical_terms)
+
+        if any(term in title for term in strong_medical_title_terms):
+            return True
+
+        if any(term in desc for term in strong_medical_context_terms) and any(
+            term in desc for term in ["medical", "clinical", "patient", "hospital", "healthcare"]
+        ):
+            return True
+
+        return False
+
+    @staticmethod
+    def _is_rf_test_engineer_role(position_name: str, job_description: str) -> bool:
+        text = clean_description(f"{position_name}\n{job_description}").lower()
+        rf_terms = [
+            "rf test engineer",
+            "radio frequency test engineer",
+            "rf engineer",
+            "rf test",
+            "telecom test engineer",
+            "wireless test engineer",
+        ]
+        return any(term in text for term in rf_terms)
+
+    @staticmethod
+    def _is_project_controls_infrastructure_role(position_name: str, job_description: str) -> bool:
+        text = clean_description(f"{position_name}\n{job_description}").lower()
+
+        role_terms = [
+            "project controls",
+            "project control",
+            "cost control",
+            "document control",
+            "cost and document management",
+            "planning and controls",
+        ]
+        infra_terms = [
+            "infrastructure",
+            "construction",
+            "civil engineering",
+            "water industry",
+            "utilities",
+            "capital projects",
+        ]
+
+        return any(term in text for term in role_terms) and any(term in text for term in infra_terms)
 
     @staticmethod
     def _reason_strongly_says_not_relevant(reason: str) -> bool:
@@ -435,6 +500,8 @@ class JobClassifier:
             "does not match allowed tech or business core roles",
             "does not match allowed tech or business roles",
             "outside allowed target scope",
+            "administrative checklist without a real job function or hiring context",
+            "manufacturing production team lead role focused on shop-floor assembly and operational supervision",
         ]
         return any(signal in reason_l for signal in strong_signals)
 
@@ -1247,7 +1314,7 @@ Source text:
             return {
                 "role_relevance": "Not Relevant",
                 "job_category": "Not T&P",
-                "role_relevance_reason": "No real job role or location specified; content is educational, informational, or not a real job posting.",
+                "role_relevance_reason": "No real job role or location specified; content is educational, informational, checklist-based, or not a real job posting.",
             }
 
         if self._is_medical_or_clinical_role(position_name, job_description):
@@ -1255,6 +1322,20 @@ Source text:
                 "role_relevance": "Not Relevant",
                 "job_category": "Not T&P",
                 "role_relevance_reason": "Medical or clinical role is outside allowed tech and business functions.",
+            }
+
+        if self._is_rf_test_engineer_role(position_name, job_description):
+            return {
+                "role_relevance": "Not Relevant",
+                "job_category": "Not T&P",
+                "role_relevance_reason": "RF test engineering role is outside the allowed target scope.",
+            }
+
+        if self._is_project_controls_infrastructure_role(position_name, job_description):
+            return {
+                "role_relevance": "Not Relevant",
+                "job_category": "Not T&P",
+                "role_relevance_reason": "Infrastructure project controls role with cost or document control focus is outside allowed tech and business core roles.",
             }
 
         if self._is_retail_sales_role(position_name, job_description):
@@ -1301,6 +1382,7 @@ Source text:
             parsed["role_relevance"] == "Not Relevant"
             and self._is_finance_relevant_role(position_name, job_description)
             and is_location_allowed(location_candidates, remote_preferences_list)
+            and not self._reason_strongly_says_not_relevant(parsed.get("role_relevance_reason", ""))
         ):
             parsed["role_relevance"] = "Relevant"
             parsed["job_category"] = parsed["job_category"] or "Not T&P"
