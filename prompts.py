@@ -30,9 +30,33 @@ def build_role_relevance_prompt(position_name: str, job_description: str, predef
     - operations / change / transformation / program style roles
     - events / venue partnerships / marketing manager style roles when they are corporate, B2B, remote, client, booking, campaign, CRM, or partnership focused
 
+    If the content is not a real job posting, mark Not Relevant.
+    Examples:
+    - educational module
+    - learning content
+    - news article
+    - informational article
+    - career guide
+    - page with no real role, no real hiring context, or no real job details
+
     If the role is clearly outside tech or business functions (for example teacher, nurse, waiter), mark Not Relevant, even if some criteria partially match.
 
-    Exclude any roles related to construction, civil engineering, retail store/shop/showroom/cashier/shop-floor sales, electrical, mechanical, manufacturing-function work, factory/plant/shop-floor work, microbiology, maritime, injection molding, and beauty brands.
+    Exclude any roles related to:
+    - construction
+    - civil engineering
+    - retail store/shop/showroom/cashier/shop-floor sales
+    - electrical or mechanical engineering roles outside allowed target scope
+    - manufacturing-function work
+    - factory / plant / shop-floor work
+    - production engineer
+    - multi-skilled engineer
+    - microbiology
+    - maritime
+    - injection molding
+    - beauty brands
+    - medical roles
+    - clinical roles
+    - psychiatry / psychiatrist / physician / hospital care roles
 
     Retail sales rule:
     Sales jobs are allowed when they are business/corporate sales, account management, events, partnerships, venue, bookings, CRM, or client-facing business roles.
@@ -51,6 +75,7 @@ def build_role_relevance_prompt(position_name: str, job_description: str, predef
     g) If multiple locations are listed and at least one acceptable location exists for the role, mark Relevant.
     h) Do not use office lists, company office examples, or generic global office mentions as the job location unless they are clearly the role's actual location.
     i) Prefer the location stated in the main role header or labeled fields such as "Location:" or "Workplace type:" over lower-page text.
+    j) If the location clearly indicates Canada, Ontario, ON, or another Canadian province, do not treat it as UK.
 
     Language rule:
     If the job requires any language other than English, mark Not Relevant.
@@ -103,6 +128,7 @@ def build_location_prompt(position_name: str, job_description: str, predefined_l
     f) Do not guess a location from random body text if the job posting does not clearly state one.
     g) If the extracted location does not exactly exist in the acceptable list, select the closest broader location from the list.
     h) If none of the acceptable locations match, output "Unknown".
+    i) If the location clearly indicates Canada, Ontario, ON, or another Canadian province, do not map it to a UK city.
 
     Important rules:
     1. If multiple acceptable locations match, select the most specific one.
