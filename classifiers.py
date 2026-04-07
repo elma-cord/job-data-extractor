@@ -383,43 +383,61 @@ class JobClassifier:
 
         return False
 
-    @staticmethod
-    def _is_medical_or_clinical_role(position_name: str, job_description: str) -> bool:
-        title = clean_description(position_name).lower()
-        desc = clean_description(job_description).lower()
-        full = f"{title}\n{desc}"
+@staticmethod
+def _is_medical_or_clinical_role(position_name: str, job_description: str) -> bool:
+    title = clean_description(position_name).lower()
+    desc = clean_description(job_description).lower()
+    full = f"{title}\n{desc}"
 
-        strong_medical_title_terms = [
-            "psychiatrist", "psychiatry", "doctor", "physician", "surgeon",
-            "nurse", "therapist", "occupational therapist", "pharmacist",
-            "dentist", "clinical psychologist", "medical consultant",
-            "consultant psychiatrist", "healthcare assistant",
-        ]
-        strong_medical_context_terms = [
-            "patient care", "hospital", "ward", "clinical practice",
-            "medical practice", "diagnosis", "treatment plan", "surgical",
-            "mental health service", "registered nurse",
-        ]
-        override_terms = [
-            "medical writer", "clinical data", "healthtech", "health tech",
-            "medical software", "clinical systems", "ehr", "emr",
-            "repair consultant", "vehicle damage", "automotive", "body repair",
-            "claims", "engineering technician", "customer consultant",
-            "solus", "repair methodology",
-        ]
+    strong_tech_override_terms = [
+        "software developer", "software engineer", "developer", "engineer",
+        "data platform", "distributed systems", "distributed system",
+        "backend", "back end", "microservices", "api", "apis",
+        "cloud", "kubernetes", "docker", "kafka", "redis",
+        "postgresql", "mongodb", "python", "java", "scala",
+        "platform", "data engineer", "data engineering",
+        "devops", "infrastructure", "site reliability", "sre",
+    ]
 
-        if any(term in full for term in override_terms):
-            return False
-
-        if any(term in title for term in strong_medical_title_terms):
-            return True
-
-        if any(term in desc for term in strong_medical_context_terms) and any(
-            term in desc for term in ["medical", "clinical", "patient", "hospital", "healthcare"]
-        ):
-            return True
-
+    if any(term in full for term in strong_tech_override_terms):
         return False
+
+    strong_medical_title_terms = [
+        "psychiatrist", "psychiatry", "doctor", "physician", "surgeon",
+        "nurse", "therapist", "occupational therapist", "pharmacist",
+        "dentist", "clinical psychologist", "medical consultant",
+        "consultant psychiatrist", "healthcare assistant",
+        "clinical lead", "medical director",
+    ]
+    strong_medical_context_terms = [
+        "patient care", "hospital", "ward", "clinical practice",
+        "medical practice", "diagnosis", "treatment plan", "surgical",
+        "mental health service", "registered nurse", "patient pathway",
+        "clinical assessment", "care plan",
+    ]
+    override_terms = [
+        "medical writer", "clinical data", "healthtech", "health tech",
+        "medical software", "clinical systems", "ehr", "emr",
+        "repair consultant", "vehicle damage", "automotive", "body repair",
+        "claims", "engineering technician", "customer consultant",
+        "solus", "repair methodology",
+    ]
+
+    if any(term in full for term in override_terms):
+        return False
+
+    if any(term in title for term in strong_medical_title_terms):
+        return True
+
+    medical_context_hits = sum(1 for term in strong_medical_context_terms if term in desc)
+    medical_keyword_hits = sum(
+        1 for term in ["medical", "clinical", "patient", "hospital", "healthcare"] if term in desc
+    )
+
+    if medical_context_hits >= 1 and medical_keyword_hits >= 2:
+        return True
+
+    return False
 
     @staticmethod
     def _is_rf_test_engineer_role(position_name: str, job_description: str) -> bool:
