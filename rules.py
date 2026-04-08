@@ -34,7 +34,7 @@ def dedupe_keep_order(items: list[str]) -> list[str]:
     return out
 
 
-def get_primary_text_window(text: str, max_chars: int = 10000) -> str:
+def get_primary_text_window(text: str, max_chars: int = 12000) -> str:
     text = text or ""
 
     cut_markers = [
@@ -140,13 +140,60 @@ def detect_quick_tp_from_title(position_name: str) -> str:
         "it support", "infrastructure", "architect", "technical", "support engineer",
         "systems engineer", "system engineer", "network engineer", "platform",
         "cloud", "sre", "machine learning", "ai engineer", "application engineer",
-        "administrator",
+        "administrator", "designer", "brand designer", "backend engineer",
     ]
 
     if any(term in title for term in tp_terms):
         return "T&P job"
 
     return "Not T&P" if title else ""
+
+
+def detect_relevant_business_sales_role(position_name: str, description: str) -> bool:
+    title = lower_text(position_name)
+    text = lower_text(f"{position_name}\n{description}")
+
+    positive_terms = [
+        "business development",
+        "business development representative",
+        "bdr",
+        "sdr",
+        "sales development representative",
+        "account executive",
+        "account manager",
+        "account director",
+        "commercial associate",
+        "sales consultant",
+        "business development consultant",
+        "partnerships",
+        "renewals",
+        "sales operations",
+        "revenue operations",
+        "customer success",
+        "implementation manager",
+    ]
+
+    negative_retail_terms = [
+        "retail",
+        "store",
+        "shop",
+        "showroom",
+        "cashier",
+        "sales assistant",
+        "sales associate",
+        "customer floor",
+        "in-store",
+        "instore",
+        "counter sales",
+    ]
+
+    if any(term in title for term in positive_terms):
+        return not any(term in text for term in negative_retail_terms)
+
+    if "sales" in title or "commercial" in title:
+        return not any(term in text for term in negative_retail_terms)
+
+    return False
 
 
 def title_has_leadership_signal(position_name: str) -> bool:
@@ -239,10 +286,10 @@ _SAFE_SKILL_ALIASES = {
     "PostgreSQL": [r"\bpostgresql\b", r"\bpostgres\b"],
     "Machine Learning": [r"\bmachine learning\b", r"\bml\b", r"\bllms?\b", r"\blarge language models?\b"],
     "Artificial Intelligence": [r"\bartificial intelligence\b", r"\bai\b", r"\bllms?\b", r"\blarge language models?\b"],
-    "Data Visualisation": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b"],
-    "Data Visualization": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b"],
+    "Data Visualisation": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b", r"\bvisual standards\b"],
+    "Data Visualization": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b", r"\bvisual standards\b"],
     "Data Driven": [r"\bdata[- ]driven\b"],
-    "Performance Reporting": [r"\bperformance reporting\b", r"\breporting\b"],
+    "Performance Reporting": [r"\bperformance reporting\b", r"\bperformance data\b"],
     "VAT": [r"\bvat\b"],
     "BACS": [r"\bbacs\b"],
     "Accounts Payable": [r"\baccounts payable\b", r"\bap\b"],
@@ -253,6 +300,13 @@ _SAFE_SKILL_ALIASES = {
     "Excel": [r"\bexcel\b"],
     "GitHub": [r"\bgithub\b"],
     "LinkedIn": [r"\blinkedin\b"],
+    "R": [r"\br programming\b", r"\busing r\b", r"\bexperience with r\b", r"\br language\b"],
+    "Flutter": [r"\bflutter framework\b", r"\bflutter development\b", r"\bflutter sdk\b", r"\bdart/flutter\b"],
+    "Project Management": [r"\bproject management\b", r"\bmanage projects\b", r"\bdelivery of critical projects\b"],
+    "Project Management Tools": [r"\bproject management tools\b", r"\bproject tools\b", r"\broadmap\b", r"\bplanned delivery\b"],
+    "Business Analysis": [r"\bbusiness analyst\b", r"\bbusiness analysis\b", r"\brequirements\b", r"\brequirements elicitation\b"],
+    "Graphic Design": [r"\bgraphic design\b", r"\bbrand designer\b", r"\bvisual design\b"],
+    "Brand Marketing": [r"\bbrand marketing\b", r"\bbrand identity\b", r"\bbrand designer\b"],
 }
 
 
@@ -289,6 +343,56 @@ def extract_deterministic_skills(position_name: str, description: str, allowed_s
 
     found.sort(key=lambda x: x[1])
     return dedupe_keep_order([skill for skill, _ in found])[:max_items]
+
+
+def infer_skills_from_position_context(position_name: str, description: str, allowed_skills: list[str], max_items: int = 4) -> list[str]:
+    title = lower_text(position_name)
+    text = lower_text(f"{position_name}\n{description}")
+
+    candidate_map = [
+        (
+            ["project manager", "project coordinator", "project lead"],
+            ["Project Management", "Project Management Tools"],
+        ),
+        (
+            ["business analyst"],
+            ["Business Analysis", "Project Management"],
+        ),
+        (
+            ["brand designer", "designer"],
+            ["Graphic Design", "Brand Marketing"],
+        ),
+        (
+            ["accounts payable", "accounts payable assistant"],
+            ["Accounts Payable", "VAT", "Excel", "BACS"],
+        ),
+        (
+            ["analytics manager", "data analyst", "insight analyst"],
+            ["SQL", "Data Visualisation", "Performance Reporting", "Data Driven"],
+        ),
+        (
+            ["business development", "bdr", "sdr", "account executive"],
+            ["Business Development", "Lead Generation", "Sales"],
+        ),
+    ]
+
+    allowed_lookup = {lower_text(x): x for x in allowed_skills}
+    out = []
+
+    for triggers, skills in candidate_map:
+        if any(trigger in title for trigger in triggers):
+            for skill in skills:
+                key = lower_text(skill)
+                if key in allowed_lookup and allowed_lookup[key] not in out:
+                    out.append(allowed_lookup[key])
+
+    if not out and "llm" in text:
+        for skill in ["Machine Learning", "Artificial Intelligence"]:
+            key = lower_text(skill)
+            if key in allowed_lookup and allowed_lookup[key] not in out:
+                out.append(allowed_lookup[key])
+
+    return out[:max_items]
 
 
 def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: list[str]) -> list[str]:
@@ -339,6 +443,14 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
             ["accounts payable", "accounts payable assistant"],
             ["Finance/Accounting", "Operations"],
         ),
+        (
+            ["brand designer"],
+            ["Graphic Designer", "Brand Marketing"],
+        ),
+        (
+            ["business development", "bdr", "sdr"],
+            ["SDR/BDR", "Business Development Manager", "Account Executive"],
+        ),
     ]
 
     for triggers, candidates in rules:
@@ -384,6 +496,83 @@ def salary_context_exists(text: str) -> bool:
         r"\bannually\b",
     ]
     return any(re.search(p, t) for p in patterns)
+
+
+def extract_remote_days(text: str) -> str:
+    text_l = lower_text(get_primary_text_window(text))
+    if not text_l:
+        return "not specified"
+
+    if re.search(r"\bfully remote\b|\b100% remote\b|\bremote-only\b|\bremote only\b|\bmostly async from anywhere\b", text_l):
+        return "not specified"
+
+    patterns = [
+        (r"\b(?:works?|working)\s+on\s+site\s+four\s+days\s+a\s+week.*?\bone\s+flexible\s+work\s+from\s+home\s+day\b", "1"),
+        (r"\b4\s+days?\s+(?:a\s+week\s+)?(?:on[- ]site|in\s+the\s+office|on\s+site)\b.*?\b1\s+(?:day\s+)?(?:wfh|work\s+from\s+home|from\s+home)\b", "1"),
+        (r"\b1\s+day\s+(?:a\s+week\s+)?(?:wfh|work\s+from\s+home|from\s+home)\b", "1"),
+        (r"\b2\s+days?\s+(?:a\s+week\s+)?(?:wfh|work\s+from\s+home|from\s+home)\b", "2"),
+        (r"\b3\s+days?\s+(?:a\s+week\s+)?(?:wfh|work\s+from\s+home|from\s+home)\b", "3"),
+        (r"\b1\s*-\s*2\s+days?\s+in\s+the\s+office\b", "3"),
+        (r"\b2\s*-\s*3\s+days?\s+in\s+the\s+office\b", "2"),
+        (r"\b1\s+day\s+in\s+the\s+office\b", "4"),
+        (r"\b2\s+days?\s+in\s+the\s+office\b", "3"),
+        (r"\b3\s+days?\s+in\s+the\s+office\b", "2"),
+        (r"\b4\s+days?\s+in\s+the\s+office\b", "1"),
+    ]
+
+    for pattern, value in patterns:
+        if re.search(pattern, text_l, flags=re.IGNORECASE | re.DOTALL):
+            return value
+
+    return "not specified"
+
+
+def extract_remote_preferences(text: str) -> list[str]:
+    text_l = lower_text(get_primary_text_window(text))
+    found = []
+
+    strong_remote = [
+        r"(?im)^\s*remote\s*$",
+        r"\bfully remote\b",
+        r"\bremote-only\b",
+        r"\bremote only\b",
+        r"\bwe work remotely\b",
+        r"\bmostly async from anywhere\b",
+    ]
+    strong_hybrid = [
+        r"\bhybrid\b",
+        r"\bflexibility for occasional home working\b",
+        r"\bwork from home day\b",
+        r"\bhome working by agreement\b",
+    ]
+    strong_onsite = [
+        r"\bon-site\b",
+        r"\bonsite\b",
+        r"\bon site\b",
+        r"\bbased at our .* office\b",
+        r"\bf/t site\b",
+    ]
+
+    if any(re.search(p, text_l, flags=re.IGNORECASE | re.DOTALL) for p in strong_remote):
+        found.append("remote")
+
+    if any(re.search(p, text_l, flags=re.IGNORECASE | re.DOTALL) for p in strong_hybrid):
+        found.append("hybrid")
+
+    if any(re.search(p, text_l, flags=re.IGNORECASE | re.DOTALL) for p in strong_onsite):
+        found.append("onsite")
+
+    if "remote" in found:
+        if "hybrid" in found and not re.search(r"\bhybrid\b|\boccasional home working\b|\bwork from home day\b", text_l):
+            found = [x for x in found if x != "hybrid"]
+        if "onsite" in found and not re.search(r"\bon[- ]site\b|\bf/t site\b", text_l):
+            found = [x for x in found if x != "onsite"]
+
+    ordered = []
+    for item in ["onsite", "hybrid", "remote"]:
+        if item in found and item not in ordered:
+            ordered.append(item)
+    return ordered
 
 
 def is_location_allowed(job_location: str, remote_preferences: list[str], source_text: str) -> bool:
