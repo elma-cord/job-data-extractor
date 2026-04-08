@@ -48,7 +48,9 @@ def build_unified_job_extraction_prompt(
     - finance / accounting / FP&A / tax / treasury / audit / controller / accounts payable / accounts receivable
     - business operations / program / PMO / transformation / change / analyst roles
     - account / client / customer / renewals / partnerships / implementation / customer success roles
-    - marketing / growth / content / CRM / communications / product marketing / demand generation roles
+    - marketing / growth / content / CRM / communications / product marketing / demand generation / brand marketing roles
+    - brand design / visual design / graphic design / brand designer / brand design lead roles
+    - assistant brand manager / brand manager / brand marketing roles when they are genuine corporate marketing roles
     - executive assistant / chief of staff / legal / people ops / talent acquisition roles
     - technical support / IT / infrastructure / systems / network / support engineering roles when clearly technical
     - business development / BDR / SDR / account executive / sales consultant / commercial roles when clearly genuine business or B2B roles and not retail store sales
@@ -57,14 +59,18 @@ def build_unified_job_extraction_prompt(
     - Not a real job posting
     - Educational content, learning modules, checklists, articles, guides
     - Construction, civil engineering, retail store roles, cashier, showroom/store/branch/shop-floor roles
-    - Electrical / mechanical / manufacturing / plant / factory / assembly / injection molding / maritime / microbiology / beauty brand roles
+    - Electrical / mechanical / manufacturing / plant / factory / assembly / injection molding / maritime / microbiology roles
     - Medical / clinical / patient care roles
+    - Beauty therapist / salon / cosmetology / in-store beauty advisor roles
     - Any role clearly outside allowed tech/business functions
 
     Very important relevance notes:
+    - Do NOT exclude a role just because it contains the word "brand".
+    - Brand design, brand marketing, assistant brand manager, and similar corporate brand/marketing/design roles are Relevant when they are genuine business roles.
+    - Only exclude beauty/retail/store/showroom/shop-floor roles when the text clearly indicates that context.
     - Backend Engineer, software engineering, data, infrastructure, analytics, product, technical support, IT support, systems, network, cloud, and similar target roles are Relevant when location rules are satisfied.
     - Genuine business development / BDR / SDR / account executive / account manager / commercial roles are Relevant when they are business roles and not retail store sales.
-    - Do not mark a role Not Relevant if your own explanation says it matches predefined job titles, backend/software engineering, allowed business scope, or allowed location.
+    - Do not mark a role Not Relevant if your own explanation says it matches predefined job titles, backend/software engineering, allowed business scope, allowed marketing/design scope, or allowed location.
 
     2) job_category
     Output exactly one:
@@ -176,6 +182,7 @@ def build_unified_job_extraction_prompt(
     - If position name exactly matches one predefined job title, usually return just that one, unless the description clearly supports a second closely related exact title
     - For designer roles, prioritize the designer title over broader marketing labels if both are supported
     - Brand design / brand designer / brand design lead roles should include the best matching designer title if it exists in the predefined list, not only Brand Marketing
+    - Assistant Brand Manager roles should prefer the closest brand/marketing title, not be treated as irrelevant
     - 1st line / IT support / technical support / application engineer roles should map to the most appropriate technical title, not customer service
     - Do not output unrelated titles
 
