@@ -213,26 +213,27 @@ class JobClassifier:
     def _description_has_ambiguous_location(self, description: str) -> bool:
         d = clean_description(description).lower()
 
-        ambiguous_markers = [
+        explicit_markers = [
             " hub based ",
             "all our roles are hub based",
             "multiple locations",
             "bristol, glasgow or london",
             "kelso or bathgate",
         ]
-        if any(marker in d for marker in ambiguous_markers):
+        if any(marker in d for marker in explicit_markers):
             return True
 
-        if re.search(r"\b[a-z][a-z\s\-']+\s+or\s+[a-z][a-z\s\-']+\b", d, flags=re.IGNORECASE):
-            return True
+        location_like_or_patterns = [
+            r"\b(?:based in|location|locations?)[:\s]+[a-z][a-z\s\-']+\s+or\s+[a-z][a-z\s\-']+\b",
+            r"\bhub based\s*\(.+?\bor\b.+?\)",
+        ]
+        return any(re.search(pattern, d, flags=re.IGNORECASE) for pattern in location_like_or_patterns)
 
-        return False
-
-    def _has_clear_single_location_in_description(self, text: str) -> bool:
+    def _has_clear_single_location_in_text(self, text: str) -> bool:
         weighted = self._extract_weighted_location_candidates(text)
         strong_candidates = []
 
-        for weight, pos, raw in weighted:
+        for weight, _pos, raw in weighted:
             normalized = normalize_location_match(raw, self.predefined_locations)
             if not normalized:
                 continue
@@ -248,9 +249,6 @@ class JobClassifier:
         text = clean_description(text)
         weighted = self._extract_weighted_location_candidates(text)
         if not weighted:
-            return ""
-
-        if self._description_has_ambiguous_location(text) and not self._has_clear_single_location_in_description(text):
             return ""
 
         best_value = ""
@@ -303,11 +301,12 @@ class JobClassifier:
         )
         return not (has_location_signal and has_role_signal)
 
-    def _build_source_text(self, description: str, job_url: str) -> tuple[str, str, bool]:
+    def _build_source_text(self, description: str, job_url: str) -> tuple[str, str, bool, str]:
         description = clean_description(description)
         notes = []
         source_text = description
         used_fetched_page = False
+        page_text = ""
 
         if job_url and self._should_fetch_url(description):
             fetched = fetch_job_page_text(job_url)
@@ -327,9 +326,15 @@ class JobClassifier:
             if description:
                 notes.append("used current description")
 
-        return source_text, "; ".join(notes), used_fetched_page
+        return source_text, "; ".join(notes), used_fetched_page, page_text
 
-    def _coerce_location(self, ai_location: Any, source_text: str, used_fetched_page: bool) -> str:
+    def _choose_best_location(
+        self,
+        ai_location: Any,
+        description_text: str,
+        page_text: str,
+        used_fetched_page: bool,
+    ) -> str:
         ai_location_s = safe_str(ai_location)
         direct = ""
         if ai_location_s:
@@ -338,20 +343,46 @@ class JobClassifier:
             else:
                 direct = normalize_location_match(ai_location_s, self.predefined_locations) or LOCATION_UNKNOWN
 
-        deterministic = self._deterministic_location_from_text(source_text)
+        desc_ambiguous = self._description_has_ambiguous_location(description_text)
+        desc_det = self._deterministic_location_from_text(description_text)
+        desc_single_clear = self._has_clear_single_location_in_text(description_text)
 
-        if self._description_has_ambiguous_location(source_text) and not used_fetched_page:
-            if deterministic and self._has_clear_single_location_in_description(source_text):
-                return deterministic
+        page_det = self._deterministic_location_from_text(page_text) if page_text else ""
+        page_single_clear = self._has_clear_single_location_in_text(page_text) if page_text else False
+
+        if used_fetched_page:
+            if page_det and page_single_clear:
+                return page_det
+
+            if not page_det and desc_ambiguous and not desc_single_clear:
+                return LOCATION_UNKNOWN
+
+            if desc_det and desc_single_clear:
+                return desc_det
+
+            if page_det:
+                return page_det
+
+            if desc_det and not desc_ambiguous:
+                return desc_det
+
+            if direct and not self._is_broad_location(direct):
+                return direct
+
             return LOCATION_UNKNOWN
 
-        if deterministic and (self._is_broad_location(direct) or not direct):
-            return deterministic
+        if desc_ambiguous:
+            if desc_det and desc_single_clear:
+                return desc_det
+            return LOCATION_UNKNOWN
 
-        if deterministic and direct and self._is_broad_location(direct) and not self._is_broad_location(deterministic):
-            return deterministic
+        if desc_det and (self._is_broad_location(direct) or not direct):
+            return desc_det
 
-        return direct or deterministic or LOCATION_UNKNOWN
+        if desc_det and direct and self._is_broad_location(direct) and not self._is_broad_location(desc_det):
+            return desc_det
+
+        return direct or desc_det or LOCATION_UNKNOWN
 
     def _coerce_salary_value(self, value: Any) -> str:
         value_s = safe_str(value).replace(",", "")
@@ -480,12 +511,24 @@ class JobClassifier:
         out = self._filter_job_titles(position_name, out)
         return out[:MAX_JOB_TITLES]
 
-    def _parse_ai_payload(self, payload: dict[str, Any], source_text: str, used_fetched_page: bool) -> dict[str, Any]:
+    def _parse_ai_payload(
+        self,
+        payload: dict[str, Any],
+        description_text: str,
+        page_text: str,
+        source_text: str,
+        used_fetched_page: bool,
+    ) -> dict[str, Any]:
         role_relevance = normalize_relevance_label(payload.get("role_relevance", ""))
         job_category = normalize_tp_label(payload.get("job_category", "")) or NOT_TP_LABEL
         role_relevance_reason = safe_str(payload.get("role_relevance_reason", ""))
 
-        job_location = self._coerce_location(payload.get("job_location", ""), source_text, used_fetched_page)
+        job_location = self._choose_best_location(
+            ai_location=payload.get("job_location", ""),
+            description_text=description_text,
+            page_text=page_text,
+            used_fetched_page=used_fetched_page,
+        )
         remote_preferences_list = normalize_remote_preferences(payload.get("remote_preferences", []))
         remote_days = normalize_remote_days(payload.get("remote_days", ""))
 
@@ -570,7 +613,7 @@ class JobClassifier:
                 job_category=detect_quick_tp_from_title(position_name) or NOT_TP_LABEL,
             )
 
-        source_text, source_note, used_fetched_page = self._build_source_text(job_description, job_url)
+        source_text, source_note, used_fetched_page, page_text = self._build_source_text(job_description, job_url)
 
         raw = self._call_model(
             build_unified_job_extraction_prompt(
@@ -585,7 +628,13 @@ class JobClassifier:
         )
         payload = extract_json_object(raw)
 
-        parsed = self._parse_ai_payload(payload, source_text, used_fetched_page)
+        parsed = self._parse_ai_payload(
+            payload=payload,
+            description_text=job_description,
+            page_text=page_text,
+            source_text=source_text,
+            used_fetched_page=used_fetched_page,
+        )
         parsed["seniorities"] = self._finalize_seniorities(position_name, parsed.get("seniorities", []))
 
         allowed_skills = self.predefined_tp_skills if parsed["job_category"] == TP_LABEL else self.predefined_nontp_skills
