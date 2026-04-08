@@ -7,12 +7,14 @@ def build_unified_job_extraction_prompt(
     predefined_job_titles: list[str],
     predefined_locations: list[str],
     predefined_salaries: list[int],
-    allowed_skills: list[str],
+    allowed_tp_skills: list[str],
+    allowed_nontp_skills: list[str],
 ) -> str:
     job_titles_str = ", ".join(predefined_job_titles)
     locations_str = ", ".join(predefined_locations)
     salaries_str = ", ".join(str(x) for x in predefined_salaries)
-    skills_str = ", ".join(allowed_skills)
+    tp_skills_str = ", ".join(allowed_tp_skills)
+    nontp_skills_str = ", ".join(allowed_nontp_skills)
 
     return dedent(f"""
     You are a strict structured extractor for a recruiting workflow.
@@ -29,6 +31,8 @@ def build_unified_job_extraction_prompt(
     - Never invent facts that are not supported by the source text.
     - Use empty strings or empty arrays if not supported.
     - Use the predefined files as strict source of truth for normalized outputs.
+    - If there is uncertainty, prefer fewer outputs and more accurate outputs.
+    - The reason MUST match the final relevance decision.
 
     TASKS
 
@@ -38,6 +42,14 @@ def build_unified_job_extraction_prompt(
     Relevant roles match the predefined job titles list below, or close synonyms / specializations that clearly map to one of them:
     {job_titles_str}
 
+    Also allowed when clearly genuine corporate roles:
+    - finance / accounting / FP&A / tax / treasury / audit / controller / accounts payable / accounts receivable
+    - business operations / program / PMO / transformation / change / analyst roles
+    - account / client / customer / renewals / partnerships / implementation / customer success roles
+    - marketing / growth / content / CRM / communications / product marketing / demand generation roles
+    - executive assistant / chief of staff / legal / people ops / talent acquisition roles
+    - technical support / IT / infrastructure / systems / network / support engineering roles when clearly technical
+
     Exclusions:
     - Not a real job posting
     - Educational content, learning modules, checklists, articles, guides
@@ -45,25 +57,6 @@ def build_unified_job_extraction_prompt(
     - Electrical / mechanical / manufacturing / plant / factory / assembly / injection molding / maritime / microbiology / beauty brand roles
     - Medical / clinical / patient care roles
     - Any role clearly outside allowed tech/business functions
-
-    Important business-scope roles that ARE allowed when genuine corporate roles:
-    - Finance / accounting / FP&A / tax / treasury / audit / controller
-    - Operations / business operations / change / transformation / program / PMO-type business roles
-    - Account / client / customer / renewals / partnerships / implementation / customer success roles
-    - Marketing / growth / content / CRM / communications / product marketing / demand generation roles
-    - Executive assistant / chief of staff / legal / people ops / talent acquisition roles
-
-    Technical support / IT infrastructure roles should be treated as relevant when they are real technical roles:
-    - Support Engineer
-    - Technical Support Engineer
-    - IT Support
-    - 2nd Line Engineer
-    - 3rd Line Engineer
-    - Infrastructure Engineer
-    - Systems Engineer
-    - Network Engineer
-    - System Administrator
-    - similar technical support / infrastructure / escalation roles
 
     2) job_category
     Output exactly one:
@@ -83,6 +76,13 @@ def build_unified_job_extraction_prompt(
     - If salary is only USD/CAD and nothing supports allowed regions, that is evidence for Not Relevant
     - Accept UK / Great Britain / England / Scotland / Wales / Northern Ireland / London etc. as UK
     - Ignore generic company office lists unless they clearly describe this role’s actual work location
+
+    Very important for job_location:
+    - Choose the MOST SPECIFIC acceptable normalized location from the predefined list.
+    - Do NOT fall back to "UK" / "United Kingdom" if a more specific acceptable location in the list matches the city / town / area in the posting.
+    - If the posting says a town/city like Stansted, Huntingdon, Bathgate, Shrewsbury, Glasgow etc., and the acceptable list contains a more specific normalized option that corresponds to that place, choose that more specific option.
+    - If multiple locations are mentioned but one later explicit line or label clearly states the actual role location, prefer that clearer explicit location.
+    - For ambiguous "hub based" or "multiple office" wording, use the most clearly role-specific location if supported by the text. If not clear, output the best supported normalized location, otherwise "Unknown".
 
     4) Language rule
     If the job requires a language other than English, mark Not Relevant.
@@ -151,7 +151,7 @@ def build_unified_job_extraction_prompt(
     Select up to 3 exact job titles from the predefined job titles list.
     - Use exact strings from the list only
     - Prefer fewer, more accurate titles
-    - If position name exactly matches one predefined job title, usually return just that one
+    - If position name exactly matches one predefined job title, usually return just that one, unless the description clearly supports a second closely related exact title
     - Do not output unrelated titles
 
     12) seniorities
@@ -163,24 +163,35 @@ def build_unified_job_extraction_prompt(
     - Order must always be:
       entry, junior, mid, senior, lead, leadership
     - "head of", "director", "vp", "chief", "engineering manager", "technical director" => leadership only
+    - Titles containing "manager" should not be junior unless the text is overwhelmingly entry-level, which is rare
+    - Titles containing "assistant" often support entry or junior
     - 0-1 years => entry, junior
     - 2 years => junior, mid
     - 3-5 years => senior
     - 5+ years or strong ownership / mentoring / managerial responsibility => senior, lead
     - managerial role with cross-functional ownership can justify lead
     - do not add junior/mid to clearly senior management roles
+    - if uncertain for a genuine manager title, prefer senior and/or lead over junior
 
     13) skills
-    Choose 0 to 10 skills from the allowed list below.
+    Choose 0 to 10 skills.
     Hard rules:
-    - Use exact strings from the allowed list only
+    - The allowed skills depend on the final job_category:
+      - If job_category = "T&P job", use ONLY the Allowed T&P skills list
+      - If job_category = "Not T&P", use ONLY the Allowed Non-T&P skills list
+    - Use exact strings from the relevant allowed list only
     - Prefer concrete skills clearly evidenced by the source text
     - Do not invent tools/languages/frameworks
     - If the source does not support a skill, do not include it
     - Better 2 accurate skills than 10 weak skills
+    - Do not include skills just because they are common for the role
+    - Only include inferential skills in rare obvious cases, for example LLMs can support Machine Learning / Artificial Intelligence when those exact skills are in the allowed list
 
-    Allowed skills list:
-    {skills_str}
+    Allowed T&P skills:
+    {tp_skills_str}
+
+    Allowed Non-T&P skills:
+    {nontp_skills_str}
 
     14) role_relevance_reason
     Give one concise reason that MUST match the final relevance decision.
