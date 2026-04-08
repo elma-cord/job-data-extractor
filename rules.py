@@ -583,6 +583,54 @@ def extract_remote_preferences(text: str) -> list[str]:
     return ordered
 
 
+def text_requires_non_english_language(text: str) -> bool:
+    t = lower_text(text)
+
+    negative_patterns = [
+        r"\bfluency in (?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\b",
+        r"\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean) and english\b",
+        r"\bbilingual\b.{0,40}\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\b",
+        r"\brequired language\b.{0,30}\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\b",
+        r"\bmust speak\b.{0,30}\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\b",
+        r"\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\s+required\b",
+    ]
+    return any(re.search(p, t, flags=re.IGNORECASE) for p in negative_patterns)
+
+
+def text_is_predominantly_non_english(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+
+    lower = t.lower()
+
+    common_english_markers = [
+        "responsibilities", "requirements", "location", "salary", "benefits",
+        "about the role", "job description", "experience", "apply", "you will",
+        "we are looking for", "job type",
+    ]
+    if sum(1 for x in common_english_markers if x in lower) >= 2:
+        return False
+
+    non_english_markers = [
+        "responsabilidades", "requisitos", "ubicación", "salario", "beneficios",
+        "puesto", "empleo", "experiencia requerida",
+        "responsabilités", "exigences", "lieu", "salaire", "avantages",
+        "stellenbeschreibung", "anforderungen", "standort", "gehalt",
+        "descrizione", "requisiti", "posizione", "stipendio",
+    ]
+    if sum(1 for x in non_english_markers if x in lower) >= 2:
+        return True
+
+    # crude accented-character heuristic for long text
+    accented = len(re.findall(r"[à-ÿÀ-Ÿ]", t))
+    letters = len(re.findall(r"[A-Za-zÀ-Ÿ]", t))
+    if letters >= 200 and accented / max(letters, 1) > 0.03:
+        return True
+
+    return False
+
+
 def is_location_allowed(job_location: str, remote_preferences: list[str], source_text: str) -> bool:
     if not job_location or lower_text(job_location) == "unknown":
         return True
@@ -643,6 +691,7 @@ def reason_strongly_says_not_relevant(reason: str) -> bool:
         "civil engineering",
         "rf test",
         "language other than english",
+        "job description is primarily in another language",
         "location is not allowed",
         "outside allowed regions",
         "usa only",
