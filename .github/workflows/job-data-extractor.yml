@@ -3,6 +3,7 @@ name: Job data extractor
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   PYTHONUNBUFFERED: "1"
+  BATCH_SIZE: "100"
 
 on:
   workflow_dispatch:
@@ -42,7 +43,7 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      - name: Split jobs_input.csv into batches of 100
+      - name: Split jobs_input.csv into batches
         run: |
           python - <<'PY'
           import csv
@@ -54,7 +55,7 @@ jobs:
           batch_dir = Path("batches")
           batch_dir.mkdir(exist_ok=True)
 
-          batch_size = 100
+          batch_size = int(os.environ.get("BATCH_SIZE", "100"))
 
           with input_path.open("r", encoding="utf-8-sig", newline="") as f:
               reader = csv.reader(f)
@@ -133,7 +134,7 @@ jobs:
           final_header = None
           all_rows = []
 
-          for i, batch_file in enumerate(batch_files):
+          for batch_file in batch_files:
               with batch_file.open("r", encoding="utf-8-sig", newline="") as f:
                   reader = csv.reader(f)
                   rows = list(reader)
