@@ -34,18 +34,18 @@ def extract_json_object(text: str) -> dict[str, Any]:
         return {}
 
     try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else {}
+        data = json.loads(text)
+        return data if isinstance(data, dict) else {}
     except Exception:
         pass
 
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         return {}
 
     try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else {}
+        data = json.loads(match.group(0))
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
@@ -63,7 +63,7 @@ def normalize_tp_label(value: str) -> str:
     v = normalize_whitespace(value).lower()
     if v in {"t&p", "tp", "t&p job", "tp job"}:
         return "T&P job"
-    if v in {"not t&p", "not tp", "non tp", "non-tp", "not t&p job", "not t&p role"}:
+    if v in {"not t&p", "not tp", "non-tp", "non tp", "not t&p job"}:
         return "Not T&P"
     return ""
 
@@ -93,13 +93,13 @@ def normalize_remote_preferences(value: Any) -> list[str]:
 
 
 def normalize_remote_days(value: Any) -> str:
-    v = normalize_whitespace(value).lower()
-    if v in {"", "unknown"}:
+    value = normalize_whitespace("" if value is None else str(value)).lower()
+    if not value:
         return "not specified"
-    if v == "not specified":
+    if value == "not specified":
         return "not specified"
-    if re.fullmatch(r"[0-5]", v):
-        return v
+    if re.fullmatch(r"[0-5]", value):
+        return value
     return "not specified"
 
 
@@ -109,7 +109,7 @@ def validate_contract_type(value: str, allowed_contract_types: list[str]) -> str
 
 
 def validate_job_titles(value: Any, allowed_job_titles: list[str], max_items: int = 3) -> list[str]:
-    allowed_map = {normalize_whitespace(x).lower(): x for x in allowed_job_titles}
+    allowed_set = {normalize_whitespace(x).lower(): x for x in allowed_job_titles}
 
     if isinstance(value, list):
         raw_items = value
@@ -121,15 +121,15 @@ def validate_job_titles(value: Any, allowed_job_titles: list[str], max_items: in
     out = []
     for item in raw_items:
         key = normalize_whitespace(item).lower()
-        if key in allowed_map:
-            out.append(allowed_map[key])
+        if key in allowed_set:
+            out.append(allowed_set[key])
 
     return dedupe_preserve_order(out)[:max_items]
 
 
 def validate_seniorities(value: Any, allowed_seniorities: list[str], max_items: int = 3) -> list[str]:
     allowed = {x.lower(): x.lower() for x in allowed_seniorities}
-    order_map = {x.lower(): i for i, x in enumerate(allowed_seniorities)}
+    ordered_map = {x.lower(): i for i, x in enumerate(allowed_seniorities)}
 
     if isinstance(value, list):
         raw_items = value
@@ -138,19 +138,19 @@ def validate_seniorities(value: Any, allowed_seniorities: list[str], max_items: 
     else:
         raw_items = []
 
-    cleaned = []
+    out = []
     for item in raw_items:
         item_l = normalize_whitespace(item).lower()
         if item_l in allowed:
-            cleaned.append(item_l)
+            out.append(item_l)
 
-    cleaned = dedupe_preserve_order(cleaned)
-    cleaned.sort(key=lambda x: order_map.get(x, 999))
-    return cleaned[:max_items]
+    out = dedupe_preserve_order(out)
+    out.sort(key=lambda x: ordered_map.get(x, 999))
+    return out[:max_items]
 
 
 def validate_skills(value: Any, allowed_skills: list[str], max_items: int = 10) -> list[str]:
-    allowed_map = {normalize_whitespace(x).lower(): x for x in allowed_skills}
+    allowed_set = {normalize_whitespace(x).lower(): x for x in allowed_skills}
 
     if isinstance(value, list):
         raw_items = value
@@ -162,18 +162,11 @@ def validate_skills(value: Any, allowed_skills: list[str], max_items: int = 10) 
     out = []
     for item in raw_items:
         key = normalize_whitespace(item).lower()
-        if key in allowed_map:
-            out.append(allowed_map[key])
+        if key in allowed_set:
+            out.append(allowed_set[key])
 
     return dedupe_preserve_order(out)[:max_items]
 
 
 def safe_str(value: Any) -> str:
     return normalize_whitespace("" if value is None else str(value))
-
-
-def safe_int(value: Any):
-    try:
-        return int(value)
-    except Exception:
-        return None
