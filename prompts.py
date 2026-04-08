@@ -33,6 +33,8 @@ def build_unified_job_extraction_prompt(
     - Use the predefined files as strict source of truth for normalized outputs.
     - If there is uncertainty, prefer fewer outputs and more accurate outputs.
     - The reason MUST match the final relevance decision.
+    - If the explanation sounds relevant, do not output Not Relevant.
+    - If the explanation sounds not relevant, do not output Relevant.
 
     TASKS
 
@@ -59,13 +61,18 @@ def build_unified_job_extraction_prompt(
     - Medical / clinical / patient care roles
     - Any role clearly outside allowed tech/business functions
 
+    Very important relevance notes:
+    - Backend Engineer, software engineering, data, infrastructure, analytics, product, technical support, IT support, systems, network, cloud, and similar target roles are Relevant when location rules are satisfied.
+    - Genuine business development / BDR / SDR / account executive / account manager / commercial roles are Relevant when they are business roles and not retail store sales.
+    - Do not mark a role Not Relevant if your own explanation says it matches predefined job titles, backend/software engineering, allowed business scope, or allowed location.
+
     2) job_category
     Output exactly one:
     - "T&P job"
     - "Not T&P"
 
     T&P includes:
-    software engineering, data, DevOps, QA, security, IT, support engineering, infrastructure, cloud, UX/UI, product, technical architecture, technical writing, ML/AI, etc.
+    software engineering, data, DevOps, QA, security, IT, support engineering, infrastructure, cloud, UX/UI, product, technical architecture, technical writing, ML/AI, systems, network, application engineering, and similar technical roles.
 
     3) Location rules for relevance
     Relevant only if the role fits allowed locations:
@@ -84,6 +91,7 @@ def build_unified_job_extraction_prompt(
     - If the posting says a town/city like Stansted, Huntingdon, Bathgate, Shrewsbury, Glasgow, Worthing etc., and the acceptable list contains a more specific normalized option that corresponds to that place, choose that more specific option.
     - If the description has a clear explicit location, prefer that over generic office-list text from later page text.
     - If multiple locations are mentioned but one later explicit line or label clearly states the actual role location, prefer that clearer explicit location.
+    - If there is an ambiguous hub-based / multiple-office statement AND a separate explicit location field elsewhere in the text, prefer the explicit location field.
     - For ambiguous "hub based" or "multiple office" wording, use the most clearly role-specific location if supported by the text. If not clear, output "Unknown".
 
     4) Language rule
@@ -111,6 +119,9 @@ def build_unified_job_extraction_prompt(
     Important:
     - If the posting clearly says "Remote", "fully remote", "remote only", or "mostly async from anywhere", prefer ["remote"].
     - Do not add onsite or hybrid unless explicitly supported.
+    - If the posting clearly says on-site / onsite / office-based / F/T Site, include onsite.
+    - If the posting clearly says hybrid / occasional home working / one day work from home / flexibility for occasional home working, include hybrid.
+    - Do not output onsite and remote together unless the text explicitly supports both.
 
     7) remote_days
     Return only:
@@ -128,6 +139,8 @@ def build_unified_job_extraction_prompt(
     - If one day work from home / WFH -> 1
     - If fully remote / remote-first / unclear -> "not specified"
     - Never use salary numbers or unrelated numbers
+    - Example: "works on site four days a week, with one flexible work from home day" => remote_days = "1"
+    - Example: "occasional home working by agreement" => remote_days = "not specified"
 
     8) salary
     Extract salary from the text only if clearly supported.
@@ -162,6 +175,8 @@ def build_unified_job_extraction_prompt(
     - Prefer fewer, more accurate titles
     - If position name exactly matches one predefined job title, usually return just that one, unless the description clearly supports a second closely related exact title
     - For designer roles, prioritize the designer title over broader marketing labels if both are supported
+    - Brand design / brand designer / brand design lead roles should include the best matching designer title if it exists in the predefined list, not only Brand Marketing
+    - 1st line / IT support / technical support / application engineer roles should map to the most appropriate technical title, not customer service
     - Do not output unrelated titles
 
     12) seniorities
@@ -174,7 +189,8 @@ def build_unified_job_extraction_prompt(
       entry, junior, mid, senior, lead, leadership
     - "head of", "director", "vp", "chief", "engineering manager", "technical director" => leadership only
     - "assistant manager" is usually junior, mid
-    - "manager" should usually be senior, lead
+    - Other assistant roles are usually junior, mid unless the text clearly proves something else
+    - Generic "manager" should usually be senior, lead
     - Generic non-manager professional roles without clear years can be junior, mid, senior
     - Do not use lead for non-manager roles unless the text clearly shows strong ownership / mentoring / cross-functional leadership
     - 0-1 years => entry, junior
@@ -183,6 +199,9 @@ def build_unified_job_extraction_prompt(
     - 5+ years or strong ownership / mentoring / managerial responsibility => senior, lead
     - avoid entry unless the posting truly looks early-career
     - do not add junior/mid to clearly senior management roles
+    - assistant brand manager should usually NOT be senior, lead
+    - if unsure for a non-manager professional role, junior, mid, senior is safer than lead
+    - do not overuse lead
 
     13) skills
     Choose 0 to 10 skills.
@@ -201,6 +220,9 @@ def build_unified_job_extraction_prompt(
       - do not infer "Flutter" from company names unless the framework is clearly referenced
     - Only include inferential skills in rare obvious cases, for example LLMs can support Machine Learning / Artificial Intelligence when those exact skills are in the allowed list
     - If the description is thin and only a few skills are obvious, return just the most appropriate 2-4 supported skills
+    - PostgreSQL can be supported by explicit Postgres / PostgreSQL wording
+    - SQL/Postgres wording supports SQL and PostgreSQL when both exist in the allowed list
+    - For weak descriptions, prefer the most appropriate role-specific skills only when they are strongly implied by the role and consistent with the allowed list
 
     Allowed T&P skills:
     {tp_skills_str}
