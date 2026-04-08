@@ -354,6 +354,9 @@ class JobClassifier:
         page_det = self._deterministic_location_from_text(page_text) if page_text else ""
         page_single_clear = self._has_clear_single_location_in_text(page_text) if page_text else False
 
+        if desc_det and desc_single_clear:
+            return desc_det
+
         if used_fetched_page:
             if page_det and page_single_clear:
                 return page_det
@@ -361,14 +364,8 @@ class JobClassifier:
             if not page_det and desc_ambiguous and not desc_single_clear:
                 return LOCATION_UNKNOWN
 
-            if desc_det and desc_single_clear:
-                return desc_det
-
             if page_det:
                 return page_det
-
-            if desc_det and not desc_ambiguous:
-                return desc_det
 
             if direct and not self._is_broad_location(direct):
                 return direct
@@ -376,8 +373,6 @@ class JobClassifier:
             return LOCATION_UNKNOWN
 
         if desc_ambiguous:
-            if desc_det and desc_single_clear:
-                return desc_det
             return LOCATION_UNKNOWN
 
         if desc_det and (self._is_broad_location(direct) or not direct):
@@ -426,8 +421,31 @@ class JobClassifier:
             "coaching",
             "drive data-driven change",
             "executive decision making",
+            "own roadmap",
+            "stakeholder management across teams",
         ]
         return any(marker in d for marker in complexity_markers)
+
+    @staticmethod
+    def _reason_is_positive_relevant(reason: str) -> bool:
+        r = clean_description(reason).lower()
+        positive_markers = [
+            "matches predefined job title",
+            "backend development",
+            "software development",
+            "data role",
+            "technical support role",
+            "business development",
+            "sales role",
+            "allowed location",
+            "uk",
+            "hybrid",
+            "remote",
+            "full-time",
+            "permanent",
+            "genuine business",
+        ]
+        return any(marker in r for marker in positive_markers)
 
     @staticmethod
     def _clean_skill_list(skills: list[str], source_text: str, max_items: int) -> list[str]:
@@ -449,28 +467,37 @@ class JobClassifier:
         if "manager" in title:
             return ["senior", "lead"]
 
-        if "assistant" in title:
-            return ["entry", "junior"]
+        if seniorities:
+            cleaned = seniorities[:]
 
-        if "administrator" in title and not seniorities:
+            if "assistant" in title:
+                cleaned = [x for x in cleaned if x not in {"lead", "leadership", "senior"}]
+                return cleaned or ["junior", "mid"]
+
+            if "manager" not in title and "lead" in cleaned and not self._is_complex_non_manager_role(description):
+                cleaned = [x for x in cleaned if x != "lead"]
+
+            if "entry" in cleaned and ("2 years" in description.lower() or "3 years" in description.lower() or "experience" in description.lower()):
+                cleaned = [x for x in cleaned if x != "entry"]
+
+            if not cleaned:
+                if "engineer" in title or "developer" in title or "analyst" in title or "designer" in title:
+                    return ["junior", "mid"]
+
+            return cleaned[:3]
+
+        if "assistant" in title:
             return ["junior", "mid"]
 
-        if seniorities:
-            if "assistant" in title:
-                seniorities = [x for x in seniorities if x not in {"lead", "leadership"}]
-                return seniorities or ["entry", "junior"]
-
-            if "manager" not in title and "lead" in seniorities and not self._is_complex_non_manager_role(description):
-                seniorities = [x for x in seniorities if x != "lead"]
-
-            return seniorities[:3]
+        if "administrator" in title:
+            return ["junior", "mid"]
 
         if "engineer" in title or "developer" in title or "analyst" in title or "designer" in title:
             if self._is_complex_non_manager_role(description):
                 return ["junior", "mid", "senior"]
-            return ["junior", "mid"]
+            return ["junior", "mid", "senior"]
 
-        return []
+        return ["junior", "mid", "senior"]
 
     def _filter_job_titles(self, position_name: str, job_titles: list[str]) -> list[str]:
         title_l = clean_description(position_name).lower()
@@ -624,13 +651,17 @@ class JobClassifier:
             "notes": notes,
         }
 
-    def _apply_final_consistency(self, result: dict[str, Any], source_text: str) -> dict[str, Any]:
-        if reason_strongly_says_not_relevant(result.get("role_relevance_reason", "")):
+    def _apply_final_consistency(self, result: dict[str, Any], position_name: str, source_text: str) -> dict[str, Any]:
+        reason = result.get("role_relevance_reason", "")
+
+        if reason_strongly_says_not_relevant(reason) and not self._reason_is_positive_relevant(reason):
             result["role_relevance"] = NOT_RELEVANT_LABEL
 
-        if detect_relevant_business_sales_role("", source_text):
-            if result.get("role_relevance") != NOT_RELEVANT_LABEL:
-                result["role_relevance"] = RELEVANT_LABEL
+        if detect_relevant_business_sales_role(position_name, source_text):
+            result["role_relevance"] = RELEVANT_LABEL
+
+        if self._reason_is_positive_relevant(reason):
+            result["role_relevance"] = RELEVANT_LABEL
 
         if result.get("role_relevance") == RELEVANT_LABEL:
             if not is_location_allowed(
@@ -746,5 +777,5 @@ class JobClassifier:
         if source_note:
             parsed["notes"] = "; ".join([x for x in [parsed.get("notes", ""), source_note] if x])
 
-        final_result = self._apply_final_consistency(parsed, source_text)
+        final_result = self._apply_final_consistency(parsed, position_name, source_text)
         return final_result
