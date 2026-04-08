@@ -45,6 +45,8 @@ from rules import (
     reason_strongly_says_not_relevant,
     salary_context_exists,
     skill_is_supported,
+    text_requires_non_english_language,
+    text_is_predominantly_non_english,
     title_has_leadership_signal,
 )
 from validators import (
@@ -181,15 +183,15 @@ class JobClassifier:
         candidates: list[tuple[int, int, str]] = []
 
         patterns = [
-            (240, r"(?im)^\s*location\s*$\n^\s*(.+)$"),
-            (235, r"(?im)^\s*location\s*[:\-]\s*(.+)$"),
-            (230, r"(?im)^\s*####\s*location\s*$\n^\s*(.+)$"),
-            (225, r"(?im)^\s*job location\s*[:\-]\s*(.+)$"),
-            (220, r"(?im)^\s*office location\s*[:\-]\s*(.+)$"),
-            (210, r"(?im)^\s*city\s*[:\-]\s*(.+)$"),
-            (205, r"(?im)^\s*based in\s+(.+)$"),
-            (200, r"(?im)\brole is based at (?:our )?(.+?)(?: office|\.)"),
-            (140, r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$"),
+            (260, r"(?im)^\s*location\s*$\n^\s*(.+)$"),
+            (255, r"(?im)^\s*location\s*[:\-]\s*(.+)$"),
+            (250, r"(?im)^\s*####\s*location\s*$\n^\s*(.+)$"),
+            (245, r"(?im)^\s*job location\s*[:\-]\s*(.+)$"),
+            (240, r"(?im)^\s*office location\s*[:\-]\s*(.+)$"),
+            (230, r"(?im)^\s*city\s*[:\-]\s*(.+)$"),
+            (225, r"(?im)^\s*based in\s+(.+)$"),
+            (220, r"(?im)\brole is based at (?:our )?(.+?)(?: office|\.)"),
+            (160, r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$"),
             (80, r"(?im)\bhub based\s*\((.+?)\)"),
         ]
 
@@ -202,7 +204,7 @@ class JobClassifier:
                     continue
 
                 value = re.split(
-                    r"(?i)\b(hybrid|remote|onsite|salary|schedule|travel required|shift|clearance|required|benefits|reporting to)\b",
+                    r"(?i)\b(hybrid|remote|onsite|salary|schedule|travel required|shift|clearance|required|benefits|reporting to|employment type|industry|career level)\b",
                     value,
                     maxsplit=1,
                 )[0].strip(" ,:-")
@@ -233,6 +235,32 @@ class JobClassifier:
         ]
         return any(re.search(pattern, d, flags=re.IGNORECASE) for pattern in location_like_or_patterns)
 
+    def _explicit_description_location(self, text: str) -> str:
+        weighted = self._extract_weighted_location_candidates(text)
+        if not weighted:
+            return ""
+
+        best_value = ""
+        best_score = -10**9
+        best_pos = -1
+
+        for weight, pos, raw in weighted:
+            normalized = normalize_location_match(raw, self.predefined_locations)
+            if not normalized:
+                continue
+            if self._is_broad_location(normalized):
+                continue
+            # explicit description labels should dominate
+            score = weight + 120
+            if "," in normalized:
+                score += 20
+            if score > best_score or (score == best_score and pos > best_pos):
+                best_score = score
+                best_value = normalized
+                best_pos = pos
+
+        return best_value
+
     def _has_clear_single_location_in_text(self, text: str) -> bool:
         weighted = self._extract_weighted_location_candidates(text)
         strong_candidates = []
@@ -243,7 +271,7 @@ class JobClassifier:
                 continue
             if self._is_broad_location(normalized):
                 continue
-            if weight >= 200:
+            if weight >= 220:
                 strong_candidates.append(normalized)
 
         strong_candidates = list(dict.fromkeys(strong_candidates))
@@ -347,16 +375,16 @@ class JobClassifier:
             else:
                 direct = normalize_location_match(ai_location_s, self.predefined_locations) or LOCATION_UNKNOWN
 
+        explicit_desc_location = self._explicit_description_location(description_text)
+        if explicit_desc_location:
+            return explicit_desc_location
+
         desc_ambiguous = self._description_has_ambiguous_location(description_text)
         desc_det = self._deterministic_location_from_text(description_text)
         desc_single_clear = self._has_clear_single_location_in_text(description_text)
 
         page_det = self._deterministic_location_from_text(page_text) if page_text else ""
         page_single_clear = self._has_clear_single_location_in_text(page_text) if page_text else False
-
-        # strongest rule: if description itself clearly states one explicit location, keep it
-        if desc_det and desc_single_clear:
-            return desc_det
 
         if used_fetched_page:
             if page_det and page_single_clear:
@@ -445,6 +473,9 @@ class JobClassifier:
             "full-time",
             "permanent",
             "genuine business",
+            "brand design",
+            "brand marketing",
+            "designer role",
         ]
         return any(marker in r for marker in positive_markers)
 
@@ -463,7 +494,6 @@ class JobClassifier:
         if title_has_leadership_signal(position_name):
             return ["leadership"]
 
-        # assistant manager BEFORE generic manager
         if "assistant manager" in title or "assistant brand manager" in title:
             return ["junior", "mid"]
 
@@ -536,7 +566,6 @@ class JobClassifier:
             }
             titles = [t for t in titles if t not in banned_for_technical]
 
-        # designer titles must come before Brand Marketing
         if any(x in title_l for x in ["designer", "design lead", "brand design", "brand designer"]):
             designer_titles = ["Graphic Designer", "UI Designer", "UI/UX Designer", "UX Designer"]
             prioritized = []
@@ -683,6 +712,14 @@ class JobClassifier:
 
         if self._reason_is_positive_relevant(reason):
             result["role_relevance"] = RELEVANT_LABEL
+
+        if text_is_predominantly_non_english(source_text):
+            result["role_relevance"] = NOT_RELEVANT_LABEL
+            result["role_relevance_reason"] = "Job description is primarily in another language."
+
+        if text_requires_non_english_language(source_text):
+            result["role_relevance"] = NOT_RELEVANT_LABEL
+            result["role_relevance_reason"] = "Role requires a language other than English."
 
         if result.get("role_relevance") == RELEVANT_LABEL:
             if not is_location_allowed(
