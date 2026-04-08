@@ -31,8 +31,12 @@ from prompts import build_unified_job_extraction_prompt
 from rules import (
     closest_salary_value,
     detect_quick_tp_from_title,
+    detect_relevant_business_sales_role,
     extract_deterministic_skills,
+    extract_remote_days,
+    extract_remote_preferences,
     infer_job_titles_from_position_name,
+    infer_skills_from_position_context,
     is_location_allowed,
     load_single_column_csv,
     looks_like_non_job_content,
@@ -408,6 +412,24 @@ class JobClassifier:
         return ""
 
     @staticmethod
+    def _is_complex_non_manager_role(description: str) -> bool:
+        d = clean_description(description).lower()
+        complexity_markers = [
+            "senior stakeholders",
+            "cross-functional leadership",
+            "own strategy",
+            "strategic",
+            "thought leadership",
+            "technical escalation point",
+            "architecture",
+            "mentor",
+            "coaching",
+            "drive data-driven change",
+            "executive decision making",
+        ]
+        return any(marker in d for marker in complexity_markers)
+
+    @staticmethod
     def _clean_skill_list(skills: list[str], source_text: str, max_items: int) -> list[str]:
         cleaned = []
         for skill in skills:
@@ -415,12 +437,14 @@ class JobClassifier:
                 cleaned.append(skill)
         return cleaned[:max_items]
 
-    @staticmethod
-    def _finalize_seniorities(position_name: str, seniorities: list[str]) -> list[str]:
+    def _finalize_seniorities(self, position_name: str, seniorities: list[str], description: str) -> list[str]:
         title = clean_description(position_name).lower()
 
         if title_has_leadership_signal(position_name):
             return ["leadership"]
+
+        if "assistant manager" in title:
+            return ["junior", "mid"]
 
         if "manager" in title:
             return ["senior", "lead"]
@@ -429,13 +453,24 @@ class JobClassifier:
             return ["entry", "junior"]
 
         if "administrator" in title and not seniorities:
-            return ["mid"]
+            return ["junior", "mid"]
 
-        if not seniorities:
-            if "engineer" in title or "developer" in title or "analyst" in title:
-                return ["mid"]
+        if seniorities:
+            if "assistant" in title:
+                seniorities = [x for x in seniorities if x not in {"lead", "leadership"}]
+                return seniorities or ["entry", "junior"]
 
-        return seniorities[:3]
+            if "manager" not in title and "lead" in seniorities and not self._is_complex_non_manager_role(description):
+                seniorities = [x for x in seniorities if x != "lead"]
+
+            return seniorities[:3]
+
+        if "engineer" in title or "developer" in title or "analyst" in title or "designer" in title:
+            if self._is_complex_non_manager_role(description):
+                return ["junior", "mid", "senior"]
+            return ["junior", "mid"]
+
+        return []
 
     def _filter_job_titles(self, position_name: str, job_titles: list[str]) -> list[str]:
         title_l = clean_description(position_name).lower()
@@ -465,6 +500,11 @@ class JobClassifier:
                 "Customer Support",
             }
             titles = [t for t in titles if t not in banned_for_technical]
+
+        if "designer" in title_l:
+            preferred_designer = {"Graphic Designer", "UI Designer", "UI/UX Designer", "UX Designer"}
+            if any(t in preferred_designer for t in titles):
+                titles = [t for t in titles if t != "Brand Marketing"] + [t for t in titles if t == "Brand Marketing"]
 
         return titles[:MAX_JOB_TITLES]
 
@@ -508,6 +548,11 @@ class JobClassifier:
                     out.append(candidate)
             out = out[:MAX_JOB_TITLES]
 
+        if "brand designer" in title_l:
+            for candidate in ["Graphic Designer", "Brand Marketing"]:
+                if candidate in self.predefined_job_titles and candidate not in out:
+                    out.append(candidate)
+
         out = self._filter_job_titles(position_name, out)
         return out[:MAX_JOB_TITLES]
 
@@ -529,8 +574,19 @@ class JobClassifier:
             page_text=page_text,
             used_fetched_page=used_fetched_page,
         )
-        remote_preferences_list = normalize_remote_preferences(payload.get("remote_preferences", []))
-        remote_days = normalize_remote_days(payload.get("remote_days", ""))
+
+        ai_remote_preferences = normalize_remote_preferences(payload.get("remote_preferences", []))
+        det_remote_preferences = extract_remote_preferences(source_text)
+        remote_preferences_list = det_remote_preferences or ai_remote_preferences
+
+        det_remote_days = extract_remote_days(source_text)
+        ai_remote_days = normalize_remote_days(payload.get("remote_days", ""))
+        remote_days = det_remote_days if det_remote_days != "not specified" else ai_remote_days
+
+        if "remote" in remote_preferences_list and "hybrid" in remote_preferences_list and "occasional home working" not in source_text.lower():
+            remote_preferences_list = ["remote"]
+        if "remote" in remote_preferences_list and "onsite" in remote_preferences_list and "f/t site" not in source_text.lower():
+            remote_preferences_list = [x for x in remote_preferences_list if x != "onsite"]
 
         salary_min = self._coerce_salary_value(payload.get("salary_min", ""))
         salary_max = self._coerce_salary_value(payload.get("salary_max", ""))
@@ -571,6 +627,10 @@ class JobClassifier:
     def _apply_final_consistency(self, result: dict[str, Any], source_text: str) -> dict[str, Any]:
         if reason_strongly_says_not_relevant(result.get("role_relevance_reason", "")):
             result["role_relevance"] = NOT_RELEVANT_LABEL
+
+        if detect_relevant_business_sales_role("", source_text):
+            if result.get("role_relevance") != NOT_RELEVANT_LABEL:
+                result["role_relevance"] = RELEVANT_LABEL
 
         if result.get("role_relevance") == RELEVANT_LABEL:
             if not is_location_allowed(
@@ -635,7 +695,17 @@ class JobClassifier:
             source_text=source_text,
             used_fetched_page=used_fetched_page,
         )
-        parsed["seniorities"] = self._finalize_seniorities(position_name, parsed.get("seniorities", []))
+
+        if detect_relevant_business_sales_role(position_name, source_text):
+            parsed["role_relevance"] = RELEVANT_LABEL
+            if not parsed.get("role_relevance_reason") or "not matching" in parsed.get("role_relevance_reason", "").lower():
+                parsed["role_relevance_reason"] = "Role is a genuine business development / sales role within target business scope."
+
+        parsed["seniorities"] = self._finalize_seniorities(
+            position_name,
+            parsed.get("seniorities", []),
+            source_text,
+        )
 
         allowed_skills = self.predefined_tp_skills if parsed["job_category"] == TP_LABEL else self.predefined_nontp_skills
 
@@ -653,6 +723,18 @@ class JobClassifier:
         for skill in ai_skills:
             if skill not in final_skills:
                 final_skills.append(skill)
+
+        if len(final_skills) < 2:
+            inferred = infer_skills_from_position_context(
+                position_name=position_name,
+                description=source_text,
+                allowed_skills=allowed_skills,
+                max_items=4,
+            )
+            for skill in inferred:
+                if skill not in final_skills:
+                    final_skills.append(skill)
+
         parsed["skills"] = final_skills[:MAX_SKILLS]
 
         parsed["job_titles"] = self._fallback_job_titles(
