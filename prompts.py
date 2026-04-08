@@ -101,8 +101,11 @@ def build_unified_job_extraction_prompt(
     - For ambiguous "hub based" or "multiple office" wording, use the most clearly role-specific location if supported by the text. If not clear, output "Unknown".
 
     4) Language rule
-    If the job requires a language other than English, mark Not Relevant.
-    English-only is fine.
+    - If the job description is mainly written in another language, mark Not Relevant.
+    - If the role requires any language other than English, mark Not Relevant.
+    - Example: "Fluency in French and English" => Not Relevant.
+    - Example: Human Resources assistant position described in Spanish => Not Relevant.
+    - English-only is fine.
 
     5) job_location
     Extract and normalize exactly one value from the acceptable locations list below.
