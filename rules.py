@@ -189,11 +189,13 @@ def normalize_location_match(value: str, allowed_locations: list[str]) -> str:
     if value_key in exact_map:
         return exact_map[value_key]
 
-    broad_only = {"uk", "united kingdom", "england", "scotland", "wales", "northern ireland", "ireland", "europe", "emea", "global", "worldwide"}
+    broad_only = {
+        "uk", "united kingdom", "england", "scotland", "wales",
+        "northern ireland", "ireland", "europe", "emea", "global", "worldwide"
+    }
 
     best_value = ""
     best_score = -10**9
-
     value_tokens = set(value_key.split())
 
     for loc in allowed_locations:
@@ -265,7 +267,6 @@ def skill_is_supported(skill: str, text: str) -> bool:
     if alias_patterns:
         return any(re.search(pattern, text_l, flags=re.IGNORECASE) for pattern in alias_patterns)
 
-    # Strict exact-ish matching by default.
     skill_key = re.escape(lower_text(skill_n))
     if re.search(rf"(?<![a-z0-9]){skill_key}(?![a-z0-9])", text_l, flags=re.IGNORECASE):
         return True
@@ -277,15 +278,85 @@ def extract_deterministic_skills(position_name: str, description: str, allowed_s
     full_text = f"{position_name}\n{description}"
 
     found = []
+    full_text_l = lower_text(full_text)
+
     for skill in allowed_skills:
         if skill_is_supported(skill, full_text):
-            idx = lower_text(full_text).find(lower_text(skill))
+            idx = full_text_l.find(lower_text(skill))
             if idx < 0:
                 idx = 999999
             found.append((skill, idx))
 
     found.sort(key=lambda x: x[1])
     return dedupe_keep_order([skill for skill, _ in found])[:max_items]
+
+
+def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: list[str]) -> list[str]:
+    title = lower_text(position_name)
+    allowed_lookup = {lower_text(x): x for x in allowed_job_titles}
+
+    def pick(candidates: list[str]) -> list[str]:
+        out = []
+        for candidate in candidates:
+            key = lower_text(candidate)
+            if key in allowed_lookup and allowed_lookup[key] not in out:
+                out.append(allowed_lookup[key])
+        return out
+
+    if title in allowed_lookup:
+        return [allowed_lookup[title]]
+
+    rules = [
+        (
+            ["1st line", "first line", "2nd line", "second line", "3rd line", "third line"],
+            ["Support Engineer", "System Administrator", "System Engineer"],
+        ),
+        (
+            ["it engineer", "it support engineer", "support engineer", "technical support engineer"],
+            ["Support Engineer", "System Engineer", "System Administrator"],
+        ),
+        (
+            ["application engineer"],
+            ["System Engineer", "Support Engineer", "Solutions Engineer"],
+        ),
+        (
+            ["systems engineer", "system engineer"],
+            ["System Engineer", "Support Engineer"],
+        ),
+        (
+            ["network engineer"],
+            ["Network Engineer", "System Engineer"],
+        ),
+        (
+            ["administrator"],
+            ["System Administrator", "Operations"],
+        ),
+        (
+            ["analytics manager"],
+            ["Business Analyst", "Data/Insight Analyst"],
+        ),
+        (
+            ["accounts payable", "accounts payable assistant"],
+            ["Finance/Accounting", "Operations"],
+        ),
+    ]
+
+    for triggers, candidates in rules:
+        if any(trigger in title for trigger in triggers):
+            picked = pick(candidates)
+            if picked:
+                return picked[:3]
+
+    contains_matches = []
+    for allowed in allowed_job_titles:
+        if lower_text(allowed) in title:
+            contains_matches.append(allowed)
+
+    deduped = dedupe_keep_order(contains_matches)
+    if deduped:
+        return deduped[:3]
+
+    return []
 
 
 def closest_salary_value(value: int, allowed_salaries: list[int]) -> str:
