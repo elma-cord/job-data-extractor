@@ -449,7 +449,7 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
             ["Finance/Accounting", "Operations"],
         ),
         (
-            ["brand designer"],
+            ["brand designer", "brand design", "brand design lead", "design lead"],
             ["Graphic Designer", "Brand Marketing"],
         ),
         (
