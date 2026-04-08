@@ -29,13 +29,14 @@ def dedupe_keep_order(items: list[str]) -> list[str]:
     out = []
     for item in items:
         if item not in seen:
-            out.append(item)
             seen.add(item)
+            out.append(item)
     return out
 
 
 def get_primary_text_window(text: str, max_chars: int = 10000) -> str:
     text = text or ""
+
     cut_markers = [
         r"(?i)\bour hiring process\b",
         r"(?i)\bother jobs\b",
@@ -49,8 +50,10 @@ def get_primary_text_window(text: str, max_chars: int = 10000) -> str:
         if m:
             text = text[:m.start()]
             break
+
     if len(text) > max_chars:
         text = text[:max_chars]
+
     return text.strip()
 
 
@@ -90,6 +93,8 @@ def looks_like_non_job_content(position_name: str, description: str) -> bool:
         "reporting to",
         "full time",
         "part time",
+        "role purpose",
+        "job description",
     ]
 
     if any(term in text for term in hard_non_job_terms) and not any(term in text for term in job_signals):
@@ -134,11 +139,13 @@ def detect_quick_tp_from_title(position_name: str) -> str:
         "backend", "back end", "front end", "frontend", "full stack",
         "it support", "infrastructure", "architect", "technical", "support engineer",
         "systems engineer", "system engineer", "network engineer", "platform",
-        "cloud", "sre", "machine learning", "ai engineer",
+        "cloud", "sre", "machine learning", "ai engineer", "application engineer",
+        "administrator",
     ]
 
     if any(term in title for term in tp_terms):
         return "T&P job"
+
     return "Not T&P" if title else ""
 
 
@@ -163,44 +170,122 @@ def title_has_leadership_signal(position_name: str) -> bool:
     return any(term in title for term in leadership_terms)
 
 
-def _normalize_for_matching(text: str) -> str:
-    text = text.lower()
+def _canonical_location_key(text: str) -> str:
+    text = lower_text(text)
     text = text.replace("&", " and ")
-    text = re.sub(r"[+/]", " ", text)
-    text = re.sub(r"[^a-z0-9#.\- ]+", " ", text)
+    text = re.sub(r"\bgreat britain\b", " united kingdom ", text)
+    text = re.sub(r"\bu\.?k\.?\b", " uk ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def normalize_location_match(value: str, allowed_locations: list[str]) -> str:
+    value_key = _canonical_location_key(value)
+    if not value_key:
+        return ""
+
+    exact_map = {_canonical_location_key(x): x for x in allowed_locations}
+    if value_key in exact_map:
+        return exact_map[value_key]
+
+    broad_only = {"uk", "united kingdom", "england", "scotland", "wales", "northern ireland", "ireland", "europe", "emea", "global", "worldwide"}
+
+    best_value = ""
+    best_score = -10**9
+
+    value_tokens = set(value_key.split())
+
+    for loc in allowed_locations:
+        loc_key = _canonical_location_key(loc)
+        loc_tokens = set(loc_key.split())
+
+        score = 0
+
+        if value_key == loc_key:
+            score += 1000
+
+        if value_key in loc_key:
+            score += 500
+
+        overlap = len(value_tokens & loc_tokens)
+        score += overlap * 80
+
+        if value_tokens and value_tokens.issubset(loc_tokens):
+            score += 250
+
+        if loc_key in broad_only:
+            score -= 250
+
+        if "," in loc:
+            score += 50
+
+        if len(loc_tokens) >= 3:
+            score += 20
+
+        if score > best_score:
+            best_score = score
+            best_value = loc
+
+    if best_score >= 120:
+        return best_value
+
+    return ""
+
+
+_SAFE_SKILL_ALIASES = {
+    "PostgreSQL": [r"\bpostgresql\b", r"\bpostgres\b"],
+    "Machine Learning": [r"\bmachine learning\b", r"\bml\b", r"\bllms?\b", r"\blarge language models?\b"],
+    "Artificial Intelligence": [r"\bartificial intelligence\b", r"\bai\b", r"\bllms?\b", r"\blarge language models?\b"],
+    "Data Visualisation": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b"],
+    "Data Visualization": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b"],
+    "Data Driven": [r"\bdata[- ]driven\b"],
+    "Performance Reporting": [r"\bperformance reporting\b", r"\breporting\b"],
+    "VAT": [r"\bvat\b"],
+    "BACS": [r"\bbacs\b"],
+    "Accounts Payable": [r"\baccounts payable\b", r"\bap\b"],
+    "Accounts Receivable": [r"\baccounts receivable\b", r"\bar\b"],
+    "PyTorch": [r"\bpytorch\b"],
+    "Tensorflow": [r"\btensorflow\b"],
+    "SQL": [r"\bsql\b"],
+    "Excel": [r"\bexcel\b"],
+    "GitHub": [r"\bgithub\b"],
+    "LinkedIn": [r"\blinkedin\b"],
+}
 
 
 def skill_is_supported(skill: str, text: str) -> bool:
     if not skill or not text:
         return False
 
-    text_n = _normalize_for_matching(text)
-    skill_n = _normalize_for_matching(skill)
+    text_l = lower_text(text)
+    skill_n = normalize_text(skill)
 
-    if not skill_n:
-        return False
+    alias_patterns = _SAFE_SKILL_ALIASES.get(skill_n, [])
+    if alias_patterns:
+        return any(re.search(pattern, text_l, flags=re.IGNORECASE) for pattern in alias_patterns)
 
-    if re.search(rf"(?<![a-z0-9]){re.escape(skill_n)}(?![a-z0-9])", text_n):
+    # Strict exact-ish matching by default.
+    skill_key = re.escape(lower_text(skill_n))
+    if re.search(rf"(?<![a-z0-9]){skill_key}(?![a-z0-9])", text_l, flags=re.IGNORECASE):
         return True
-
-    parts = [p for p in skill_n.split() if p]
-    if len(parts) >= 2:
-        return all(re.search(rf"(?<![a-z0-9]){re.escape(p)}(?![a-z0-9])", text_n) for p in parts)
 
     return False
 
 
 def extract_deterministic_skills(position_name: str, description: str, allowed_skills: list[str], max_items: int = 10) -> list[str]:
     full_text = f"{position_name}\n{description}"
-    out = []
 
+    found = []
     for skill in allowed_skills:
         if skill_is_supported(skill, full_text):
-            out.append(skill)
+            idx = lower_text(full_text).find(lower_text(skill))
+            if idx < 0:
+                idx = 999999
+            found.append((skill, idx))
 
-    return dedupe_keep_order(out)[:max_items]
+    found.sort(key=lambda x: x[1])
+    return dedupe_keep_order([skill for skill, _ in found])[:max_items]
 
 
 def closest_salary_value(value: int, allowed_salaries: list[int]) -> str:
@@ -230,46 +315,6 @@ def salary_context_exists(text: str) -> bool:
     return any(re.search(p, t) for p in patterns)
 
 
-def normalize_location_match(value: str, allowed_locations: list[str]) -> str:
-    value_n = lower_text(value)
-    allowed_map = {lower_text(x): x for x in allowed_locations}
-
-    if value_n in allowed_map:
-        return allowed_map[value_n]
-
-    value_n_simple = re.sub(r"[^a-z0-9 ]+", " ", value_n)
-    value_n_simple = re.sub(r"\s+", " ", value_n_simple).strip()
-
-    best = ""
-    best_score = -1
-
-    for loc in allowed_locations:
-        loc_n = lower_text(loc)
-        loc_n_simple = re.sub(r"[^a-z0-9 ]+", " ", loc_n)
-        loc_n_simple = re.sub(r"\s+", " ", loc_n_simple).strip()
-
-        score = 0
-        if value_n_simple == loc_n_simple:
-            score += 1000
-
-        value_parts = set(value_n_simple.split())
-        loc_parts = set(loc_n_simple.split())
-        overlap = len(value_parts & loc_parts)
-        score += overlap * 25
-
-        if value_parts and value_parts.issubset(loc_parts):
-            score += 80
-
-        if score > best_score:
-            best_score = score
-            best = loc
-
-    if best_score >= 50:
-        return best
-
-    return ""
-
-
 def is_location_allowed(job_location: str, remote_preferences: list[str], source_text: str) -> bool:
     if not job_location or lower_text(job_location) == "unknown":
         return True
@@ -279,7 +324,7 @@ def is_location_allowed(job_location: str, remote_preferences: list[str], source
     remote_set = set(remote_preferences)
 
     uk_markers = ["uk", "united kingdom", "england", "scotland", "wales", "northern ireland"]
-    if any(m in loc for m in uk_markers):
+    if any(marker in loc for marker in uk_markers):
         return True
 
     if "ireland" in loc:
