@@ -32,6 +32,7 @@ from rules import (
     closest_salary_value,
     detect_quick_tp_from_title,
     extract_deterministic_skills,
+    infer_job_titles_from_position_name,
     is_location_allowed,
     load_single_column_csv,
     looks_like_non_job_content,
@@ -68,6 +69,7 @@ class JobClassifier:
         self.predefined_salaries = self._load_salary_values(Path(PREDEFINED_SALARIES_CSV))
 
         self.location_lookup = {x.lower(): x for x in self.predefined_locations}
+        self.job_title_lookup = {x.lower(): x for x in self.predefined_job_titles}
 
     @staticmethod
     def _load_salary_values(path: Path) -> list[int]:
@@ -167,26 +169,29 @@ class JobClassifier:
 
         return cleaned
 
-    def _extract_weighted_location_candidates(self, text: str) -> list[tuple[int, str]]:
+    def _extract_weighted_location_candidates(self, text: str) -> list[tuple[int, int, str]]:
         text = clean_description(text)
         if not text:
             return []
 
-        candidates: list[tuple[int, str]] = []
+        candidates: list[tuple[int, int, str]] = []
 
         patterns = [
-            (100, r"(?im)^\s*location\s*[:\-]\s*(.+)$"),
-            (100, r"(?im)^\s*job location\s*[:\-]\s*(.+)$"),
-            (100, r"(?im)^\s*office location\s*[:\-]\s*(.+)$"),
-            (95, r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$"),
-            (95, r"(?im)^\s*city\s*[:\-]\s*(.+)$"),
-            (95, r"(?im)^\s*based in\s+(.+)$"),
-            (90, r"(?im)^\s*####\s*location\s*$\n^\s*(.+)$"),
-            (80, r"(?im)\brole is based at (?:our )?(.+?)(?: office|\.)"),
-            (70, r"(?im)\bhub based\s*\((.+?)\)"),
+            (240, r"(?im)^\s*location\s*$\n^\s*(.+)$"),
+            (230, r"(?im)^\s*####\s*location\s*$\n^\s*(.+)$"),
+            (230, r"(?im)^\s*location\s*[:\-]\s*(.+)$"),
+            (225, r"(?im)^\s*job location\s*[:\-]\s*(.+)$"),
+            (220, r"(?im)^\s*office location\s*[:\-]\s*(.+)$"),
+            (210, r"(?im)^\s*city\s*[:\-]\s*(.+)$"),
+            (205, r"(?im)^\s*based in\s+(.+)$"),
+            (200, r"(?im)\brole is based at (?:our )?(.+?)(?: office|\.)"),
+            (140, r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$"),
+            (110, r"(?im)\bhub based\s*\((.+?)\)"),
         ]
 
-        for weight, pattern in patterns:
+        text_len = max(len(text), 1)
+
+        for base_weight, pattern in patterns:
             for match in re.finditer(pattern, text):
                 value = (match.group(1) or "").strip()
                 if not value:
@@ -198,8 +203,10 @@ class JobClassifier:
                     maxsplit=1,
                 )[0].strip(" ,:-")
 
+                recency_bonus = int((match.start() / text_len) * 80)
+
                 for variant in self._split_location_variants(value):
-                    candidates.append((weight, variant))
+                    candidates.append((base_weight + recency_bonus, match.start(), variant))
 
         return candidates
 
@@ -210,21 +217,28 @@ class JobClassifier:
 
         best_value = ""
         best_score = -10**9
+        best_pos = -1
 
-        for weight, raw in weighted:
+        for weight, pos, raw in weighted:
             normalized = normalize_location_match(raw, self.predefined_locations)
             if not normalized:
                 continue
 
             score = weight
-            if not self._is_broad_location(normalized):
-                score += 50
-            if "," in normalized:
-                score += 10
 
-            if score > best_score:
+            if not self._is_broad_location(normalized):
+                score += 70
+
+            if "," in normalized:
+                score += 15
+
+            if self._is_broad_location(normalized):
+                score -= 120
+
+            if score > best_score or (score == best_score and pos > best_pos):
                 best_score = score
                 best_value = normalized
+                best_pos = pos
 
         return best_value
 
@@ -358,6 +372,81 @@ class JobClassifier:
 
         return seniorities[:3]
 
+    def _filter_job_titles(self, position_name: str, job_titles: list[str]) -> list[str]:
+        title_l = clean_description(position_name).lower()
+        titles = job_titles[:]
+
+        strongly_technical = any(
+            term in title_l
+            for term in [
+                "engineer",
+                "it ",
+                "it-",
+                "support",
+                "application engineer",
+                "1st line",
+                "2nd line",
+                "3rd line",
+                "systems",
+                "network",
+                "infrastructure",
+                "administrator",
+            ]
+        )
+
+        if strongly_technical:
+            banned_for_technical = {
+                "Customer Service Representative",
+                "Customer Support",
+            }
+            titles = [t for t in titles if t not in banned_for_technical]
+
+        return titles[:MAX_JOB_TITLES]
+
+    def _fallback_job_titles(self, position_name: str, source_text: str, existing_titles: list[str]) -> list[str]:
+        out = existing_titles[:]
+
+        if out:
+            out = self._filter_job_titles(position_name, out)
+
+        if not out:
+            inferred = infer_job_titles_from_position_name(position_name, self.predefined_job_titles)
+            if inferred:
+                out = inferred[:MAX_JOB_TITLES]
+
+        title_l = clean_description(position_name).lower()
+        text_l = clean_description(source_text).lower()
+
+        if not out:
+            if "1st line" in title_l or "first line" in title_l:
+                for candidate in ["Support Engineer", "System Administrator", "System Engineer"]:
+                    if candidate in self.predefined_job_titles and candidate not in out:
+                        out.append(candidate)
+                out = out[:MAX_JOB_TITLES]
+
+        if not out:
+            if "application engineer" in title_l:
+                for candidate in ["System Engineer", "Support Engineer", "Solutions Engineer"]:
+                    if candidate in self.predefined_job_titles and candidate not in out:
+                        out.append(candidate)
+                out = out[:MAX_JOB_TITLES]
+
+        if "analytics manager" in title_l:
+            if "Business Analyst" in self.predefined_job_titles and "Business Analyst" not in out:
+                out.append("Business Analyst")
+            if "Data/Insight Analyst" in self.predefined_job_titles and "Data/Insight Analyst" not in out:
+                out.append("Data/Insight Analyst")
+            out = out[:MAX_JOB_TITLES]
+
+        if not out and "accounts payable" in title_l:
+            for candidate in ["Finance/Accounting", "Operations"]:
+                if candidate in self.predefined_job_titles and candidate not in out:
+                    out.append(candidate)
+            out = out[:MAX_JOB_TITLES]
+
+        out = self._filter_job_titles(position_name, out)
+        return out[:MAX_JOB_TITLES]
+
     def _parse_ai_payload(self, payload: dict[str, Any], source_text: str) -> dict[str, Any]:
         role_relevance = normalize_relevance_label(payload.get("role_relevance", ""))
         job_category = normalize_tp_label(payload.get("job_category", "")) or NOT_TP_LABEL
@@ -384,8 +473,6 @@ class JobClassifier:
         contract_type = validate_contract_type(payload.get("contract_type", ""), ALLOWED_CONTRACT_TYPES)
         job_titles = validate_job_titles(payload.get("job_titles", []), self.predefined_job_titles, max_items=MAX_JOB_TITLES)
         seniorities = validate_seniorities(payload.get("seniorities", []), ALLOWED_SENIORITIES, max_items=3)
-        seniorities = self._finalize_seniorities("", seniorities)  # temp, overwritten below in classify_job
-
         notes = safe_str(payload.get("notes", ""))
 
         return {
@@ -468,7 +555,6 @@ class JobClassifier:
         parsed = self._parse_ai_payload(payload, source_text)
         parsed["seniorities"] = self._finalize_seniorities(position_name, parsed.get("seniorities", []))
 
-        # Strict skills by final category.
         allowed_skills = self.predefined_tp_skills if parsed["job_category"] == TP_LABEL else self.predefined_nontp_skills
 
         deterministic_skills = extract_deterministic_skills(
@@ -487,19 +573,11 @@ class JobClassifier:
                 final_skills.append(skill)
         parsed["skills"] = final_skills[:MAX_SKILLS]
 
-        # If role is relevant but we still got no titles, try a safe fallback from exact title match.
-        title_lookup = {x.lower(): x for x in self.predefined_job_titles}
-        if not parsed["job_titles"]:
-            exact = title_lookup.get(position_name.lower())
-            if exact:
-                parsed["job_titles"] = [exact]
-
-        # Strong manager fallback for analytics/data/business manager type roles.
-        title_l = position_name.lower()
-        if "analytics manager" in title_l and "Business Analyst" in parsed["job_titles"] and "Data/Insight Analyst" in self.predefined_job_titles:
-            if "Data/Insight Analyst" not in parsed["job_titles"]:
-                parsed["job_titles"].append("Data/Insight Analyst")
-                parsed["job_titles"] = parsed["job_titles"][:MAX_JOB_TITLES]
+        parsed["job_titles"] = self._fallback_job_titles(
+            position_name=position_name,
+            source_text=source_text,
+            existing_titles=parsed.get("job_titles", []),
+        )
 
         if source_note:
             parsed["notes"] = "; ".join([x for x in [parsed.get("notes", ""), source_note] if x])
