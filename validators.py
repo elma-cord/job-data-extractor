@@ -1,5 +1,6 @@
+import json
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 
 def normalize_whitespace(value: str) -> str:
@@ -8,12 +9,13 @@ def normalize_whitespace(value: str) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
-def split_csv_like_list(value: str) -> list[str]:
-    value = normalize_whitespace(value)
-    if not value:
-        return []
-    parts = [p.strip() for p in value.split(",")]
-    return [p for p in parts if p]
+def clean_description(text: str) -> str:
+    text = text or ""
+    text = text.replace("\u00a0", " ")
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def dedupe_preserve_order(items: Iterable[str]) -> list[str]:
@@ -26,113 +28,151 @@ def dedupe_preserve_order(items: Iterable[str]) -> list[str]:
     return result
 
 
+def extract_json_object(text: str) -> dict[str, Any]:
+    text = (text or "").strip()
+    if not text:
+        return {}
+
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return {}
+
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
 def normalize_relevance_label(value: str) -> str:
     v = normalize_whitespace(value).lower()
-
-    if re.fullmatch(r"not relevant", v):
-        return "Not Relevant"
-    if re.fullmatch(r"relevant", v):
+    if v == "relevant":
         return "Relevant"
-
-    if re.search(r"(^|[^a-z])not relevant([^a-z]|$)", v):
+    if v == "not relevant":
         return "Not Relevant"
-    if re.search(r"(^|[^a-z])relevant([^a-z]|$)", v):
-        return "Relevant"
-
     return ""
 
 
 def normalize_tp_label(value: str) -> str:
     v = normalize_whitespace(value).lower()
-    if "not t&p" in v or "not tp" in v:
-        return "Not T&P"
-    if v in {"t&p", "t&p job", "tp", "tp job"} or "t&p" in v or "tp job" in v:
+    if v in {"t&p", "tp", "t&p job", "tp job"}:
         return "T&P job"
+    if v in {"not t&p", "not tp", "non tp", "non-tp", "not t&p job", "not t&p role"}:
+        return "Not T&P"
     return ""
 
 
-def parse_role_relevance_response(response_text: str) -> dict:
-    text = normalize_whitespace(response_text)
+def normalize_remote_preferences(value: Any) -> list[str]:
+    allowed = {"onsite", "hybrid", "remote"}
 
-    parts = re.split(r"\s*\|\s*", text, maxsplit=2)
-    while len(parts) < 3:
-        parts.append("")
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str):
+        raw_items = [x.strip() for x in value.split(",")]
+    else:
+        raw_items = []
 
-    role_relevance = normalize_relevance_label(parts[0])
-    job_category = normalize_tp_label(parts[1])
-    role_relevance_reason = parts[2]
+    cleaned = []
+    for item in raw_items:
+        item_l = normalize_whitespace(str(item)).lower()
+        if item_l in allowed and item_l not in cleaned:
+            cleaned.append(item_l)
 
-    if not role_relevance:
-        start_match = re.match(r"^(not relevant|relevant)\b", text, flags=re.IGNORECASE)
-        if start_match:
-            role_relevance = normalize_relevance_label(start_match.group(1))
+    ordered = [x for x in ["onsite", "hybrid", "remote"] if x in cleaned]
 
-    if not job_category:
-        tp_match = re.search(r"\b(not t&p|not tp|t&p job|tp job|t&p)\b", text, flags=re.IGNORECASE)
-        if tp_match:
-            job_category = normalize_tp_label(tp_match.group(1))
+    if "hybrid" in ordered and "remote" in ordered:
+        ordered = [x for x in ordered if x != "remote"]
 
-    if not role_relevance_reason and len(parts) >= 3:
-        role_relevance_reason = normalize_whitespace(parts[2])
-
-    return {
-        "role_relevance": role_relevance,
-        "job_category": job_category,
-        "role_relevance_reason": role_relevance_reason,
-    }
+    return ordered
 
 
-def validate_job_titles(value: str, allowed_job_titles: list[str], max_items: int = 3) -> list[str]:
-    allowed_set = {normalize_whitespace(x).lower(): x for x in allowed_job_titles}
-    out = []
-    for item in split_csv_like_list(value):
-        key = normalize_whitespace(item).lower()
-        if key in allowed_set:
-            out.append(allowed_set[key])
-    return dedupe_preserve_order(out)[:max_items]
+def normalize_remote_days(value: Any) -> str:
+    v = normalize_whitespace(value).lower()
+    if v in {"", "unknown"}:
+        return "not specified"
+    if v == "not specified":
+        return "not specified"
+    if re.fullmatch(r"[0-5]", v):
+        return v
+    return "not specified"
 
 
-def validate_seniorities(value: str, allowed_seniorities: list[str], max_items: int = 3) -> list[str]:
-    value = value or ""
-    allowed = {x.lower(): x.lower() for x in allowed_seniorities}
-    ordered = []
-    for item in split_csv_like_list(value.lower()):
-        item = item.strip().lower()
-        if item in allowed:
-            ordered.append(item)
-
-    ordered = dedupe_preserve_order(ordered)
-    sort_order = {name: idx for idx, name in enumerate(allowed_seniorities)}
-    ordered.sort(key=lambda x: sort_order.get(x, 999))
-    return ordered[:max_items]
-
-
-def validate_contract_type(value: str) -> str:
+def validate_contract_type(value: str, allowed_contract_types: list[str]) -> str:
     v = normalize_whitespace(value)
-    allowed = {"Permanent", "FTC", "Part Time", "Freelance/Contract"}
-    return v if v in allowed else ""
+    return v if v in set(allowed_contract_types) else ""
 
 
-def validate_skills(value: str, allowed_skills: list[str], max_items: int = 10) -> list[str]:
-    allowed_set = {normalize_whitespace(x).lower(): x for x in allowed_skills}
+def validate_job_titles(value: Any, allowed_job_titles: list[str], max_items: int = 3) -> list[str]:
+    allowed_map = {normalize_whitespace(x).lower(): x for x in allowed_job_titles}
+
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str):
+        raw_items = [x.strip() for x in value.split(",")]
+    else:
+        raw_items = []
+
     out = []
-    for item in split_csv_like_list(value):
+    for item in raw_items:
         key = normalize_whitespace(item).lower()
-        if key in allowed_set:
-            out.append(allowed_set[key])
+        if key in allowed_map:
+            out.append(allowed_map[key])
+
     return dedupe_preserve_order(out)[:max_items]
 
 
-def clean_description(text: str) -> str:
-    text = text or ""
-    text = text.replace("\u00a0", " ")
-    text = re.sub(r"\r\n?", "\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+def validate_seniorities(value: Any, allowed_seniorities: list[str], max_items: int = 3) -> list[str]:
+    allowed = {x.lower(): x.lower() for x in allowed_seniorities}
+    order_map = {x.lower(): i for i, x in enumerate(allowed_seniorities)}
+
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str):
+        raw_items = [x.strip() for x in value.split(",")]
+    else:
+        raw_items = []
+
+    cleaned = []
+    for item in raw_items:
+        item_l = normalize_whitespace(item).lower()
+        if item_l in allowed:
+            cleaned.append(item_l)
+
+    cleaned = dedupe_preserve_order(cleaned)
+    cleaned.sort(key=lambda x: order_map.get(x, 999))
+    return cleaned[:max_items]
 
 
-def safe_int(value):
+def validate_skills(value: Any, allowed_skills: list[str], max_items: int = 10) -> list[str]:
+    allowed_map = {normalize_whitespace(x).lower(): x for x in allowed_skills}
+
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str):
+        raw_items = [x.strip() for x in value.split(",")]
+    else:
+        raw_items = []
+
+    out = []
+    for item in raw_items:
+        key = normalize_whitespace(item).lower()
+        if key in allowed_map:
+            out.append(allowed_map[key])
+
+    return dedupe_preserve_order(out)[:max_items]
+
+
+def safe_str(value: Any) -> str:
+    return normalize_whitespace("" if value is None else str(value))
+
+
+def safe_int(value: Any):
     try:
         return int(value)
     except Exception:
