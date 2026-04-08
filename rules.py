@@ -156,21 +156,23 @@ def detect_relevant_business_sales_role(position_name: str, description: str) ->
     positive_terms = [
         "business development",
         "business development representative",
+        "business development consultant",
+        "sales development representative",
         "bdr",
         "sdr",
-        "sales development representative",
         "account executive",
         "account manager",
         "account director",
         "commercial associate",
+        "commercial manager",
         "sales consultant",
-        "business development consultant",
         "partnerships",
         "renewals",
         "sales operations",
         "revenue operations",
         "customer success",
         "implementation manager",
+        "lead generation",
     ]
 
     negative_retail_terms = [
@@ -283,7 +285,7 @@ def normalize_location_match(value: str, allowed_locations: list[str]) -> str:
 
 
 _SAFE_SKILL_ALIASES = {
-    "PostgreSQL": [r"\bpostgresql\b", r"\bpostgres\b"],
+    "PostgreSQL": [r"\bpostgresql\b", r"\bpostgres\b", r"\bsql/postgres\b"],
     "Machine Learning": [r"\bmachine learning\b", r"\bml\b", r"\bllms?\b", r"\blarge language models?\b"],
     "Artificial Intelligence": [r"\bartificial intelligence\b", r"\bai\b", r"\bllms?\b", r"\blarge language models?\b"],
     "Data Visualisation": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b", r"\bvisual standards\b"],
@@ -307,6 +309,9 @@ _SAFE_SKILL_ALIASES = {
     "Business Analysis": [r"\bbusiness analyst\b", r"\bbusiness analysis\b", r"\brequirements\b", r"\brequirements elicitation\b"],
     "Graphic Design": [r"\bgraphic design\b", r"\bbrand designer\b", r"\bvisual design\b"],
     "Brand Marketing": [r"\bbrand marketing\b", r"\bbrand identity\b", r"\bbrand designer\b"],
+    "Business Development": [r"\bbusiness development\b"],
+    "Lead Generation": [r"\blead generation\b", r"\boutbound lead generation\b"],
+    "Sales": [r"\bsales\b", r"\bsales pipeline\b", r"\bsales team\b"],
 }
 
 
@@ -508,6 +513,7 @@ def extract_remote_days(text: str) -> str:
 
     patterns = [
         (r"\b(?:works?|working)\s+on\s+site\s+four\s+days\s+a\s+week.*?\bone\s+flexible\s+work\s+from\s+home\s+day\b", "1"),
+        (r"\bteam usually works on site four days a week.*?\bone\s+flexible\s+work\s+from\s+home\s+day\b", "1"),
         (r"\b4\s+days?\s+(?:a\s+week\s+)?(?:on[- ]site|in\s+the\s+office|on\s+site)\b.*?\b1\s+(?:day\s+)?(?:wfh|work\s+from\s+home|from\s+home)\b", "1"),
         (r"\b1\s+day\s+(?:a\s+week\s+)?(?:wfh|work\s+from\s+home|from\s+home)\b", "1"),
         (r"\b2\s+days?\s+(?:a\s+week\s+)?(?:wfh|work\s+from\s+home|from\s+home)\b", "2"),
@@ -538,12 +544,14 @@ def extract_remote_preferences(text: str) -> list[str]:
         r"\bremote only\b",
         r"\bwe work remotely\b",
         r"\bmostly async from anywhere\b",
+        r"\bwork remotely and mostly async from anywhere\b",
     ]
     strong_hybrid = [
         r"\bhybrid\b",
         r"\bflexibility for occasional home working\b",
         r"\bwork from home day\b",
         r"\bhome working by agreement\b",
+        r"\boccasional home working\b",
     ]
     strong_onsite = [
         r"\bon-site\b",
