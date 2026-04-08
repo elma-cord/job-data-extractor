@@ -354,6 +354,7 @@ class JobClassifier:
         page_det = self._deterministic_location_from_text(page_text) if page_text else ""
         page_single_clear = self._has_clear_single_location_in_text(page_text) if page_text else False
 
+        # strongest rule: if description itself clearly states one explicit location, keep it
         if desc_det and desc_single_clear:
             return desc_det
 
@@ -457,40 +458,47 @@ class JobClassifier:
 
     def _finalize_seniorities(self, position_name: str, seniorities: list[str], description: str) -> list[str]:
         title = clean_description(position_name).lower()
+        desc = clean_description(description).lower()
 
         if title_has_leadership_signal(position_name):
             return ["leadership"]
 
-        if "assistant manager" in title:
+        # assistant manager BEFORE generic manager
+        if "assistant manager" in title or "assistant brand manager" in title:
             return ["junior", "mid"]
 
         if "manager" in title:
             return ["senior", "lead"]
 
+        if "assistant" in title:
+            cleaned = [x for x in seniorities if x not in {"senior", "lead", "leadership"}]
+            return cleaned[:3] if cleaned else ["junior", "mid"]
+
         if seniorities:
             cleaned = seniorities[:]
 
-            if "assistant" in title:
-                cleaned = [x for x in cleaned if x not in {"lead", "leadership", "senior"}]
-                return cleaned or ["junior", "mid"]
-
-            if "manager" not in title and "lead" in cleaned and not self._is_complex_non_manager_role(description):
+            if "lead" in cleaned and "manager" not in title and not self._is_complex_non_manager_role(description):
                 cleaned = [x for x in cleaned if x != "lead"]
 
-            if "entry" in cleaned and ("2 years" in description.lower() or "3 years" in description.lower() or "experience" in description.lower()):
-                cleaned = [x for x in cleaned if x != "entry"]
+            if "entry" in cleaned:
+                strong_non_entry_markers = [
+                    "years of experience",
+                    "stakeholder",
+                    "ownership",
+                    "cross-functional",
+                    "client-facing",
+                    "commercial",
+                    "strategy",
+                    "campaigns",
+                    "brand identity",
+                    "sql",
+                    "requirements",
+                    "analytics",
+                ]
+                if any(marker in desc for marker in strong_non_entry_markers):
+                    cleaned = [x for x in cleaned if x != "entry"]
 
-            if not cleaned:
-                if "engineer" in title or "developer" in title or "analyst" in title or "designer" in title:
-                    return ["junior", "mid"]
-
-            return cleaned[:3]
-
-        if "assistant" in title:
-            return ["junior", "mid"]
-
-        if "administrator" in title:
-            return ["junior", "mid"]
+            return cleaned[:3] if cleaned else ["junior", "mid"]
 
         if "engineer" in title or "developer" in title or "analyst" in title or "designer" in title:
             if self._is_complex_non_manager_role(description):
@@ -528,10 +536,19 @@ class JobClassifier:
             }
             titles = [t for t in titles if t not in banned_for_technical]
 
-        if "designer" in title_l:
-            preferred_designer = {"Graphic Designer", "UI Designer", "UI/UX Designer", "UX Designer"}
-            if any(t in preferred_designer for t in titles):
-                titles = [t for t in titles if t != "Brand Marketing"] + [t for t in titles if t == "Brand Marketing"]
+        # designer titles must come before Brand Marketing
+        if any(x in title_l for x in ["designer", "design lead", "brand design", "brand designer"]):
+            designer_titles = ["Graphic Designer", "UI Designer", "UI/UX Designer", "UX Designer"]
+            prioritized = []
+            for candidate in designer_titles:
+                if candidate in titles and candidate not in prioritized:
+                    prioritized.append(candidate)
+            if "Brand Marketing" in titles and "Brand Marketing" not in prioritized:
+                prioritized.append("Brand Marketing")
+            for t in titles:
+                if t not in prioritized:
+                    prioritized.append(t)
+            titles = prioritized
 
         return titles[:MAX_JOB_TITLES]
 
@@ -563,11 +580,9 @@ class JobClassifier:
                 out = out[:MAX_JOB_TITLES]
 
         if "analytics manager" in title_l:
-            if "Business Analyst" in self.predefined_job_titles and "Business Analyst" not in out:
-                out.append("Business Analyst")
-            if "Data/Insight Analyst" in self.predefined_job_titles and "Data/Insight Analyst" not in out:
-                out.append("Data/Insight Analyst")
-            out = out[:MAX_JOB_TITLES]
+            for candidate in ["Business Analyst", "Data/Insight Analyst"]:
+                if candidate in self.predefined_job_titles and candidate not in out:
+                    out.append(candidate)
 
         if not out and "accounts payable" in title_l:
             for candidate in ["Finance/Accounting", "Operations"]:
@@ -575,10 +590,16 @@ class JobClassifier:
                     out.append(candidate)
             out = out[:MAX_JOB_TITLES]
 
-        if "brand designer" in title_l:
-            for candidate in ["Graphic Designer", "Brand Marketing"]:
-                if candidate in self.predefined_job_titles and candidate not in out:
-                    out.append(candidate)
+        if any(x in title_l for x in ["brand design", "brand designer", "design lead", "brand design lead"]):
+            preferred = ["Graphic Designer", "Brand Marketing"]
+            new_out = []
+            for candidate in preferred:
+                if candidate in self.predefined_job_titles and candidate not in new_out:
+                    new_out.append(candidate)
+            for existing in out:
+                if existing not in new_out:
+                    new_out.append(existing)
+            out = new_out[:MAX_JOB_TITLES]
 
         out = self._filter_job_titles(position_name, out)
         return out[:MAX_JOB_TITLES]
