@@ -1,5 +1,4 @@
 import csv
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -31,7 +30,6 @@ from fetch_extract import fetch_job_page_text
 from prompts import build_unified_job_extraction_prompt
 from rules import (
     closest_salary_value,
-    dedupe_keep_order,
     detect_quick_tp_from_title,
     extract_deterministic_skills,
     is_location_allowed,
@@ -69,7 +67,6 @@ class JobClassifier:
         self.predefined_nontp_skills = load_single_column_csv(Path(PREDEFINED_NONTP_SKILLS_CSV))
         self.predefined_salaries = self._load_salary_values(Path(PREDEFINED_SALARIES_CSV))
 
-        self.job_title_lookup = {x.lower(): x for x in self.predefined_job_titles}
         self.location_lookup = {x.lower(): x for x in self.predefined_locations}
 
     @staticmethod
@@ -126,33 +123,149 @@ class JobClassifier:
             "notes": notes,
         }
 
-    def _choose_allowed_skills(self, quick_category: str) -> list[str]:
-        return self.predefined_tp_skills if quick_category == TP_LABEL else self.predefined_nontp_skills
+    @staticmethod
+    def _is_broad_location(value: str) -> bool:
+        value_l = (value or "").strip().lower()
+        return value_l in {
+            "",
+            "unknown",
+            "uk",
+            "united kingdom",
+            "england",
+            "scotland",
+            "wales",
+            "northern ireland",
+            "ireland",
+            "europe",
+            "emea",
+            "global",
+            "worldwide",
+        }
+
+    @staticmethod
+    def _split_location_variants(raw: str) -> list[str]:
+        raw = (raw or "").strip()
+        if not raw:
+            return []
+
+        raw = re.sub(r"<[^>]+>", " ", raw)
+        raw = raw.replace("|", ",")
+        raw = raw.replace(";", ",")
+        raw = re.sub(r"\s+", " ", raw).strip()
+
+        items = [raw]
+
+        for part in re.split(r"\s+or\s+|/|,|\||;", raw, flags=re.IGNORECASE):
+            part = part.strip(" :-")
+            if part:
+                items.append(part)
+
+        cleaned = []
+        for item in items:
+            if item and item not in cleaned:
+                cleaned.append(item)
+
+        return cleaned
+
+    def _extract_weighted_location_candidates(self, text: str) -> list[tuple[int, str]]:
+        text = clean_description(text)
+        if not text:
+            return []
+
+        candidates: list[tuple[int, str]] = []
+
+        patterns = [
+            (100, r"(?im)^\s*location\s*[:\-]\s*(.+)$"),
+            (100, r"(?im)^\s*job location\s*[:\-]\s*(.+)$"),
+            (100, r"(?im)^\s*office location\s*[:\-]\s*(.+)$"),
+            (95, r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$"),
+            (95, r"(?im)^\s*city\s*[:\-]\s*(.+)$"),
+            (95, r"(?im)^\s*based in\s+(.+)$"),
+            (90, r"(?im)^\s*####\s*location\s*$\n^\s*(.+)$"),
+            (80, r"(?im)\brole is based at (?:our )?(.+?)(?: office|\.)"),
+            (70, r"(?im)\bhub based\s*\((.+?)\)"),
+        ]
+
+        for weight, pattern in patterns:
+            for match in re.finditer(pattern, text):
+                value = (match.group(1) or "").strip()
+                if not value:
+                    continue
+
+                value = re.split(
+                    r"(?i)\b(hybrid|remote|onsite|salary|schedule|travel required|shift|clearance|required|benefits|reporting to)\b",
+                    value,
+                    maxsplit=1,
+                )[0].strip(" ,:-")
+
+                for variant in self._split_location_variants(value):
+                    candidates.append((weight, variant))
+
+        return candidates
+
+    def _deterministic_location_from_text(self, text: str) -> str:
+        weighted = self._extract_weighted_location_candidates(text)
+        if not weighted:
+            return ""
+
+        best_value = ""
+        best_score = -10**9
+
+        for weight, raw in weighted:
+            normalized = normalize_location_match(raw, self.predefined_locations)
+            if not normalized:
+                continue
+
+            score = weight
+            if not self._is_broad_location(normalized):
+                score += 50
+            if "," in normalized:
+                score += 10
+
+            if score > best_score:
+                best_score = score
+                best_value = normalized
+
+        return best_value
+
+    def _description_has_ambiguous_location(self, description: str) -> bool:
+        d = clean_description(description).lower()
+        ambiguous_markers = [
+            " hub based ",
+            "all our roles are hub based",
+            " or ",
+            "multiple locations",
+            "b
+ristol, glasgow or london",
+        ]
+        return any(marker in d for marker in ambiguous_markers)
 
     def _should_fetch_url(self, description: str) -> bool:
         description = clean_description(description)
         if len(description) < MIN_DESCRIPTION_LENGTH_FOR_NO_FETCH:
             return True
 
+        if self._description_has_ambiguous_location(description):
+            return True
+
         desc_l = description.lower()
         has_location_signal = any(
             x in desc_l for x in [
-                "location:", "job location", "based in", "workplace type",
+                "location:", "job location", "based in", "where you’ll work", "where you'll work",
                 "remote", "hybrid", "onsite", "office", "work from home",
             ]
         )
         has_role_signal = any(
             x in desc_l for x in [
                 "responsibilities", "requirements", "experience", "about the role",
-                "we are looking for", "job type", "salary",
+                "we are looking for", "job type", "salary", "role purpose",
             ]
         )
         return not (has_location_signal and has_role_signal)
 
-    def _build_source_text(self, position_name: str, description: str, job_url: str) -> tuple[str, str]:
+    def _build_source_text(self, description: str, job_url: str) -> tuple[str, str]:
         description = clean_description(description)
         notes = []
-
         source_text = description
 
         if job_url and self._should_fetch_url(description):
@@ -174,25 +287,27 @@ class JobClassifier:
 
         return source_text, "; ".join(notes)
 
-    def _coerce_location(self, value: Any) -> str:
-        value_s = safe_str(value)
-        if not value_s:
-            return ""
-        if value_s.lower() == "unknown":
-            return LOCATION_UNKNOWN
+    def _coerce_location(self, ai_location: Any, source_text: str) -> str:
+        ai_location_s = safe_str(ai_location)
+        direct = ""
+        if ai_location_s:
+            if ai_location_s.lower() == "unknown":
+                direct = LOCATION_UNKNOWN
+            else:
+                direct = normalize_location_match(ai_location_s, self.predefined_locations) or LOCATION_UNKNOWN
 
-        direct = self.location_lookup.get(value_s.lower())
-        if direct:
-            return direct
+        deterministic = self._deterministic_location_from_text(source_text)
 
-        normalized = normalize_location_match(value_s, self.predefined_locations)
-        return normalized or LOCATION_UNKNOWN
+        if deterministic and (self._is_broad_location(direct) or not direct):
+            return deterministic
+
+        if deterministic and direct and self._is_broad_location(direct) and not self._is_broad_location(deterministic):
+            return deterministic
+
+        return direct or deterministic or LOCATION_UNKNOWN
 
     def _coerce_salary_value(self, value: Any) -> str:
-        value_s = safe_str(value)
-        if not value_s:
-            return ""
-        value_s = value_s.replace(",", "")
+        value_s = safe_str(value).replace(",", "")
         if not value_s.isdigit():
             return ""
         return closest_salary_value(int(value_s), self.predefined_salaries)
@@ -214,20 +329,43 @@ class JobClassifier:
             return v
         return ""
 
-    def _parse_ai_payload(
-        self,
-        payload: dict[str, Any],
-        quick_category: str,
-        source_text: str,
-        deterministic_skills: list[str],
-    ) -> dict[str, Any]:
+    @staticmethod
+    def _clean_skill_list(skills: list[str], source_text: str, max_items: int) -> list[str]:
+        cleaned = []
+        for skill in skills:
+            if skill and skill not in cleaned and skill_is_supported(skill, source_text):
+                cleaned.append(skill)
+        return cleaned[:max_items]
+
+    @staticmethod
+    def _finalize_seniorities(position_name: str, seniorities: list[str]) -> list[str]:
+        title = clean_description(position_name).lower()
+
+        if title_has_leadership_signal(position_name):
+            return ["leadership"]
+
+        if "manager" in title:
+            return ["senior", "lead"]
+
+        if "assistant" in title:
+            return ["entry", "junior"]
+
+        if "administrator" in title and not seniorities:
+            return ["mid"]
+
+        if not seniorities:
+            if "engineer" in title or "developer" in title or "analyst" in title:
+                return ["mid"]
+
+        return seniorities[:3]
+
+    def _parse_ai_payload(self, payload: dict[str, Any], source_text: str) -> dict[str, Any]:
         role_relevance = normalize_relevance_label(payload.get("role_relevance", ""))
-        job_category = normalize_tp_label(payload.get("job_category", "")) or quick_category or NOT_TP_LABEL
+        job_category = normalize_tp_label(payload.get("job_category", "")) or NOT_TP_LABEL
         role_relevance_reason = safe_str(payload.get("role_relevance_reason", ""))
 
-        job_location = self._coerce_location(payload.get("job_location", ""))
+        job_location = self._coerce_location(payload.get("job_location", ""), source_text)
         remote_preferences_list = normalize_remote_preferences(payload.get("remote_preferences", []))
-        remote_preferences = ", ".join(remote_preferences_list) if remote_preferences_list else ""
         remote_days = normalize_remote_days(payload.get("remote_days", ""))
 
         salary_min = self._coerce_salary_value(payload.get("salary_min", ""))
@@ -245,19 +383,9 @@ class JobClassifier:
 
         visa_sponsorship = self._coerce_visa_status(payload.get("visa_sponsorship", ""), source_text)
         contract_type = validate_contract_type(payload.get("contract_type", ""), ALLOWED_CONTRACT_TYPES)
-
         job_titles = validate_job_titles(payload.get("job_titles", []), self.predefined_job_titles, max_items=MAX_JOB_TITLES)
         seniorities = validate_seniorities(payload.get("seniorities", []), ALLOWED_SENIORITIES, max_items=3)
-
-        allowed_skills = self.predefined_tp_skills if job_category == TP_LABEL else self.predefined_nontp_skills
-        ai_skills = validate_skills(payload.get("skills", []), allowed_skills, max_items=MAX_SKILLS)
-
-        supported_ai_skills = [s for s in ai_skills if skill_is_supported(s, source_text)]
-        skills = deterministic_skills[:]
-        for skill in supported_ai_skills:
-            if skill not in skills:
-                skills.append(skill)
-        skills = skills[:MAX_SKILLS]
+        seniorities = self._finalize_seniorities("", seniorities)  # temp, overwritten below in classify_job
 
         notes = safe_str(payload.get("notes", ""))
 
@@ -267,7 +395,6 @@ class JobClassifier:
             "job_category": job_category,
             "job_location": job_location,
             "remote_preferences_list": remote_preferences_list,
-            "remote_preferences": remote_preferences,
             "remote_days": remote_days,
             "salary_min": salary_min,
             "salary_max": salary_max,
@@ -276,22 +403,19 @@ class JobClassifier:
             "contract_type": contract_type,
             "job_titles": job_titles,
             "seniorities": seniorities,
-            "skills": skills,
             "notes": notes,
         }
 
     def _apply_final_consistency(self, result: dict[str, Any], source_text: str) -> dict[str, Any]:
-        reason = result.get("role_relevance_reason", "")
-        role_relevance = result.get("role_relevance", "")
-        job_location = result.get("job_location", "")
-        remote_preferences_list = result.get("remote_preferences_list", [])
-        position_is_relevant = role_relevance == RELEVANT_LABEL
-
-        if reason_strongly_says_not_relevant(reason):
+        if reason_strongly_says_not_relevant(result.get("role_relevance_reason", "")):
             result["role_relevance"] = NOT_RELEVANT_LABEL
 
         if result.get("role_relevance") == RELEVANT_LABEL:
-            if not is_location_allowed(job_location, remote_preferences_list, source_text):
+            if not is_location_allowed(
+                result.get("job_location", ""),
+                result.get("remote_preferences_list", []),
+                source_text,
+            ):
                 result["role_relevance"] = NOT_RELEVANT_LABEL
                 result["job_category"] = result.get("job_category") or NOT_TP_LABEL
                 result["role_relevance_reason"] = "Location is outside allowed regions or work-pattern rules."
@@ -303,9 +427,6 @@ class JobClassifier:
                 job_category=result.get("job_category", "") or NOT_TP_LABEL,
                 notes=result.get("notes", ""),
             )
-
-        if not position_is_relevant and result.get("role_relevance") == RELEVANT_LABEL and not result.get("role_relevance_reason"):
-            result["role_relevance_reason"] = "Role matches allowed location rules and target role scope."
 
         result["remote_preferences"] = ", ".join(result.get("remote_preferences_list", [])) if result.get("remote_preferences_list") else ""
         return result
@@ -330,10 +451,27 @@ class JobClassifier:
                 job_category=detect_quick_tp_from_title(position_name) or NOT_TP_LABEL,
             )
 
-        quick_category = detect_quick_tp_from_title(position_name) or NOT_TP_LABEL
-        source_text, source_note = self._build_source_text(position_name, job_description, job_url)
+        source_text, source_note = self._build_source_text(job_description, job_url)
 
-        allowed_skills = self._choose_allowed_skills(quick_category)
+        raw = self._call_model(
+            build_unified_job_extraction_prompt(
+                position_name=position_name,
+                source_text=source_text,
+                predefined_job_titles=self.predefined_job_titles,
+                predefined_locations=self.predefined_locations,
+                predefined_salaries=self.predefined_salaries,
+                allowed_tp_skills=self.predefined_tp_skills,
+                allowed_nontp_skills=self.predefined_nontp_skills,
+            )
+        )
+        payload = extract_json_object(raw)
+
+        parsed = self._parse_ai_payload(payload, source_text)
+        parsed["seniorities"] = self._finalize_seniorities(position_name, parsed.get("seniorities", []))
+
+        # Strict skills by final category.
+        allowed_skills = self.predefined_tp_skills if parsed["job_category"] == TP_LABEL else self.predefined_nontp_skills
+
         deterministic_skills = extract_deterministic_skills(
             position_name=position_name,
             description=source_text,
@@ -341,30 +479,31 @@ class JobClassifier:
             max_items=MAX_SKILLS,
         )
 
-        prompt = build_unified_job_extraction_prompt(
-            position_name=position_name,
-            source_text=source_text,
-            predefined_job_titles=self.predefined_job_titles,
-            predefined_locations=self.predefined_locations,
-            predefined_salaries=self.predefined_salaries,
-            allowed_skills=allowed_skills,
-        )
+        ai_skills = validate_skills(payload.get("skills", []), allowed_skills, max_items=MAX_SKILLS)
+        ai_skills = self._clean_skill_list(ai_skills, source_text, MAX_SKILLS)
 
-        raw = self._call_model(prompt)
-        payload = extract_json_object(raw)
+        final_skills = deterministic_skills[:]
+        for skill in ai_skills:
+            if skill not in final_skills:
+                final_skills.append(skill)
+        parsed["skills"] = final_skills[:MAX_SKILLS]
 
-        parsed = self._parse_ai_payload(
-            payload=payload,
-            quick_category=quick_category,
-            source_text=source_text,
-            deterministic_skills=deterministic_skills,
-        )
+        # If role is relevant but we still got no titles, try a safe fallback from exact title match.
+        title_lookup = {x.lower(): x for x in self.predefined_job_titles}
+        if not parsed["job_titles"]:
+            exact = title_lookup.get(position_name.lower())
+            if exact:
+                parsed["job_titles"] = [exact]
+
+        # Strong manager fallback for analytics/data/business manager type roles.
+        title_l = position_name.lower()
+        if "analytics manager" in title_l and "Business Analyst" in parsed["job_titles"] and "Data/Insight Analyst" in self.predefined_job_titles:
+            if "Data/Insight Analyst" not in parsed["job_titles"]:
+                parsed["job_titles"].append("Data/Insight Analyst")
+                parsed["job_titles"] = parsed["job_titles"][:MAX_JOB_TITLES]
 
         if source_note:
             parsed["notes"] = "; ".join([x for x in [parsed.get("notes", ""), source_note] if x])
-
-        if title_has_leadership_signal(position_name):
-            parsed["seniorities"] = ["leadership"]
 
         final_result = self._apply_final_consistency(parsed, source_text)
         return final_result
