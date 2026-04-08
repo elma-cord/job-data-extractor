@@ -178,15 +178,15 @@ class JobClassifier:
 
         patterns = [
             (240, r"(?im)^\s*location\s*$\n^\s*(.+)$"),
+            (235, r"(?im)^\s*location\s*[:\-]\s*(.+)$"),
             (230, r"(?im)^\s*####\s*location\s*$\n^\s*(.+)$"),
-            (230, r"(?im)^\s*location\s*[:\-]\s*(.+)$"),
             (225, r"(?im)^\s*job location\s*[:\-]\s*(.+)$"),
             (220, r"(?im)^\s*office location\s*[:\-]\s*(.+)$"),
             (210, r"(?im)^\s*city\s*[:\-]\s*(.+)$"),
             (205, r"(?im)^\s*based in\s+(.+)$"),
             (200, r"(?im)\brole is based at (?:our )?(.+?)(?: office|\.)"),
             (140, r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$"),
-            (110, r"(?im)\bhub based\s*\((.+?)\)"),
+            (80, r"(?im)\bhub based\s*\((.+?)\)"),
         ]
 
         text_len = max(len(text), 1)
@@ -210,9 +210,47 @@ class JobClassifier:
 
         return candidates
 
+    def _description_has_ambiguous_location(self, description: str) -> bool:
+        d = clean_description(description).lower()
+
+        ambiguous_markers = [
+            " hub based ",
+            "all our roles are hub based",
+            "multiple locations",
+            "bristol, glasgow or london",
+            "kelso or bathgate",
+        ]
+        if any(marker in d for marker in ambiguous_markers):
+            return True
+
+        if re.search(r"\b[a-z][a-z\s\-']+\s+or\s+[a-z][a-z\s\-']+\b", d, flags=re.IGNORECASE):
+            return True
+
+        return False
+
+    def _has_clear_single_location_in_description(self, text: str) -> bool:
+        weighted = self._extract_weighted_location_candidates(text)
+        strong_candidates = []
+
+        for weight, pos, raw in weighted:
+            normalized = normalize_location_match(raw, self.predefined_locations)
+            if not normalized:
+                continue
+            if self._is_broad_location(normalized):
+                continue
+            if weight >= 200:
+                strong_candidates.append(normalized)
+
+        strong_candidates = list(dict.fromkeys(strong_candidates))
+        return len(strong_candidates) == 1
+
     def _deterministic_location_from_text(self, text: str) -> str:
+        text = clean_description(text)
         weighted = self._extract_weighted_location_candidates(text)
         if not weighted:
+            return ""
+
+        if self._description_has_ambiguous_location(text) and not self._has_clear_single_location_in_description(text):
             return ""
 
         best_value = ""
@@ -242,17 +280,6 @@ class JobClassifier:
 
         return best_value
 
-    def _description_has_ambiguous_location(self, description: str) -> bool:
-        d = clean_description(description).lower()
-        ambiguous_markers = [
-            " hub based ",
-            "all our roles are hub based",
-            "multiple locations",
-            "bristol, glasgow or london",
-            "kelso or bathgate",
-        ]
-        return any(marker in d for marker in ambiguous_markers)
-
     def _should_fetch_url(self, description: str) -> bool:
         description = clean_description(description)
         if len(description) < MIN_DESCRIPTION_LENGTH_FOR_NO_FETCH:
@@ -276,16 +303,18 @@ class JobClassifier:
         )
         return not (has_location_signal and has_role_signal)
 
-    def _build_source_text(self, description: str, job_url: str) -> tuple[str, str]:
+    def _build_source_text(self, description: str, job_url: str) -> tuple[str, str, bool]:
         description = clean_description(description)
         notes = []
         source_text = description
+        used_fetched_page = False
 
         if job_url and self._should_fetch_url(description):
             fetched = fetch_job_page_text(job_url)
             if fetched.ok and fetched.text:
                 page_text = clean_description(fetched.text)
                 if page_text:
+                    used_fetched_page = True
                     if description:
                         source_text = f"{description}\n\n--- JOB PAGE TEXT ---\n\n{page_text}"
                         notes.append("used current description + page text")
@@ -298,9 +327,9 @@ class JobClassifier:
             if description:
                 notes.append("used current description")
 
-        return source_text, "; ".join(notes)
+        return source_text, "; ".join(notes), used_fetched_page
 
-    def _coerce_location(self, ai_location: Any, source_text: str) -> str:
+    def _coerce_location(self, ai_location: Any, source_text: str, used_fetched_page: bool) -> str:
         ai_location_s = safe_str(ai_location)
         direct = ""
         if ai_location_s:
@@ -310,6 +339,11 @@ class JobClassifier:
                 direct = normalize_location_match(ai_location_s, self.predefined_locations) or LOCATION_UNKNOWN
 
         deterministic = self._deterministic_location_from_text(source_text)
+
+        if self._description_has_ambiguous_location(source_text) and not used_fetched_page:
+            if deterministic and self._has_clear_single_location_in_description(source_text):
+                return deterministic
+            return LOCATION_UNKNOWN
 
         if deterministic and (self._is_broad_location(direct) or not direct):
             return deterministic
@@ -415,7 +449,6 @@ class JobClassifier:
                 out = inferred[:MAX_JOB_TITLES]
 
         title_l = clean_description(position_name).lower()
-        text_l = clean_description(source_text).lower()
 
         if not out:
             if "1st line" in title_l or "first line" in title_l:
@@ -447,12 +480,12 @@ class JobClassifier:
         out = self._filter_job_titles(position_name, out)
         return out[:MAX_JOB_TITLES]
 
-    def _parse_ai_payload(self, payload: dict[str, Any], source_text: str) -> dict[str, Any]:
+    def _parse_ai_payload(self, payload: dict[str, Any], source_text: str, used_fetched_page: bool) -> dict[str, Any]:
         role_relevance = normalize_relevance_label(payload.get("role_relevance", ""))
         job_category = normalize_tp_label(payload.get("job_category", "")) or NOT_TP_LABEL
         role_relevance_reason = safe_str(payload.get("role_relevance_reason", ""))
 
-        job_location = self._coerce_location(payload.get("job_location", ""), source_text)
+        job_location = self._coerce_location(payload.get("job_location", ""), source_text, used_fetched_page)
         remote_preferences_list = normalize_remote_preferences(payload.get("remote_preferences", []))
         remote_days = normalize_remote_days(payload.get("remote_days", ""))
 
@@ -537,7 +570,7 @@ class JobClassifier:
                 job_category=detect_quick_tp_from_title(position_name) or NOT_TP_LABEL,
             )
 
-        source_text, source_note = self._build_source_text(job_description, job_url)
+        source_text, source_note, used_fetched_page = self._build_source_text(job_description, job_url)
 
         raw = self._call_model(
             build_unified_job_extraction_prompt(
@@ -552,7 +585,7 @@ class JobClassifier:
         )
         payload = extract_json_object(raw)
 
-        parsed = self._parse_ai_payload(payload, source_text)
+        parsed = self._parse_ai_payload(payload, source_text, used_fetched_page)
         parsed["seniorities"] = self._finalize_seniorities(position_name, parsed.get("seniorities", []))
 
         allowed_skills = self.predefined_tp_skills if parsed["job_category"] == TP_LABEL else self.predefined_nontp_skills
