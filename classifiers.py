@@ -233,10 +233,9 @@ class JobClassifier:
         ambiguous_markers = [
             " hub based ",
             "all our roles are hub based",
-            " or ",
             "multiple locations",
-            "b
-ristol, glasgow or london",
+            "bristol, glasgow or london",
+            "kelso or bathgate",
         ]
         return any(marker in d for marker in ambiguous_markers)
 
