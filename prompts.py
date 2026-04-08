@@ -49,6 +49,7 @@ def build_unified_job_extraction_prompt(
     - marketing / growth / content / CRM / communications / product marketing / demand generation roles
     - executive assistant / chief of staff / legal / people ops / talent acquisition roles
     - technical support / IT / infrastructure / systems / network / support engineering roles when clearly technical
+    - business development / BDR / SDR / account executive / sales consultant / commercial roles when clearly genuine business or B2B roles and not retail store sales
 
     Exclusions:
     - Not a real job posting
@@ -80,9 +81,10 @@ def build_unified_job_extraction_prompt(
     Very important for job_location:
     - Choose the MOST SPECIFIC acceptable normalized location from the predefined list.
     - Do NOT fall back to "UK" / "United Kingdom" if a more specific acceptable location in the list matches the city / town / area in the posting.
-    - If the posting says a town/city like Stansted, Huntingdon, Bathgate, Shrewsbury, Glasgow etc., and the acceptable list contains a more specific normalized option that corresponds to that place, choose that more specific option.
+    - If the posting says a town/city like Stansted, Huntingdon, Bathgate, Shrewsbury, Glasgow, Worthing etc., and the acceptable list contains a more specific normalized option that corresponds to that place, choose that more specific option.
+    - If the description has a clear explicit location, prefer that over generic office-list text from later page text.
     - If multiple locations are mentioned but one later explicit line or label clearly states the actual role location, prefer that clearer explicit location.
-    - For ambiguous "hub based" or "multiple office" wording, use the most clearly role-specific location if supported by the text. If not clear, output the best supported normalized location, otherwise "Unknown".
+    - For ambiguous "hub based" or "multiple office" wording, use the most clearly role-specific location if supported by the text. If not clear, output "Unknown".
 
     4) Language rule
     If the job requires a language other than English, mark Not Relevant.
@@ -106,6 +108,10 @@ def build_unified_job_extraction_prompt(
     - Order must always be: onsite, hybrid, remote
     - If not specified, return []
 
+    Important:
+    - If the posting clearly says "Remote", "fully remote", "remote only", or "mostly async from anywhere", prefer ["remote"].
+    - Do not add onsite or hybrid unless explicitly supported.
+
     7) remote_days
     Return only:
     - "0" to "5", or
@@ -115,8 +121,11 @@ def build_unified_job_extraction_prompt(
     - Only use explicit remote/office pattern evidence
     - If 1 day in office -> 4
     - If 2 days in office -> 3
+    - If 3 days in office -> 2
+    - If 4 days in office -> 1
     - If 1-2 days in office -> 3
     - If 2-3 days in office -> 2
+    - If one day work from home / WFH -> 1
     - If fully remote / remote-first / unclear -> "not specified"
     - Never use salary numbers or unrelated numbers
 
@@ -152,6 +161,7 @@ def build_unified_job_extraction_prompt(
     - Use exact strings from the list only
     - Prefer fewer, more accurate titles
     - If position name exactly matches one predefined job title, usually return just that one, unless the description clearly supports a second closely related exact title
+    - For designer roles, prioritize the designer title over broader marketing labels if both are supported
     - Do not output unrelated titles
 
     12) seniorities
@@ -163,15 +173,16 @@ def build_unified_job_extraction_prompt(
     - Order must always be:
       entry, junior, mid, senior, lead, leadership
     - "head of", "director", "vp", "chief", "engineering manager", "technical director" => leadership only
-    - Titles containing "manager" should not be junior unless the text is overwhelmingly entry-level, which is rare
-    - Titles containing "assistant" often support entry or junior
+    - "assistant manager" is usually junior, mid
+    - "manager" should usually be senior, lead
+    - Generic non-manager professional roles without clear years can be junior, mid, senior
+    - Do not use lead for non-manager roles unless the text clearly shows strong ownership / mentoring / cross-functional leadership
     - 0-1 years => entry, junior
     - 2 years => junior, mid
     - 3-5 years => senior
     - 5+ years or strong ownership / mentoring / managerial responsibility => senior, lead
-    - managerial role with cross-functional ownership can justify lead
+    - avoid entry unless the posting truly looks early-career
     - do not add junior/mid to clearly senior management roles
-    - if uncertain for a genuine manager title, prefer senior and/or lead over junior
 
     13) skills
     Choose 0 to 10 skills.
@@ -185,7 +196,11 @@ def build_unified_job_extraction_prompt(
     - If the source does not support a skill, do not include it
     - Better 2 accurate skills than 10 weak skills
     - Do not include skills just because they are common for the role
+    - Be careful with false positives:
+      - do not infer "R" from words like New Relic
+      - do not infer "Flutter" from company names unless the framework is clearly referenced
     - Only include inferential skills in rare obvious cases, for example LLMs can support Machine Learning / Artificial Intelligence when those exact skills are in the allowed list
+    - If the description is thin and only a few skills are obvious, return just the most appropriate 2-4 supported skills
 
     Allowed T&P skills:
     {tp_skills_str}
