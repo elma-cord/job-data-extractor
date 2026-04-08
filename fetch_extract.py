@@ -163,8 +163,7 @@ def _html_to_text(html: str) -> str:
     if body_text:
         combined_parts.append(body_text)
 
-    combined = "\n".join(combined_parts)
-    return _clean_text(combined)
+    return _clean_text("\n".join(combined_parts))
 
 
 def _is_blocked(status_code: Optional[int], text: str) -> bool:
