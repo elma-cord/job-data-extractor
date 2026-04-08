@@ -1,323 +1,215 @@
 from textwrap import dedent
 
 
-def build_role_relevance_prompt(position_name: str, job_description: str, predefined_job_titles: list[str]) -> str:
-    titles_str = ", ".join(predefined_job_titles)
-
-    return dedent(f"""
-    You will receive two inputs: position name and job description.
-
-    Perform the following tasks carefully and output the results in the exact format described below.
-
-    1. Role Relevance
-    Decide if the role is Relevant or Not Relevant according to these criteria:
-
-    Relevant roles match any in this list or close synonyms/specializations. Use the predefined list as the main source of truth:
-    {titles_str}
-
-    Also treat these as relevant business-scope roles when they are genuine business/corporate jobs:
-    - finance
-    - accounting
-    - FP&A
-    - treasury
-    - audit
-    - tax
-    - investment
-    - private equity
-    - asset management
-    - acquisitions
-    - analyst / business analyst / commercial analyst / finance analyst
-    - operations / change / transformation / program style roles
-    - events / venue partnerships / marketing manager style roles when they are corporate, B2B, remote, client, booking, campaign, CRM, or partnership focused
-
-    If the content is not a real job posting, mark Not Relevant.
-    Examples:
-    - educational module
-    - learning content
-    - news article
-    - informational article
-    - career guide
-    - page with no real role, no real hiring context, or no real job details
-
-    If the role is clearly outside tech or business functions (for example teacher, nurse, waiter), mark Not Relevant, even if some criteria partially match.
-
-    Exclude any roles related to:
-    - construction
-    - civil engineering
-    - retail store/shop/showroom/cashier/shop-floor sales
-    - electrical or mechanical engineering roles outside allowed target scope
-    - manufacturing-function work
-    - factory / plant / shop-floor work
-    - production engineer
-    - multi-skilled engineer
-    - microbiology
-    - maritime
-    - injection molding
-    - beauty brands
-    - medical roles
-    - clinical roles
-    - psychiatry / psychiatrist / physician / hospital care roles
-
-    Retail sales rule:
-    Sales jobs are allowed when they are business/corporate sales, account management, events, partnerships, venue, bookings, CRM, or client-facing business roles.
-    Only mark Not Relevant when the role is clearly retail/in-store/store/showroom/branch/cashier/shop-floor/customer-floor sales.
-
-    Technical support / infrastructure rule:
-    Technical roles such as Support Engineer, Technical Support Engineer, 2nd Line Engineer, 3rd Line Support Engineer, IT Support, Infrastructure Engineer, Systems Engineer and similar technical support / infrastructure / escalation roles should be treated as relevant target roles when the work is technical.
-
-    Location rules:
-    a) United Kingdom: allowed for onsite, hybrid, or remote
-    b) Ireland: only remote roles are allowed. If location mentions onsite or hybrid work, mark Not Relevant.
-    c) Europe: only roles explicitly marked as Remote Europe or Remote EMEA are allowed. Specific European countries are Not Relevant unless explicitly remote in Europe/EMEA.
-    d) Remote Global/worldwide is allowed unless the ad specifies or implies APAC, LATAM, Africa, Asia, USA, Canada, or another excluded region.
-    e) If the role mentions a location outside allowed regions, or salary is only in USD/CAD and there is no evidence the role can be done from an allowed region, mark Not Relevant.
-    f) Accept UK, Great Britain, London, England, Scotland, Wales, Northern Ireland as United Kingdom when appropriate.
-    g) If multiple locations are listed and at least one acceptable location exists for the role, mark Relevant.
-    h) Do not use office lists, company office examples, or generic global office mentions as the job location unless they are clearly the role's actual location.
-    i) Prefer the location stated in the main role header or labeled fields such as "Location:" or "Workplace type:" over lower-page text.
-    j) If the location clearly indicates Canada, Ontario, ON, or another Canadian province, do not treat it as UK.
-
-    Language rule:
-    If the job requires any language other than English, mark Not Relevant.
-    If the role requires English only, that is acceptable.
-
-    2. Position Category
-    Determine whether the job is:
-    - T&P job
-    - Not T&P
-
-    T&P includes software development, engineering, product management, data, IT, UX/UI, QA, DevOps, infrastructure, security, technical support, technical architecture, and similar roles.
-
-    Output format:
-    Return exactly one single line with exactly three fields separated by " | ":
-
-    1. Relevant or Not Relevant
-    2. T&P job or Not T&P
-    3. A concise explanation
-
-    Example:
-    Relevant | T&P job | Role fits allowed locations and matches tech product roles.
-    Not Relevant | Not T&P | Location is Germany onsite, which is not allowed.
-
-    Do not add anything beyond this format.
-
-    Position name:
-    {position_name}
-
-    Job description:
-    {job_description}
-    """).strip()
-
-
-def build_location_prompt(position_name: str, job_description: str, predefined_locations: list[str]) -> str:
-    locations_str = ", ".join(predefined_locations)
-
-    return dedent(f"""
-    You will receive two inputs: position name and job description.
-
-    Perform the following tasks carefully and output the result exactly as described below.
-
-    1. Position Location
-
-    a) Read the entire description carefully to find the actual work location for this job.
-    b) Focus especially on locations near keywords like:
-       "location:", "locations:", "all locations:", "job location", "office location", "based in", "office in", "work location".
-    c) Prefer the location stated in the main role header or labeled job fields over lower-page text.
-    d) If multiple locations appear, select the most specific real job location (city/town over region/country).
-    e) Do not use company office lists, global presence text, benefits text, diversity text, legal text, footer text, or unrelated place names as the job location.
-    f) Do not guess a location from random body text if the job posting does not clearly state one.
-    g) If the extracted location does not exactly exist in the acceptable list, select the closest broader location from the list.
-    h) If none of the acceptable locations match, output "Unknown".
-    i) If the location clearly indicates Canada, Ontario, ON, or another Canadian province, do not map it to a UK city.
-
-    Important rules:
-    1. If multiple acceptable locations match, select the most specific one.
-    2. If the posting clearly labels a location, strongly prefer that value.
-    3. Ignore skills, tools, departments, slogans, culture/benefits text, and unrelated sections.
-    4. Output only one exact value from the acceptable locations list, or "Unknown".
-    5. Do not add any explanation.
-
-    The list of acceptable locations is:
-    {locations_str}
-
-    Position name:
-    {position_name}
-
-    Job description:
-    {job_description}
-    """).strip()
-
-
-def build_job_titles_prompt(position_name: str, job_description: str, predefined_job_titles: list[str]) -> str:
-    titles_str = ", ".join(predefined_job_titles)
-
-    return dedent(f"""
-    You will receive two inputs: position name and job description.
-
-    Perform the following task carefully and output the results exactly as described below.
-
-    Job Title Identification
-
-    a) Analyze both the position name and job description together.
-    b) If the position name exactly matches one job title from the predefined list, output only that single job title.
-    c) If the position name is unclear or ambiguous, select up to the top three most appropriate job titles from the predefined list that best fit the role.
-    d) Only select job titles that exactly exist in the predefined list.
-    e) Output the selected job titles as a comma-separated list, ordered from most to least appropriate.
-    f) If fewer than three suitable job titles are found, output only those.
-    g) If no suitable job title matches, output an empty string.
-
-    Important:
-    - Prefer the most precise business/technical title.
-    - It is better to output one or two sensible titles than three noisy or weak titles.
-    - For high-seniority roles such as Head of, Director, Technical Director, or Engineering Manager, avoid adding unrelated extra titles.
-    - For recruiter / recruitment consultant / talent roles, prefer the closest talent acquisition / recruiter style title from the predefined list.
-    - For support engineer / line support / infrastructure support roles, prefer the closest technical support / IT support / infrastructure style title from the predefined list.
-    - Do not upgrade a plain "Administrator" role into Support Engineer, System Administrator, Systems Engineer, or similar engineering titles unless the text clearly and explicitly supports that exact technical admin role.
-    - Do not guess unrelated titles.
-    - Do not output titles that do not exist exactly in the predefined list.
-
-    Output examples:
-    Back End, Full Stack
-    Product Manager
-    Data Engineer, Data Scientist
-
-    Predefined list of job titles:
-    {titles_str}
-
-    Position name:
-    {position_name}
-
-    Job description:
-    {job_description}
-    """).strip()
-
-
-def build_seniority_prompt(position_name: str, job_description: str) -> str:
-    return dedent(f"""
-    You will receive two inputs: position name and job description.
-
-    Perform the following tasks carefully and output the results exactly as described below.
-
-    Seniority Level Determination
-
-    First analyze the position name carefully.
-
-    a) If the position name clearly indicates one seniority level from this predefined list, output only that level:
-    entry, junior, mid, senior, lead, leadership
-
-    b) If the title contains leadership indicators such as head of, director, VP, vice president, chief, C-level, or similar, output leadership only.
-
-    c) If the title contains Engineering Manager or Technical Director, output leadership only.
-
-    d) If the title contains product manager with people management, team lead, lead engineer, or similar people-management responsibility, prefer lead or leadership as appropriate.
-
-    If seniority is not clearly indicated by the title, analyze both title and description together.
-
-    Rules:
-    - Output up to three most appropriate seniority levels.
-    - Output them only from this list:
-      entry, junior, mid, senior, lead, leadership
-    - Output must always be lowercase.
-    - Output order must always be:
-      entry, junior, mid, senior, lead, leadership
-
-    Experience rules:
-    - 0-1 years: entry, junior
-    - 2 years: junior, mid
-    - 3-5 years: senior
-    - 5+ years or clear ownership/mentoring responsibility: senior, lead
-    - Director, head of, VP, chief, C-level, Engineering Manager, Technical Director and similar leadership terms: leadership only
-
-    Important:
-    - Do not include junior or mid for clearly senior leadership roles.
-    - For PMO Manager, People Operations Manager, Engineering Manager, Head of X, Director roles, avoid junior or mid unless the description overwhelmingly proves otherwise.
-    - If the role is clearly managerial with ownership and cross-functional leadership, prefer senior/lead or leadership.
-    - If the title is neutral but experienced, mid or senior is acceptable. Do not leave it blank without reason.
-
-    Output examples:
-    senior
-    mid, senior
-    lead
-    junior, mid, senior
-
-    Position name:
-    {position_name}
-
-    Job description:
-    {job_description}
-    """).strip()
-
-
-def build_contract_type_prompt(job_description: str) -> str:
-    return dedent(f"""
-    You will receive a job description as input.
-
-    Task:
-    Identify and normalize the contract type into exactly one of these categories:
-
-    Permanent
-    FTC
-    Part Time
-    Freelance/Contract
-
-    Rules:
-    1. If multiple types are mentioned, choose only one using this priority:
-       Permanent > FTC > Part Time > Freelance/Contract
-
-    2. Map synonyms:
-       - Permanent: permanent, full time, full-time
-       - FTC: temporary, fixed term, fixed-term, maternity cover, maternity leave
-       - Part Time: part time, part-time, job share, job-share
-       - Freelance/Contract: freelance, contract role, contractor, contracting
-
-    3. Do not treat generic words like "contract", "client contract", or "contracts" as employment type unless the role is clearly contract employment.
-    4. Output must be only one category name.
-    5. If no valid type is found, output an empty string.
-
-    Job description:
-    {job_description}
-    """).strip()
-
-
-def build_skills_prompt(
+def build_unified_job_extraction_prompt(
     position_name: str,
-    job_description: str,
-    role_category_label: str,
+    source_text: str,
+    predefined_job_titles: list[str],
+    predefined_locations: list[str],
+    predefined_salaries: list[int],
     allowed_skills: list[str],
 ) -> str:
+    job_titles_str = ", ".join(predefined_job_titles)
+    locations_str = ", ".join(predefined_locations)
+    salaries_str = ", ".join(str(x) for x in predefined_salaries)
     skills_str = ", ".join(allowed_skills)
 
     return dedent(f"""
-    You will receive:
-    - position name
-    - job description
-    - role category
-    - allowed skills list
+    You are a strict structured extractor for a recruiting workflow.
 
-    Task:
-    Select up to 10 skills that are clearly supported by the position name and job description.
+    You will receive:
+    1. position name
+    2. source text
+
+    Important:
+    - We are talking about JOBS / POSITIONS, not candidates.
+    - Return valid JSON only.
+    - No markdown.
+    - No explanation outside JSON.
+    - Never invent facts that are not supported by the source text.
+    - Use empty strings or empty arrays if not supported.
+    - Use the predefined files as strict source of truth for normalized outputs.
+
+    TASKS
+
+    1) role_relevance
+    Decide if the role is "Relevant" or "Not Relevant".
+
+    Relevant roles match the predefined job titles list below, or close synonyms / specializations that clearly map to one of them:
+    {job_titles_str}
+
+    Exclusions:
+    - Not a real job posting
+    - Educational content, learning modules, checklists, articles, guides
+    - Construction, civil engineering, retail store roles, cashier, showroom/store/branch/shop-floor roles
+    - Electrical / mechanical / manufacturing / plant / factory / assembly / injection molding / maritime / microbiology / beauty brand roles
+    - Medical / clinical / patient care roles
+    - Any role clearly outside allowed tech/business functions
+
+    Important business-scope roles that ARE allowed when genuine corporate roles:
+    - Finance / accounting / FP&A / tax / treasury / audit / controller
+    - Operations / business operations / change / transformation / program / PMO-type business roles
+    - Account / client / customer / renewals / partnerships / implementation / customer success roles
+    - Marketing / growth / content / CRM / communications / product marketing / demand generation roles
+    - Executive assistant / chief of staff / legal / people ops / talent acquisition roles
+
+    Technical support / IT infrastructure roles should be treated as relevant when they are real technical roles:
+    - Support Engineer
+    - Technical Support Engineer
+    - IT Support
+    - 2nd Line Engineer
+    - 3rd Line Engineer
+    - Infrastructure Engineer
+    - Systems Engineer
+    - Network Engineer
+    - System Administrator
+    - similar technical support / infrastructure / escalation roles
+
+    2) job_category
+    Output exactly one:
+    - "T&P job"
+    - "Not T&P"
+
+    T&P includes:
+    software engineering, data, DevOps, QA, security, IT, support engineering, infrastructure, cloud, UX/UI, product, technical architecture, technical writing, ML/AI, etc.
+
+    3) Location rules for relevance
+    Relevant only if the role fits allowed locations:
+    - United Kingdom: onsite, hybrid, or remote allowed
+    - Ireland: only remote allowed
+    - Europe: only explicitly remote Europe / remote EMEA allowed
+    - Remote Global / worldwide allowed unless ad clearly restricts to APAC / LATAM / Africa / Asia / USA / Canada / another excluded region
+    - If the job clearly indicates USA / Canada / excluded regions only, mark Not Relevant
+    - If salary is only USD/CAD and nothing supports allowed regions, that is evidence for Not Relevant
+    - Accept UK / Great Britain / England / Scotland / Wales / Northern Ireland / London etc. as UK
+    - Ignore generic company office lists unless they clearly describe this role’s actual work location
+
+    4) Language rule
+    If the job requires a language other than English, mark Not Relevant.
+    English-only is fine.
+
+    5) job_location
+    Extract and normalize exactly one value from the acceptable locations list below.
+    Rules:
+    - Prefer explicit location fields
+    - Choose the most specific real job location
+    - If a small place is not in the list, choose the closest broader acceptable location from the list
+    - If no supported match exists, output "Unknown"
+    - Output must be exactly one value from the acceptable locations list or "Unknown"
+
+    Acceptable normalized locations:
+    {locations_str}
+
+    6) remote_preferences
+    Allowed values only: "onsite", "hybrid", "remote"
+    - Return an array
+    - Order must always be: onsite, hybrid, remote
+    - If not specified, return []
+
+    7) remote_days
+    Return only:
+    - "0" to "5", or
+    - "not specified"
 
     Rules:
-    - Only select skills that exactly exist in the allowed skills list.
-    - Only select skills that are clearly evidenced by the text.
-    - Do not guess.
-    - Do not include soft skills unless they exist as exact allowed skills and are clearly supported.
-    - Order skills from most relevant to least relevant.
-    - If fewer than 10 fit, output only those.
-    - If none fit, output an empty string.
+    - Only use explicit remote/office pattern evidence
+    - If 1 day in office -> 4
+    - If 2 days in office -> 3
+    - If 1-2 days in office -> 3
+    - If 2-3 days in office -> 2
+    - If fully remote / remote-first / unclear -> "not specified"
+    - Never use salary numbers or unrelated numbers
 
-    Role category:
-    {role_category_label}
+    8) salary
+    Extract salary from the text only if clearly supported.
+    - Round to nearest value from predefined salary list below
+    - If only one salary is present, set min and max to the same value
+    - Currency must be a code like GBP, USD, EUR, CAD
+    - If unsupported, leave fields empty
+
+    Predefined salary list:
+    {salaries_str}
+
+    9) visa_sponsorship
+    Output:
+    - "yes"
+    - "no"
+    - ""
+    Only if supported by the text.
+
+    10) contract_type
+    Output exactly one:
+    - "Permanent"
+    - "FTC"
+    - "Part Time"
+    - "Freelance/Contract"
+    - ""
+    Priority if multiple:
+    Permanent > FTC > Part Time > Freelance/Contract
+
+    11) job_titles
+    Select up to 3 exact job titles from the predefined job titles list.
+    - Use exact strings from the list only
+    - Prefer fewer, more accurate titles
+    - If position name exactly matches one predefined job title, usually return just that one
+    - Do not output unrelated titles
+
+    12) seniorities
+    Select up to 3 values from:
+    entry, junior, mid, senior, lead, leadership
+
+    Rules:
+    - Lowercase only
+    - Order must always be:
+      entry, junior, mid, senior, lead, leadership
+    - "head of", "director", "vp", "chief", "engineering manager", "technical director" => leadership only
+    - 0-1 years => entry, junior
+    - 2 years => junior, mid
+    - 3-5 years => senior
+    - 5+ years or strong ownership / mentoring / managerial responsibility => senior, lead
+    - managerial role with cross-functional ownership can justify lead
+    - do not add junior/mid to clearly senior management roles
+
+    13) skills
+    Choose 0 to 10 skills from the allowed list below.
+    Hard rules:
+    - Use exact strings from the allowed list only
+    - Prefer concrete skills clearly evidenced by the source text
+    - Do not invent tools/languages/frameworks
+    - If the source does not support a skill, do not include it
+    - Better 2 accurate skills than 10 weak skills
 
     Allowed skills list:
     {skills_str}
 
-    Output:
-    Return a comma-separated list only.
+    14) role_relevance_reason
+    Give one concise reason that MUST match the final relevance decision.
+
+    15) notes
+    Very short note about extraction confidence/source. Keep concise.
+
+    OUTPUT JSON SCHEMA
+    {{
+      "role_relevance": "Relevant" or "Not Relevant",
+      "role_relevance_reason": "",
+      "job_category": "T&P job" or "Not T&P",
+      "job_location": "",
+      "remote_preferences": [],
+      "remote_days": "",
+      "salary_min": "",
+      "salary_max": "",
+      "salary_currency": "",
+      "visa_sponsorship": "",
+      "contract_type": "",
+      "job_titles": [],
+      "seniorities": [],
+      "skills": [],
+      "notes": ""
+    }}
 
     Position name:
     {position_name}
 
-    Job description:
-    {job_description}
+    Source text:
+    {source_text}
     """).strip()
