@@ -32,6 +32,7 @@ from rules import (
     closest_salary_value,
     detect_quick_tp_from_title,
     detect_relevant_business_sales_role,
+    detect_relevant_finance_accounting_role,
     extract_deterministic_skills,
     extract_remote_days,
     extract_remote_preferences,
@@ -250,7 +251,6 @@ class JobClassifier:
                 continue
             if self._is_broad_location(normalized):
                 continue
-            # explicit description labels should dominate
             score = weight + 120
             if "," in normalized:
                 score += 20
@@ -458,6 +458,37 @@ class JobClassifier:
     @staticmethod
     def _reason_is_positive_relevant(reason: str) -> bool:
         r = clean_description(reason).lower()
+        if not r:
+            return False
+
+        negative_markers = [
+            "outside allowed",
+            "outside allowed scope",
+            "outside target scope",
+            "not relevant",
+            "not matching predefined",
+            "not matching predefined relevant job titles",
+            "outside allowed regions",
+            "location is not allowed",
+            "location is outside allowed",
+            "medical",
+            "clinical",
+            "retail",
+            "shop-floor",
+            "manufacturing",
+            "construction",
+            "language other than english",
+            "primarily in another language",
+            "usa only",
+            "canada only",
+            "philippines",
+            "apac only",
+            "latam only",
+            "africa only",
+        ]
+        if any(marker in r for marker in negative_markers):
+            return False
+
         positive_markers = [
             "matches predefined job title",
             "backend development",
@@ -476,6 +507,14 @@ class JobClassifier:
             "brand design",
             "brand marketing",
             "designer role",
+            "finance role",
+            "accounting role",
+            "accounting/finance role",
+            "fp&a",
+            "tax",
+            "treasury",
+            "audit",
+            "controller",
         ]
         return any(marker in r for marker in positive_markers)
 
@@ -709,6 +748,18 @@ class JobClassifier:
 
         if detect_relevant_business_sales_role(position_name, source_text):
             result["role_relevance"] = RELEVANT_LABEL
+            if not result.get("role_relevance_reason") or "not matching" in result.get("role_relevance_reason", "").lower():
+                result["role_relevance_reason"] = "Role is a genuine business development / sales role within target business scope."
+
+        if detect_relevant_finance_accounting_role(position_name, source_text):
+            result["role_relevance"] = RELEVANT_LABEL
+            if (
+                not result.get("role_relevance_reason")
+                or "not matching" in result.get("role_relevance_reason", "").lower()
+                or "not relevant" in result.get("role_relevance_reason", "").lower()
+                or "outside allowed" in result.get("role_relevance_reason", "").lower()
+            ):
+                result["role_relevance_reason"] = "Role is a genuine finance/accounting role within allowed business scope."
 
         if self._reason_is_positive_relevant(reason):
             result["role_relevance"] = RELEVANT_LABEL
@@ -789,6 +840,15 @@ class JobClassifier:
             parsed["role_relevance"] = RELEVANT_LABEL
             if not parsed.get("role_relevance_reason") or "not matching" in parsed.get("role_relevance_reason", "").lower():
                 parsed["role_relevance_reason"] = "Role is a genuine business development / sales role within target business scope."
+
+        if detect_relevant_finance_accounting_role(position_name, source_text):
+            parsed["role_relevance"] = RELEVANT_LABEL
+            if (
+                not parsed.get("role_relevance_reason")
+                or "not matching" in parsed.get("role_relevance_reason", "").lower()
+                or "not relevant" in parsed.get("role_relevance_reason", "").lower()
+            ):
+                parsed["role_relevance_reason"] = "Role is a genuine finance/accounting role within allowed business scope."
 
         parsed["seniorities"] = self._finalize_seniorities(
             position_name,
