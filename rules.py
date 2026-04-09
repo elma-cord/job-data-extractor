@@ -198,6 +198,84 @@ def detect_relevant_business_sales_role(position_name: str, description: str) ->
     return False
 
 
+def detect_relevant_finance_accounting_role(position_name: str, description: str) -> bool:
+    title = lower_text(position_name)
+    text = lower_text(f"{position_name}\n{description}")
+
+    positive_title_terms = [
+        "accounting analyst",
+        "accountant",
+        "accounting",
+        "finance analyst",
+        "financial analyst",
+        "finance business partner",
+        "fp&a",
+        "financial planning and analysis",
+        "accounts payable",
+        "accounts receivable",
+        "ap analyst",
+        "ar analyst",
+        "payroll",
+        "tax",
+        "treasury",
+        "audit",
+        "auditor",
+        "controller",
+        "assistant controller",
+        "bookkeeper",
+        "finance manager",
+        "accounting manager",
+    ]
+
+    hard_negative_title_terms = [
+        "sales account manager",
+        "account executive",
+        "account director",
+        "customer account manager",
+        "bank teller",
+        "branch advisor",
+        "cashier",
+    ]
+
+    finance_context_terms = [
+        "general ledger",
+        "month-end",
+        "month end",
+        "journal entries",
+        "reconciliation",
+        "accounts payable",
+        "accounts receivable",
+        "payroll",
+        "tax",
+        "vat",
+        "treasury",
+        "audit",
+        "financial reporting",
+        "management accounts",
+        "statutory accounts",
+        "balance sheet",
+        "profit and loss",
+        "p&l",
+        "fp&a",
+        "forecasting",
+        "budgeting",
+        "controller",
+        "sap",
+        "oracle finance",
+    ]
+
+    if any(term in title for term in hard_negative_title_terms):
+        return False
+
+    if any(term in title for term in positive_title_terms):
+        return True
+
+    if ("finance" in title or "accounting" in title or "accountant" in title) and any(term in text for term in finance_context_terms):
+        return True
+
+    return False
+
+
 def title_has_leadership_signal(position_name: str) -> bool:
     title = lower_text(position_name)
     leadership_terms = [
@@ -622,7 +700,6 @@ def text_is_predominantly_non_english(text: str) -> bool:
     if sum(1 for x in non_english_markers if x in lower) >= 2:
         return True
 
-    # crude accented-character heuristic for long text
     accented = len(re.findall(r"[à-ÿÀ-Ÿ]", t))
     letters = len(re.findall(r"[A-Za-zÀ-Ÿ]", t))
     if letters >= 200 and accented / max(letters, 1) > 0.03:
@@ -663,7 +740,7 @@ def is_location_allowed(job_location: str, remote_preferences: list[str], source
         "united states", "usa", "canada", "germany", "france", "spain", "italy",
         "netherlands", "belgium", "sweden", "norway", "denmark", "finland",
         "switzerland", "austria", "poland", "portugal", "india", "singapore",
-        "japan", "china", "australia",
+        "japan", "china", "australia", "philippines", "metro manila", "makati",
     ]
     if any(term in loc for term in hard_disallowed):
         return False
@@ -678,6 +755,8 @@ def reason_strongly_says_not_relevant(reason: str) -> bool:
 
     signals = [
         "outside allowed",
+        "outside allowed scope",
+        "outside target scope",
         "not a real job posting",
         "educational",
         "informational",
@@ -696,5 +775,11 @@ def reason_strongly_says_not_relevant(reason: str) -> bool:
         "outside allowed regions",
         "usa only",
         "canada only",
+        "philippines",
+        "apac only",
+        "latam only",
+        "africa only",
+        "not matching predefined relevant job titles",
+        "not matching predefined job titles",
     ]
     return any(s in r for s in signals)
