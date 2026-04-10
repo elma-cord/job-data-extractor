@@ -43,6 +43,12 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
+      - name: Validate Gemini API key
+        run: |
+          test -n "${GEMINI_API_KEY}" || (echo "Missing GEMINI_API_KEY secret" && exit 1)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
       - name: Split jobs_input.csv into batches
         run: |
           python - <<'PY'
@@ -89,6 +95,7 @@ jobs:
       - name: Run extractor batch by batch
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euo pipefail
 
