@@ -36,8 +36,10 @@ from rules import (
     extract_deterministic_skills,
     extract_remote_days,
     extract_remote_preferences,
+    has_disallowed_location_signal,
     infer_job_titles_from_position_name,
     infer_skills_from_position_context,
+    is_explicitly_foreign_location_text,
     is_location_allowed,
     load_single_column_csv,
     looks_like_non_job_content,
@@ -74,9 +76,6 @@ class JobClassifier:
         self.predefined_tp_skills = load_single_column_csv(Path(PREDEFINED_TP_SKILLS_CSV))
         self.predefined_nontp_skills = load_single_column_csv(Path(PREDEFINED_NONTP_SKILLS_CSV))
         self.predefined_salaries = self._load_salary_values(Path(PREDEFINED_SALARIES_CSV))
-
-        self.location_lookup = {x.lower(): x for x in self.predefined_locations}
-        self.job_title_lookup = {x.lower(): x for x in self.predefined_job_titles}
 
     @staticmethod
     def _load_salary_values(path: Path) -> list[int]:
@@ -184,13 +183,16 @@ class JobClassifier:
         candidates: list[tuple[int, int, str]] = []
 
         patterns = [
-            (260, r"(?im)^\s*location\s*$\n^\s*(.+)$"),
-            (255, r"(?im)^\s*location\s*[:\-]\s*(.+)$"),
-            (250, r"(?im)^\s*####\s*location\s*$\n^\s*(.+)$"),
-            (245, r"(?im)^\s*job location\s*[:\-]\s*(.+)$"),
-            (240, r"(?im)^\s*office location\s*[:\-]\s*(.+)$"),
-            (230, r"(?im)^\s*city\s*[:\-]\s*(.+)$"),
-            (225, r"(?im)^\s*based in\s+(.+)$"),
+            (280, r"(?im)^\s*location city\s*[:\-]\s*(.+)$"),
+            (275, r"(?im)^\s*position location\s*[:\-]\s*(.+)$"),
+            (270, r"(?im)^\s*work location\s*[:\-]\s*(.+)$"),
+            (265, r"(?im)^\s*location\s*$\n^\s*(.+)$"),
+            (260, r"(?im)^\s*location\s*[:\-]\s*(.+)$"),
+            (255, r"(?im)^\s*####\s*location\s*$\n^\s*(.+)$"),
+            (250, r"(?im)^\s*job location\s*[:\-]\s*(.+)$"),
+            (245, r"(?im)^\s*office location\s*[:\-]\s*(.+)$"),
+            (240, r"(?im)^\s*city\s*[:\-]\s*(.+)$"),
+            (230, r"(?im)^\s*based in\s+(.+)$"),
             (220, r"(?im)\brole is based at (?:our )?(.+?)(?: office|\.)"),
             (160, r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$"),
             (80, r"(?im)\bhub based\s*\((.+?)\)"),
@@ -251,9 +253,11 @@ class JobClassifier:
                 continue
             if self._is_broad_location(normalized):
                 continue
+
             score = weight + 120
             if "," in normalized:
                 score += 20
+
             if score > best_score or (score == best_score and pos > best_pos):
                 best_score = score
                 best_value = normalized
@@ -293,13 +297,10 @@ class JobClassifier:
                 continue
 
             score = weight
-
             if not self._is_broad_location(normalized):
                 score += 70
-
             if "," in normalized:
                 score += 15
-
             if self._is_broad_location(normalized):
                 score -= 120
 
@@ -309,6 +310,22 @@ class JobClassifier:
                 best_pos = pos
 
         return best_value
+
+    def _has_strong_disallowed_explicit_location(self, text: str) -> bool:
+        weighted = self._extract_weighted_location_candidates(text)
+        if not weighted:
+            return False
+
+        for weight, _pos, raw in weighted:
+            if weight < 220:
+                continue
+            normalized = normalize_location_match(raw, self.predefined_locations)
+            if normalized:
+                return False
+            if is_explicitly_foreign_location_text(raw):
+                return True
+
+        return False
 
     def _should_fetch_url(self, description: str) -> bool:
         description = clean_description(description)
@@ -320,15 +337,32 @@ class JobClassifier:
 
         desc_l = description.lower()
         has_location_signal = any(
-            x in desc_l for x in [
-                "location:", "job location", "based in", "where you’ll work", "where you'll work",
-                "remote", "hybrid", "onsite", "office", "work from home",
+            x in desc_l
+            for x in [
+                "location:",
+                "location city:",
+                "job location",
+                "based in",
+                "where you’ll work",
+                "where you'll work",
+                "remote",
+                "hybrid",
+                "onsite",
+                "office",
+                "work from home",
             ]
         )
         has_role_signal = any(
-            x in desc_l for x in [
-                "responsibilities", "requirements", "experience", "about the role",
-                "we are looking for", "job type", "salary", "role purpose",
+            x in desc_l
+            for x in [
+                "responsibilities",
+                "requirements",
+                "experience",
+                "about the role",
+                "we are looking for",
+                "job type",
+                "salary",
+                "role purpose",
             ]
         )
         return not (has_location_signal and has_role_signal)
@@ -379,12 +413,18 @@ class JobClassifier:
         if explicit_desc_location:
             return explicit_desc_location
 
+        if self._has_strong_disallowed_explicit_location(description_text):
+            return LOCATION_UNKNOWN
+
         desc_ambiguous = self._description_has_ambiguous_location(description_text)
         desc_det = self._deterministic_location_from_text(description_text)
         desc_single_clear = self._has_clear_single_location_in_text(description_text)
 
         page_det = self._deterministic_location_from_text(page_text) if page_text else ""
         page_single_clear = self._has_clear_single_location_in_text(page_text) if page_text else False
+
+        if page_text and self._has_strong_disallowed_explicit_location(page_text):
+            return LOCATION_UNKNOWN
 
         if used_fetched_page:
             if page_det and page_single_clear:
@@ -456,67 +496,8 @@ class JobClassifier:
         return any(marker in d for marker in complexity_markers)
 
     @staticmethod
-    def _reason_is_positive_relevant(reason: str) -> bool:
-        r = clean_description(reason).lower()
-        if not r:
-            return False
-
-        negative_markers = [
-            "outside allowed",
-            "outside allowed scope",
-            "outside target scope",
-            "not relevant",
-            "not matching predefined",
-            "not matching predefined relevant job titles",
-            "outside allowed regions",
-            "location is not allowed",
-            "location is outside allowed",
-            "medical",
-            "clinical",
-            "retail",
-            "shop-floor",
-            "manufacturing",
-            "construction",
-            "language other than english",
-            "primarily in another language",
-            "usa only",
-            "canada only",
-            "philippines",
-            "apac only",
-            "latam only",
-            "africa only",
-        ]
-        if any(marker in r for marker in negative_markers):
-            return False
-
-        positive_markers = [
-            "matches predefined job title",
-            "backend development",
-            "software development",
-            "data role",
-            "technical support role",
-            "business development",
-            "sales role",
-            "allowed location",
-            "uk",
-            "hybrid",
-            "remote",
-            "full-time",
-            "permanent",
-            "genuine business",
-            "brand design",
-            "brand marketing",
-            "designer role",
-            "finance role",
-            "accounting role",
-            "accounting/finance role",
-            "fp&a",
-            "tax",
-            "treasury",
-            "audit",
-            "controller",
-        ]
-        return any(marker in r for marker in positive_markers)
+    def _reason_is_negative(reason: str) -> bool:
+        return reason_strongly_says_not_relevant(reason)
 
     @staticmethod
     def _clean_skill_list(skills: list[str], source_text: str, max_items: int) -> list[str]:
@@ -569,9 +550,7 @@ class JobClassifier:
 
             return cleaned[:3] if cleaned else ["junior", "mid"]
 
-        if "engineer" in title or "developer" in title or "analyst" in title or "designer" in title:
-            if self._is_complex_non_manager_role(description):
-                return ["junior", "mid", "senior"]
+        if any(x in title for x in ["engineer", "developer", "analyst", "designer"]):
             return ["junior", "mid", "senior"]
 
         return ["junior", "mid", "senior"]
@@ -640,12 +619,11 @@ class JobClassifier:
                         out.append(candidate)
                 out = out[:MAX_JOB_TITLES]
 
-        if not out:
-            if "application engineer" in title_l:
-                for candidate in ["System Engineer", "Support Engineer", "Solutions Engineer"]:
-                    if candidate in self.predefined_job_titles and candidate not in out:
-                        out.append(candidate)
-                out = out[:MAX_JOB_TITLES]
+        if not out and "application engineer" in title_l:
+            for candidate in ["System Engineer", "Support Engineer", "Solutions Engineer"]:
+                if candidate in self.predefined_job_titles and candidate not in out:
+                    out.append(candidate)
+            out = out[:MAX_JOB_TITLES]
 
         if "analytics manager" in title_l:
             for candidate in ["Business Analyst", "Data/Insight Analyst"]:
@@ -743,27 +721,6 @@ class JobClassifier:
     def _apply_final_consistency(self, result: dict[str, Any], position_name: str, source_text: str) -> dict[str, Any]:
         reason = result.get("role_relevance_reason", "")
 
-        if reason_strongly_says_not_relevant(reason) and not self._reason_is_positive_relevant(reason):
-            result["role_relevance"] = NOT_RELEVANT_LABEL
-
-        if detect_relevant_business_sales_role(position_name, source_text):
-            result["role_relevance"] = RELEVANT_LABEL
-            if not result.get("role_relevance_reason") or "not matching" in result.get("role_relevance_reason", "").lower():
-                result["role_relevance_reason"] = "Role is a genuine business development / sales role within target business scope."
-
-        if detect_relevant_finance_accounting_role(position_name, source_text):
-            result["role_relevance"] = RELEVANT_LABEL
-            if (
-                not result.get("role_relevance_reason")
-                or "not matching" in result.get("role_relevance_reason", "").lower()
-                or "not relevant" in result.get("role_relevance_reason", "").lower()
-                or "outside allowed" in result.get("role_relevance_reason", "").lower()
-            ):
-                result["role_relevance_reason"] = "Role is a genuine finance/accounting role within allowed business scope."
-
-        if self._reason_is_positive_relevant(reason):
-            result["role_relevance"] = RELEVANT_LABEL
-
         if text_is_predominantly_non_english(source_text):
             result["role_relevance"] = NOT_RELEVANT_LABEL
             result["role_relevance_reason"] = "Job description is primarily in another language."
@@ -771,6 +728,27 @@ class JobClassifier:
         if text_requires_non_english_language(source_text):
             result["role_relevance"] = NOT_RELEVANT_LABEL
             result["role_relevance_reason"] = "Role requires a language other than English."
+
+        if has_disallowed_location_signal(source_text):
+            result["role_relevance"] = NOT_RELEVANT_LABEL
+            result["role_relevance_reason"] = "Location is outside allowed regions or work-pattern rules."
+
+        if self._reason_is_negative(reason):
+            result["role_relevance"] = NOT_RELEVANT_LABEL
+
+        if detect_relevant_business_sales_role(position_name, source_text) and result.get("role_relevance") != NOT_RELEVANT_LABEL:
+            result["role_relevance"] = RELEVANT_LABEL
+            if not result.get("role_relevance_reason") or "not matching" in result.get("role_relevance_reason", "").lower():
+                result["role_relevance_reason"] = "Role is a genuine business development / sales role within target business scope."
+
+        if detect_relevant_finance_accounting_role(position_name, source_text) and result.get("role_relevance") != NOT_RELEVANT_LABEL:
+            result["role_relevance"] = RELEVANT_LABEL
+            if (
+                not result.get("role_relevance_reason")
+                or "not matching" in result.get("role_relevance_reason", "").lower()
+                or "not relevant" in result.get("role_relevance_reason", "").lower()
+            ):
+                result["role_relevance_reason"] = "Role is a genuine finance/accounting role within allowed business scope."
 
         if result.get("role_relevance") == RELEVANT_LABEL:
             if not is_location_allowed(
@@ -791,6 +769,8 @@ class JobClassifier:
             )
 
         result["remote_preferences"] = ", ".join(result.get("remote_preferences_list", [])) if result.get("remote_preferences_list") else ""
+        if not result.get("role_relevance_reason"):
+            result["role_relevance_reason"] = "Role fits allowed scope and location rules."
         return result
 
     def classify_job(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -815,6 +795,15 @@ class JobClassifier:
 
         source_text, source_note, used_fetched_page, page_text = self._build_source_text(job_description, job_url)
 
+        excluded_after_fetch, excluded_after_fetch_reason = obvious_excluded_role(position_name, source_text)
+        if excluded_after_fetch:
+            return self._blank_result(
+                role_relevance=NOT_RELEVANT_LABEL,
+                role_relevance_reason=excluded_after_fetch_reason,
+                job_category=detect_quick_tp_from_title(position_name) or NOT_TP_LABEL,
+                notes=source_note,
+            )
+
         raw = self._call_model(
             build_unified_job_extraction_prompt(
                 position_name=position_name,
@@ -836,12 +825,12 @@ class JobClassifier:
             used_fetched_page=used_fetched_page,
         )
 
-        if detect_relevant_business_sales_role(position_name, source_text):
+        if detect_relevant_business_sales_role(position_name, source_text) and parsed.get("role_relevance") != NOT_RELEVANT_LABEL:
             parsed["role_relevance"] = RELEVANT_LABEL
             if not parsed.get("role_relevance_reason") or "not matching" in parsed.get("role_relevance_reason", "").lower():
                 parsed["role_relevance_reason"] = "Role is a genuine business development / sales role within target business scope."
 
-        if detect_relevant_finance_accounting_role(position_name, source_text):
+        if detect_relevant_finance_accounting_role(position_name, source_text) and parsed.get("role_relevance") != NOT_RELEVANT_LABEL:
             parsed["role_relevance"] = RELEVANT_LABEL
             if (
                 not parsed.get("role_relevance_reason")
