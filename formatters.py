@@ -3,6 +3,7 @@ from typing import Any
 
 OUTPUT_COLUMNS = [
     "company_name",
+    "company_domain",
     "position_name",
     "job_url",
     "job_description",
@@ -57,6 +58,7 @@ def _get_list_item(items: list[str], index: int) -> str:
 def build_output_row(raw_row: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     row = {
         "company_name": raw_row.get("company_name", ""),
+        "company_domain": raw_row.get("company_domain", ""),
         "position_name": raw_row.get("job_title", raw_row.get("position_name", "")),
         "job_url": raw_row.get("job_url", ""),
         "job_description": raw_row.get("job_description", ""),
