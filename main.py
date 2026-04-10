@@ -1,6 +1,8 @@
 import csv
+import re
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from classifiers import JobClassifier
 from config import INPUT_CSV, OUTPUT_CSV
@@ -9,6 +11,18 @@ from remote_policy_lookup import RemotePolicyLookup
 
 
 VALID_REMOTE_VALUES = {"onsite", "hybrid", "remote"}
+COMMON_NON_COMPANY_HOSTS = {
+    "linkedin.com",
+    "www.linkedin.com",
+    "uk.linkedin.com",
+    "glassdoor.com",
+    "www.glassdoor.com",
+    "indeed.com",
+    "www.indeed.com",
+    "greenhouse.io",
+    "boards.greenhouse.io",
+    "jobs.ashbyhq.com",
+}
 
 
 def read_input_csv(path: Path) -> list[dict]:
@@ -51,6 +65,46 @@ def _compute_remote_overall(openai_value: str, gemini_value: str) -> str:
     return ""
 
 
+def _normalize_domain(value: str) -> str:
+    value = (value or "").strip().lower()
+    value = re.sub(r"^https?://", "", value)
+    value = value.split("/")[0].strip()
+    value = value.strip(".")
+    if value.startswith("www."):
+        value = value[4:]
+    return value
+
+
+def _domain_from_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+
+    try:
+        parsed = urlparse(url if "://" in url else f"https://{url}")
+        host = (parsed.netloc or "").lower().strip()
+        if not host:
+            return ""
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+    except Exception:
+        return ""
+
+
+def _get_best_company_domain(row: dict) -> str:
+    for key in ["company_domain", "company_website", "website", "domain"]:
+        value = _normalize_domain(str(row.get(key, "")))
+        if value:
+            return value
+
+    job_url_domain = _domain_from_url(str(row.get("job_url", "")))
+    if job_url_domain and job_url_domain not in COMMON_NON_COMPANY_HOSTS:
+        return job_url_domain
+
+    return ""
+
+
 def main() -> None:
     input_path = Path(INPUT_CSV)
     output_path = Path(OUTPUT_CSV)
@@ -74,6 +128,9 @@ def main() -> None:
             result = classifier.classify_job(row)
             final_row = build_output_row(row, result)
 
+            company_domain = _get_best_company_domain(row)
+            final_row["company_domain"] = company_domain
+
             openai_remote = _normalize_remote_value(final_row.get("remote_preferences", ""))
             gemini_remote = ""
             gemini_note = ""
@@ -84,7 +141,11 @@ def main() -> None:
             )
 
             if should_run_remote_lookup:
-                remote_result = remote_lookup.lookup(row)
+                remote_row = dict(row)
+                if company_domain:
+                    remote_row["company_domain"] = company_domain
+
+                remote_result = remote_lookup.lookup(remote_row)
                 gemini_remote = _normalize_remote_value(remote_result.remote_preferences)
                 gemini_note = (remote_result.note or "").strip()
 
@@ -126,6 +187,7 @@ def main() -> None:
                     "notes": f"unhandled_error: {exc}",
                 },
             )
+            final_row["company_domain"] = _get_best_company_domain(row)
 
         output_rows.append(final_row)
 
