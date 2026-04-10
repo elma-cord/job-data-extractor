@@ -13,6 +13,9 @@ OUTPUT_COLUMNS = [
 
     "job_location",
     "remote_preferences",
+    "remote_preferences_gemini",
+    "remote_preferences_overall",
+    "remote_preferences_gemini_note",
     "remote_days",
 
     "salary_min",
@@ -64,6 +67,9 @@ def build_output_row(raw_row: dict[str, Any], result: dict[str, Any]) -> dict[st
 
         "job_location": result.get("job_location", ""),
         "remote_preferences": result.get("remote_preferences", ""),
+        "remote_preferences_gemini": result.get("remote_preferences_gemini", ""),
+        "remote_preferences_overall": result.get("remote_preferences_overall", ""),
+        "remote_preferences_gemini_note": result.get("remote_preferences_gemini_note", ""),
         "remote_days": result.get("remote_days", ""),
 
         "salary_min": result.get("salary_min", ""),
