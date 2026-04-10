@@ -3,6 +3,70 @@ import re
 from pathlib import Path
 
 
+GENERIC_LOCATION_TOKENS = {
+    "uk",
+    "united",
+    "kingdom",
+    "great",
+    "britain",
+    "england",
+    "scotland",
+    "wales",
+    "northern",
+    "ireland",
+    "unitedstates",
+    "united",
+    "states",
+    "usa",
+    "us",
+    "city",
+    "centre",
+    "center",
+    "county",
+    "region",
+    "remote",
+    "hybrid",
+    "onsite",
+    "on",
+    "site",
+    "office",
+}
+
+DISALLOWED_LOCATION_TERMS = [
+    "philippines",
+    "metro manila",
+    "makati",
+    "bonifacio global city",
+    "taguig",
+    "united states",
+    "usa",
+    "us only",
+    "canada",
+    "germany",
+    "france",
+    "spain",
+    "italy",
+    "netherlands",
+    "belgium",
+    "sweden",
+    "norway",
+    "denmark",
+    "finland",
+    "switzerland",
+    "austria",
+    "poland",
+    "portugal",
+    "india",
+    "singapore",
+    "japan",
+    "china",
+    "australia",
+    "apac",
+    "latam",
+    "africa",
+]
+
+
 def load_single_column_csv(path: Path) -> list[str]:
     values = []
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
@@ -118,7 +182,14 @@ def obvious_excluded_role(position_name: str, description: str) -> tuple[bool, s
         (r"\bwaiter\b|\bwaitress\b|\bchef\b|\bkitchen\b", "Hospitality role is outside allowed tech/business scope."),
         (r"\bcashier\b|\bretail assistant\b|\bsales associate\b|\bshop assistant\b", "Retail store role is outside allowed tech/business scope."),
         (r"\bconstruction\b|\bcivil engineer(?:ing)?\b", "Construction / civil engineering role is outside allowed scope."),
-        (r"\bmanufacturing technician\b|\bproduction operator\b|\bassembly technician\b|\bshop floor\b|\bproduction line\b|\bplant operator\b", "Manufacturing / shop-floor role is outside allowed scope."),
+        (
+            r"\bmanufacturing technician\b|\bproduction operator\b|\bassembly technician\b|\bshop floor\b|\bproduction line\b|\bplant operator\b|\binjection molding\b|\bmaritime\b|\bmicrobiology\b",
+            "Manufacturing / shop-floor role is outside allowed scope.",
+        ),
+        (
+            r"\brobotics technician\b|\belectro[- ]?mechanical\b|\bmechanical technician\b|\belectrical technician\b|\bhardware assembly\b|\bmechatronics\b",
+            "Hands-on robotics / mechanical / electrical technician role is outside allowed scope.",
+        ),
         (r"\bpsychiatrist\b|\bphysician\b|\bsurgeon\b|\btherapist\b|\bpatient care\b|\bhospital\b", "Medical / clinical role is outside allowed scope."),
         (r"\brf test engineer\b|\bradio frequency test engineer\b", "RF test engineering role is outside allowed target scope."),
     ]
@@ -134,13 +205,41 @@ def detect_quick_tp_from_title(position_name: str) -> str:
     title = lower_text(position_name)
 
     tp_terms = [
-        "engineer", "developer", "software", "data", "product", "ux", "ui",
-        "devops", "site reliability", "security", "qa", "automation",
-        "backend", "back end", "front end", "frontend", "full stack",
-        "it support", "infrastructure", "architect", "technical", "support engineer",
-        "systems engineer", "system engineer", "network engineer", "platform",
-        "cloud", "sre", "machine learning", "ai engineer", "application engineer",
-        "administrator", "designer", "brand designer", "backend engineer",
+        "engineer",
+        "developer",
+        "software",
+        "data",
+        "product",
+        "ux",
+        "ui",
+        "devops",
+        "site reliability",
+        "security",
+        "qa",
+        "automation",
+        "backend",
+        "back end",
+        "front end",
+        "frontend",
+        "full stack",
+        "it support",
+        "infrastructure",
+        "architect",
+        "technical",
+        "support engineer",
+        "systems engineer",
+        "system engineer",
+        "network engineer",
+        "platform",
+        "cloud",
+        "sre",
+        "machine learning",
+        "ai engineer",
+        "application engineer",
+        "administrator",
+        "designer",
+        "brand designer",
+        "backend engineer",
     ]
 
     if any(term in title for term in tp_terms):
@@ -301,10 +400,65 @@ def _canonical_location_key(text: str) -> str:
     text = lower_text(text)
     text = text.replace("&", " and ")
     text = re.sub(r"\bgreat britain\b", " united kingdom ", text)
-    text = re.sub(r"\bu\.?k\.?\b", " uk ", text)
+    text = re.sub(r"\bu\.?k\.?\b", " united kingdom ", text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _location_specific_tokens(text: str) -> list[str]:
+    key = _canonical_location_key(text)
+    if not key:
+        return []
+
+    tokens = []
+    for token in key.split():
+        if token in GENERIC_LOCATION_TOKENS:
+            continue
+        if len(token) <= 2:
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def is_explicitly_foreign_location_text(value: str) -> bool:
+    value_l = lower_text(value)
+    return any(term in value_l for term in DISALLOWED_LOCATION_TERMS)
+
+
+def has_disallowed_location_signal(text: str) -> bool:
+    text_l = lower_text(text)
+    if not text_l:
+        return False
+
+    patterns = [
+        r"(?im)^\s*location(?: city)?\s*[:\-]\s*(.+)$",
+        r"(?im)^\s*job location\s*[:\-]\s*(.+)$",
+        r"(?im)^\s*work location\s*[:\-]\s*(.+)$",
+        r"(?im)^\s*city\s*[:\-]\s*(.+)$",
+        r"(?im)^\s*based in\s+(.+)$",
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, text_l):
+            value = (match.group(1) or "").strip()
+            if is_explicitly_foreign_location_text(value):
+                return True
+
+    remote_block_patterns = [
+        "remote apac",
+        "apac only",
+        "asia only",
+        "remote asia",
+        "latam only",
+        "remote latam",
+        "africa only",
+        "remote africa",
+        "usa only",
+        "us only",
+        "canada only",
+    ]
+    return any(term in text_l for term in remote_block_patterns)
 
 
 def normalize_location_match(value: str, allowed_locations: list[str]) -> str:
@@ -316,47 +470,51 @@ def normalize_location_match(value: str, allowed_locations: list[str]) -> str:
     if value_key in exact_map:
         return exact_map[value_key]
 
-    broad_only = {
-        "uk", "united kingdom", "england", "scotland", "wales",
-        "northern ireland", "ireland", "europe", "emea", "global", "worldwide"
-    }
+    if is_explicitly_foreign_location_text(value):
+        return ""
+
+    value_specific_tokens = set(_location_specific_tokens(value))
+    if not value_specific_tokens:
+        return ""
 
     best_value = ""
     best_score = -10**9
-    value_tokens = set(value_key.split())
 
     for loc in allowed_locations:
         loc_key = _canonical_location_key(loc)
-        loc_tokens = set(loc_key.split())
+        loc_specific_tokens = set(_location_specific_tokens(loc))
+
+        overlap = value_specific_tokens & loc_specific_tokens
+        if not overlap:
+            continue
 
         score = 0
 
         if value_key == loc_key:
-            score += 1000
+            score += 5000
 
-        if value_key in loc_key:
-            score += 500
+        if value_specific_tokens == loc_specific_tokens:
+            score += 2000
 
-        overlap = len(value_tokens & loc_tokens)
-        score += overlap * 80
+        if value_specific_tokens.issubset(loc_specific_tokens):
+            score += 700
 
-        if value_tokens and value_tokens.issubset(loc_tokens):
-            score += 250
+        score += len(overlap) * 250
 
-        if loc_key in broad_only:
-            score -= 250
+        extra_candidate_tokens = len(loc_specific_tokens - value_specific_tokens)
+        score -= extra_candidate_tokens * 160
 
         if "," in loc:
-            score += 50
+            score += 40
 
-        if len(loc_tokens) >= 3:
-            score += 20
+        if len(loc_specific_tokens) == len(value_specific_tokens):
+            score += 250
 
         if score > best_score:
             best_score = score
             best_value = loc
 
-    if best_score >= 120:
+    if best_score >= 300:
         return best_value
 
     return ""
@@ -366,8 +524,8 @@ _SAFE_SKILL_ALIASES = {
     "PostgreSQL": [r"\bpostgresql\b", r"\bpostgres\b", r"\bsql/postgres\b"],
     "Machine Learning": [r"\bmachine learning\b", r"\bml\b", r"\bllms?\b", r"\blarge language models?\b"],
     "Artificial Intelligence": [r"\bartificial intelligence\b", r"\bai\b", r"\bllms?\b", r"\blarge language models?\b"],
-    "Data Visualisation": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b", r"\bvisual standards\b"],
-    "Data Visualization": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b", r"\bvisual standards\b"],
+    "Data Visualisation": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b"],
+    "Data Visualization": [r"\bdata visuali[sz]ation\b", r"\bvisuali[sz]ation\b"],
     "Data Driven": [r"\bdata[- ]driven\b"],
     "Performance Reporting": [r"\bperformance reporting\b", r"\bperformance data\b"],
     "VAT": [r"\bvat\b"],
@@ -433,30 +591,12 @@ def infer_skills_from_position_context(position_name: str, description: str, all
     text = lower_text(f"{position_name}\n{description}")
 
     candidate_map = [
-        (
-            ["project manager", "project coordinator", "project lead"],
-            ["Project Management", "Project Management Tools"],
-        ),
-        (
-            ["business analyst"],
-            ["Business Analysis", "Project Management"],
-        ),
-        (
-            ["brand designer", "designer"],
-            ["Graphic Design", "Brand Marketing"],
-        ),
-        (
-            ["accounts payable", "accounts payable assistant"],
-            ["Accounts Payable", "VAT", "Excel", "BACS"],
-        ),
-        (
-            ["analytics manager", "data analyst", "insight analyst"],
-            ["SQL", "Data Visualisation", "Performance Reporting", "Data Driven"],
-        ),
-        (
-            ["business development", "bdr", "sdr", "account executive"],
-            ["Business Development", "Lead Generation", "Sales"],
-        ),
+        (["project manager", "project coordinator", "project lead"], ["Project Management", "Project Management Tools"]),
+        (["business analyst"], ["Business Analysis", "Project Management"]),
+        (["brand designer", "designer"], ["Graphic Design", "Brand Marketing"]),
+        (["accounts payable", "accounts payable assistant"], ["Accounts Payable", "VAT", "Excel", "BACS"]),
+        (["analytics manager", "data analyst", "insight analyst"], ["SQL", "Data Visualisation", "Performance Reporting", "Data Driven"]),
+        (["business development", "bdr", "sdr", "account executive"], ["Business Development", "Lead Generation", "Sales"]),
     ]
 
     allowed_lookup = {lower_text(x): x for x in allowed_skills}
@@ -494,46 +634,16 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
         return [allowed_lookup[title]]
 
     rules = [
-        (
-            ["1st line", "first line", "2nd line", "second line", "3rd line", "third line"],
-            ["Support Engineer", "System Administrator", "System Engineer"],
-        ),
-        (
-            ["it engineer", "it support engineer", "support engineer", "technical support engineer"],
-            ["Support Engineer", "System Engineer", "System Administrator"],
-        ),
-        (
-            ["application engineer"],
-            ["System Engineer", "Support Engineer", "Solutions Engineer"],
-        ),
-        (
-            ["systems engineer", "system engineer"],
-            ["System Engineer", "Support Engineer"],
-        ),
-        (
-            ["network engineer"],
-            ["Network Engineer", "System Engineer"],
-        ),
-        (
-            ["administrator"],
-            ["System Administrator", "Operations"],
-        ),
-        (
-            ["analytics manager"],
-            ["Business Analyst", "Data/Insight Analyst"],
-        ),
-        (
-            ["accounts payable", "accounts payable assistant"],
-            ["Finance/Accounting", "Operations"],
-        ),
-        (
-            ["brand designer", "brand design", "brand design lead", "design lead"],
-            ["Graphic Designer", "Brand Marketing"],
-        ),
-        (
-            ["business development", "bdr", "sdr"],
-            ["SDR/BDR", "Business Development Manager", "Account Executive"],
-        ),
+        (["1st line", "first line", "2nd line", "second line", "3rd line", "third line"], ["Support Engineer", "System Administrator", "System Engineer"]),
+        (["it engineer", "it support engineer", "support engineer", "technical support engineer"], ["Support Engineer", "System Engineer", "System Administrator"]),
+        (["application engineer"], ["System Engineer", "Support Engineer", "Solutions Engineer"]),
+        (["systems engineer", "system engineer"], ["System Engineer", "Support Engineer"]),
+        (["network engineer"], ["Network Engineer", "System Engineer"]),
+        (["administrator"], ["System Administrator", "Operations"]),
+        (["analytics manager"], ["Business Analyst", "Data/Insight Analyst"]),
+        (["accounts payable", "accounts payable assistant"], ["Finance/Accounting", "Operations"]),
+        (["brand designer", "brand design", "brand design lead", "design lead"], ["Graphic Designer", "Brand Marketing"]),
+        (["business development", "bdr", "sdr"], ["SDR/BDR", "Business Development Manager", "Account Executive"]),
     ]
 
     for triggers, candidates in rules:
@@ -664,13 +774,24 @@ def extract_remote_preferences(text: str) -> list[str]:
 def text_requires_non_english_language(text: str) -> bool:
     t = lower_text(text)
 
+    language_names = (
+        r"french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean|thai|vietnamese|indonesian|malay"
+    )
+
     negative_patterns = [
-        r"\bfluency in (?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\b",
-        r"\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean) and english\b",
-        r"\bbilingual\b.{0,40}\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\b",
-        r"\brequired language\b.{0,30}\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\b",
-        r"\bmust speak\b.{0,30}\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\b",
-        r"\b(?:french|german|spanish|italian|dutch|portuguese|arabic|polish|swedish|norwegian|danish|finnish|czech|hungarian|romanian|bulgarian|croatian|serbian|slovak|slovenian|turkish|japanese|mandarin|cantonese|korean)\s+required\b",
+        rf"\bfluency in (?:{language_names})\b",
+        rf"\b(?:{language_names}) and english\b",
+        rf"\bbilingual\b.{{0,40}}\b(?:{language_names})\b",
+        rf"\brequired language\b.{{0,40}}\b(?:{language_names})\b",
+        rf"\bmust speak\b.{{0,40}}\b(?:{language_names})\b",
+        rf"\b(?:{language_names})\s+required\b",
+        rf"\bnative\s+(?:{language_names})\b",
+        rf"\bbusiness[- ]level\s+(?:{language_names})\b",
+        rf"\bprofessional[- ]level\s+(?:{language_names})\b",
+        rf"\bproficiency in (?:{language_names})\b",
+        rf"\bwritten and spoken\s+(?:{language_names})\b",
+        rf"\benglish and (?:{language_names})\b",
+        rf"\b(?:{language_names})\s+preferred\b",
     ]
     return any(re.search(p, t, flags=re.IGNORECASE) for p in negative_patterns)
 
@@ -683,19 +804,44 @@ def text_is_predominantly_non_english(text: str) -> bool:
     lower = t.lower()
 
     common_english_markers = [
-        "responsibilities", "requirements", "location", "salary", "benefits",
-        "about the role", "job description", "experience", "apply", "you will",
-        "we are looking for", "job type",
+        "responsibilities",
+        "requirements",
+        "location",
+        "salary",
+        "benefits",
+        "about the role",
+        "job description",
+        "experience",
+        "apply",
+        "you will",
+        "we are looking for",
+        "job type",
     ]
     if sum(1 for x in common_english_markers if x in lower) >= 2:
         return False
 
     non_english_markers = [
-        "responsabilidades", "requisitos", "ubicación", "salario", "beneficios",
-        "puesto", "empleo", "experiencia requerida",
-        "responsabilités", "exigences", "lieu", "salaire", "avantages",
-        "stellenbeschreibung", "anforderungen", "standort", "gehalt",
-        "descrizione", "requisiti", "posizione", "stipendio",
+        "responsabilidades",
+        "requisitos",
+        "ubicación",
+        "salario",
+        "beneficios",
+        "puesto",
+        "empleo",
+        "experiencia requerida",
+        "responsabilités",
+        "exigences",
+        "lieu",
+        "salaire",
+        "avantages",
+        "stellenbeschreibung",
+        "anforderungen",
+        "standort",
+        "gehalt",
+        "descrizione",
+        "requisiti",
+        "posizione",
+        "stipendio",
     ]
     if sum(1 for x in non_english_markers if x in lower) >= 2:
         return True
@@ -709,11 +855,14 @@ def text_is_predominantly_non_english(text: str) -> bool:
 
 
 def is_location_allowed(job_location: str, remote_preferences: list[str], source_text: str) -> bool:
+    text = lower_text(source_text)
+    if has_disallowed_location_signal(text):
+        return False
+
     if not job_location or lower_text(job_location) == "unknown":
         return True
 
     loc = lower_text(job_location)
-    text = lower_text(source_text)
     remote_set = set(remote_preferences)
 
     uk_markers = ["uk", "united kingdom", "england", "scotland", "wales", "northern ireland"]
@@ -730,18 +879,21 @@ def is_location_allowed(job_location: str, remote_preferences: list[str], source
         if "remote" not in remote_set:
             return False
         blocked_regions = [
-            "remote apac", "apac only", "asia only", "remote asia",
-            "latam only", "remote latam", "africa only", "remote africa",
-            "usa only", "us only", "canada only",
+            "remote apac",
+            "apac only",
+            "asia only",
+            "remote asia",
+            "latam only",
+            "remote latam",
+            "africa only",
+            "remote africa",
+            "usa only",
+            "us only",
+            "canada only",
         ]
         return not any(term in text for term in blocked_regions)
 
-    hard_disallowed = [
-        "united states", "usa", "canada", "germany", "france", "spain", "italy",
-        "netherlands", "belgium", "sweden", "norway", "denmark", "finland",
-        "switzerland", "austria", "poland", "portugal", "india", "singapore",
-        "japan", "china", "australia", "philippines", "metro manila", "makati",
-    ]
+    hard_disallowed = DISALLOWED_LOCATION_TERMS
     if any(term in loc for term in hard_disallowed):
         return False
 
@@ -769,6 +921,9 @@ def reason_strongly_says_not_relevant(reason: str) -> bool:
         "construction",
         "civil engineering",
         "rf test",
+        "robotics technician",
+        "mechanical",
+        "electrical technician",
         "language other than english",
         "job description is primarily in another language",
         "location is not allowed",
