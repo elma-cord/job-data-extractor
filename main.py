@@ -8,6 +8,9 @@ from formatters import OUTPUT_COLUMNS, build_output_row
 from remote_policy_lookup import RemotePolicyLookup
 
 
+VALID_REMOTE_VALUES = {"onsite", "hybrid", "remote"}
+
+
 def read_input_csv(path: Path) -> list[dict]:
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
@@ -30,6 +33,22 @@ def _append_note(existing: str, new_note: str) -> str:
     if not existing:
         return new_note
     return f"{existing}; {new_note}"
+
+
+def _normalize_remote_value(value: str) -> str:
+    value = (value or "").strip().lower()
+    return value if value in VALID_REMOTE_VALUES else ""
+
+
+def _compute_remote_overall(openai_value: str, gemini_value: str) -> str:
+    openai_value = _normalize_remote_value(openai_value)
+    gemini_value = _normalize_remote_value(gemini_value)
+
+    if openai_value:
+        return openai_value
+    if gemini_value:
+        return gemini_value
+    return ""
 
 
 def main() -> None:
@@ -55,20 +74,32 @@ def main() -> None:
             result = classifier.classify_job(row)
             final_row = build_output_row(row, result)
 
+            openai_remote = _normalize_remote_value(final_row.get("remote_preferences", ""))
+            gemini_remote = ""
+            gemini_note = ""
+
             should_run_remote_lookup = (
                 final_row.get("role_relevance", "") == "Relevant"
-                and not (final_row.get("remote_preferences", "") or "").strip()
+                and not openai_remote
             )
 
             if should_run_remote_lookup:
                 remote_result = remote_lookup.lookup(row)
+                gemini_remote = _normalize_remote_value(remote_result.remote_preferences)
+                gemini_note = (remote_result.note or "").strip()
 
-                if remote_result.remote_preferences in {"onsite", "hybrid", "remote"}:
-                    final_row["remote_preferences"] = remote_result.remote_preferences
+            final_row["remote_preferences"] = openai_remote
+            final_row["remote_preferences_gemini"] = gemini_remote
+            final_row["remote_preferences_gemini_note"] = gemini_note
+            final_row["remote_preferences_overall"] = _compute_remote_overall(
+                openai_value=openai_remote,
+                gemini_value=gemini_remote,
+            )
 
+            if gemini_note:
                 final_row["notes"] = _append_note(
                     final_row.get("notes", ""),
-                    remote_result.note,
+                    gemini_note,
                 )
 
         except Exception as exc:
@@ -80,6 +111,9 @@ def main() -> None:
                     "job_category": "",
                     "job_location": "",
                     "remote_preferences": "",
+                    "remote_preferences_gemini": "",
+                    "remote_preferences_overall": "",
+                    "remote_preferences_gemini_note": "",
                     "remote_days": "",
                     "salary_min": "",
                     "salary_max": "",
