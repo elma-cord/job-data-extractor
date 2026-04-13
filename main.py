@@ -1,4 +1,5 @@
 import csv
+import os
 import re
 import sys
 from pathlib import Path
@@ -105,6 +106,11 @@ def _get_best_company_domain(row: dict) -> str:
     return ""
 
 
+def _is_gemini_remote_lookup_enabled() -> bool:
+    raw = os.getenv("ENABLE_GEMINI_REMOTE_LOOKUP", "true").strip().lower()
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
 def main() -> None:
     input_path = Path(INPUT_CSV)
     output_path = Path(OUTPUT_CSV)
@@ -119,7 +125,8 @@ def main() -> None:
         return
 
     classifier = JobClassifier()
-    remote_lookup = RemotePolicyLookup()
+    gemini_enabled = _is_gemini_remote_lookup_enabled()
+    remote_lookup = RemotePolicyLookup() if gemini_enabled else None
     output_rows = []
 
     total = len(rows)
@@ -136,7 +143,8 @@ def main() -> None:
             gemini_note = ""
 
             should_run_remote_lookup = (
-                final_row.get("role_relevance", "") == "Relevant"
+                gemini_enabled
+                and final_row.get("role_relevance", "") == "Relevant"
                 and not openai_remote
             )
 
@@ -148,6 +156,9 @@ def main() -> None:
                 remote_result = remote_lookup.lookup(remote_row)
                 gemini_remote = _normalize_remote_value(remote_result.remote_preferences)
                 gemini_note = (remote_result.note or "").strip()
+
+            elif not gemini_enabled and final_row.get("role_relevance", "") == "Relevant" and not openai_remote:
+                gemini_note = "remote_policy_lookup: skipped - disabled by ENABLE_GEMINI_REMOTE_LOOKUP"
 
             final_row["remote_preferences"] = openai_remote
             final_row["remote_preferences_gemini"] = gemini_remote
