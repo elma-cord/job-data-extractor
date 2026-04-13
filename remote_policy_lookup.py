@@ -1,8 +1,8 @@
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
-from typing import Optional
 from urllib.parse import urlparse
 
 from google import genai
@@ -26,6 +26,8 @@ COMMON_NON_COMPANY_HOSTS = {
     "boards.greenhouse.io",
     "jobs.ashbyhq.com",
 }
+
+RETRY_DELAYS_SECONDS = [2, 5, 10]
 
 
 @dataclass
@@ -160,6 +162,21 @@ Search target: remote working policy for {query_hint}
 """.strip()
 
 
+def _is_retryable_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    retry_markers = [
+        "429",
+        "resource_exhausted",
+        "rate limit",
+        "quota",
+        "temporarily unavailable",
+        "deadline exceeded",
+        "internal",
+        "unavailable",
+    ]
+    return any(marker in message for marker in retry_markers)
+
+
 class RemotePolicyLookup:
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -186,18 +203,26 @@ class RemotePolicyLookup:
             temperature=0,
         )
 
-        try:
-            response = self.client.models.generate_content(
-                model=GEMINI_REMOTE_MODEL,
-                contents=prompt,
-                config=config,
-            )
-        except Exception as exc:
-            return RemotePolicyResult(
-                remote_preferences=UNKNOWN_POLICY,
-                note=f"remote_policy_lookup_error: {exc}",
-                source_count=0,
-            )
+        last_error = None
+        response = None
+
+        for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
+            try:
+                response = self.client.models.generate_content(
+                    model=GEMINI_REMOTE_MODEL,
+                    contents=prompt,
+                    config=config,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt >= len(RETRY_DELAYS_SECONDS) or not _is_retryable_error(exc):
+                    return RemotePolicyResult(
+                        remote_preferences=UNKNOWN_POLICY,
+                        note=f"remote_policy_lookup_error: {exc}",
+                        source_count=0,
+                    )
+                time.sleep(RETRY_DELAYS_SECONDS[attempt])
 
         text = getattr(response, "text", "") or ""
         payload = _extract_json_object(text)
@@ -238,6 +263,9 @@ class RemotePolicyLookup:
             note = f"remote_policy_lookup: {policy} - {reason}; sources: {source_note}"
         else:
             note = f"remote_policy_lookup: {policy} - {reason}"
+
+        if last_error and _is_retryable_error(last_error):
+            note = f"{note}; retries_applied"
 
         return RemotePolicyResult(
             remote_preferences=policy,
