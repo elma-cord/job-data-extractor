@@ -30,6 +30,7 @@ from fetch_extract import fetch_job_page_text
 from prompts import build_unified_job_extraction_prompt
 from rules import (
     closest_salary_value,
+    detect_allowed_corporate_role,
     detect_quick_tp_from_title,
     detect_relevant_business_sales_role,
     detect_relevant_finance_accounting_role,
@@ -718,6 +719,14 @@ class JobClassifier:
             "notes": notes,
         }
 
+    def _has_hard_rejection(self, source_text: str, reason: str) -> bool:
+        return (
+            text_is_predominantly_non_english(source_text)
+            or text_requires_non_english_language(source_text)
+            or has_disallowed_location_signal(source_text)
+            or self._reason_is_negative(reason)
+        )
+
     def _apply_final_consistency(self, result: dict[str, Any], position_name: str, source_text: str) -> dict[str, Any]:
         reason = result.get("role_relevance_reason", "")
 
@@ -735,6 +744,21 @@ class JobClassifier:
 
         if self._reason_is_negative(reason):
             result["role_relevance"] = NOT_RELEVANT_LABEL
+
+        hard_rejection = self._has_hard_rejection(source_text, result.get("role_relevance_reason", ""))
+
+        if not hard_rejection and detect_allowed_corporate_role(position_name, source_text):
+            result["role_relevance"] = RELEVANT_LABEL
+            if (
+                not result.get("role_relevance_reason")
+                or "not matching" in result.get("role_relevance_reason", "").lower()
+                or "outside allowed scope" in result.get("role_relevance_reason", "").lower()
+                or "outside target scope" in result.get("role_relevance_reason", "").lower()
+                or "construction" in result.get("role_relevance_reason", "").lower()
+                or "manufacturing" in result.get("role_relevance_reason", "").lower()
+                or "hospitality" in result.get("role_relevance_reason", "").lower()
+            ):
+                result["role_relevance_reason"] = "Role is a genuine corporate business function within allowed scope."
 
         if detect_relevant_business_sales_role(position_name, source_text) and result.get("role_relevance") != NOT_RELEVANT_LABEL:
             result["role_relevance"] = RELEVANT_LABEL
@@ -825,19 +849,16 @@ class JobClassifier:
             used_fetched_page=used_fetched_page,
         )
 
-        if detect_relevant_business_sales_role(position_name, source_text) and parsed.get("role_relevance") != NOT_RELEVANT_LABEL:
-            parsed["role_relevance"] = RELEVANT_LABEL
-            if not parsed.get("role_relevance_reason") or "not matching" in parsed.get("role_relevance_reason", "").lower():
-                parsed["role_relevance_reason"] = "Role is a genuine business development / sales role within target business scope."
-
-        if detect_relevant_finance_accounting_role(position_name, source_text) and parsed.get("role_relevance") != NOT_RELEVANT_LABEL:
-            parsed["role_relevance"] = RELEVANT_LABEL
-            if (
-                not parsed.get("role_relevance_reason")
-                or "not matching" in parsed.get("role_relevance_reason", "").lower()
-                or "not relevant" in parsed.get("role_relevance_reason", "").lower()
-            ):
-                parsed["role_relevance_reason"] = "Role is a genuine finance/accounting role within allowed business scope."
+        if not self._has_hard_rejection(source_text, parsed.get("role_relevance_reason", "")):
+            if detect_allowed_corporate_role(position_name, source_text):
+                parsed["role_relevance"] = RELEVANT_LABEL
+                if (
+                    not parsed.get("role_relevance_reason")
+                    or "not matching" in parsed.get("role_relevance_reason", "").lower()
+                    or "not relevant" in parsed.get("role_relevance_reason", "").lower()
+                    or "outside allowed" in parsed.get("role_relevance_reason", "").lower()
+                ):
+                    parsed["role_relevance_reason"] = "Role is a genuine corporate business function within allowed scope."
 
         parsed["seniorities"] = self._finalize_seniorities(
             position_name,
