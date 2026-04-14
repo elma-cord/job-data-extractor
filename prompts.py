@@ -48,21 +48,30 @@ def build_unified_job_extraction_prompt(
         {job_titles_str}
 
         Also allowed when clearly genuine corporate roles:
-        - finance / accounting / FP&A / tax / treasury / audit / controller / accounts payable / accounts receivable
+        - finance / accounting / FP&A / tax / treasury / audit / controller / accounts payable / accounts receivable / billing / credit control
         - business operations / program / PMO / transformation / change / analyst roles
-        - account / client / customer / renewals / partnerships / implementation / customer success roles
+        - account / client / customer / renewals / partnerships / implementation / customer success / customer support roles
         - marketing / growth / content / CRM / communications / product marketing / demand generation / brand marketing roles
         - brand design / visual design / graphic design / brand designer / brand design lead roles
         - assistant brand manager / brand manager / brand marketing roles when they are genuine corporate marketing roles
-        - executive assistant / chief of staff / legal / people ops / talent acquisition roles
+        - executive assistant / chief of staff / legal / commercial counsel / people ops / talent acquisition roles
         - technical support / IT / infrastructure / systems / network / support engineering roles when clearly technical
         - business development / BDR / SDR / account executive / sales consultant / commercial roles when clearly genuine business or B2B roles and not retail store sales
+
+        Important industry-context rule:
+        - Do NOT mark a corporate business role Not Relevant only because the company, customer base, or industry mentions construction, property, manufacturing, hospitality, healthcare, maritime, or similar sectors.
+        - Judge the ACTUAL JOB FUNCTION, not only the company industry.
+        - Example: Account Executive selling to construction/property clients can still be Relevant if the role itself is sales/business development.
+        - Example: Finance Analyst at a manufacturing company can still be Relevant if the role itself is finance/accounting.
+        - Example: Legal Counsel at a healthcare company can still be Relevant if the role itself is legal/commercial.
+        - Only exclude when the actual role duties are construction/civil engineering, shop-floor, plant, factory, mechanical/electrical technician, medical/clinical/patient-care, retail-store, hospitality service, etc.
 
         Exclusions:
         - Not a real job posting
         - Educational content, learning modules, checklists, articles, guides
-        - Construction, civil engineering, retail store roles, cashier, showroom/store/branch/shop-floor roles
-        - Electrical / mechanical / manufacturing / plant / factory / assembly / injection molding / maritime / microbiology roles
+        - Actual construction, civil engineering, site manager, quantity surveyor, building-site roles
+        - Actual retail store roles, cashier, showroom/store/branch/shop-floor roles
+        - Actual electrical / mechanical / manufacturing / plant / factory / assembly / injection molding / maritime / microbiology roles
         - Robotics technician / electro-mechanical / hands-on hardware build and maintenance roles
         - Medical / clinical / patient care roles
         - Beauty therapist / salon / cosmetology / in-store beauty advisor roles
@@ -75,6 +84,8 @@ def build_unified_job_extraction_prompt(
 
         T&P includes:
         software engineering, data, DevOps, QA, security, IT, support engineering, infrastructure, cloud, UX/UI, product, technical architecture, technical writing, ML/AI, systems, network, application engineering, and similar technical roles.
+
+        Most finance/accounting, sales, marketing, legal, HR, customer success, and operations roles are "Not T&P" unless they are clearly technical/product/data roles.
 
         3) Location rules for relevance
         Relevant only if the role fits allowed locations:
@@ -236,6 +247,8 @@ def build_unified_job_extraction_prompt(
 
         14) role_relevance_reason
         Give one concise reason that MUST match the final relevance decision.
+        - If Relevant, explain the allowed job function and allowed location/work-pattern basis.
+        - If Not Relevant, explain the actual exclusion reason.
 
         15) notes
         Very short note about extraction confidence/source. Keep concise.
