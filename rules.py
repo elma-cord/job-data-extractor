@@ -15,7 +15,6 @@ GENERIC_LOCATION_TOKENS = {
     "northern",
     "ireland",
     "unitedstates",
-    "united",
     "states",
     "usa",
     "us",
@@ -173,29 +172,55 @@ def looks_like_non_job_content(position_name: str, description: str) -> bool:
     return False
 
 
-def obvious_excluded_role(position_name: str, description: str) -> tuple[bool, str]:
-    text = lower_text(f"{position_name}\n{description}")
+def _actual_role_text(position_name: str, description: str) -> str:
+    title = lower_text(position_name)
+    primary = lower_text(get_primary_text_window(description, max_chars=5000))
+    return f"{title}\n{primary}"
 
-    exclusion_patterns = [
+
+def obvious_excluded_role(position_name: str, description: str) -> tuple[bool, str]:
+    title = lower_text(position_name)
+    text = _actual_role_text(position_name, description)
+
+    # Hard title-based exclusions. These should be about the actual job title/function.
+    title_exclusion_patterns = [
         (r"\bteacher\b|\bteaching assistant\b", "Teaching role is outside allowed tech/business scope."),
         (r"\bnurse\b|\bregistered nurse\b|\bhealthcare assistant\b", "Medical role is outside allowed tech/business scope."),
-        (r"\bwaiter\b|\bwaitress\b|\bchef\b|\bkitchen\b", "Hospitality role is outside allowed tech/business scope."),
-        (r"\bcashier\b|\bretail assistant\b|\bsales associate\b|\bshop assistant\b", "Retail store role is outside allowed tech/business scope."),
-        (r"\bconstruction\b|\bcivil engineer(?:ing)?\b", "Construction / civil engineering role is outside allowed scope."),
-        (
-            r"\bmanufacturing technician\b|\bproduction operator\b|\bassembly technician\b|\bshop floor\b|\bproduction line\b|\bplant operator\b|\binjection molding\b|\bmaritime\b|\bmicrobiology\b",
-            "Manufacturing / shop-floor role is outside allowed scope.",
-        ),
-        (
-            r"\brobotics technician\b|\belectro[- ]?mechanical\b|\bmechanical technician\b|\belectrical technician\b|\bhardware assembly\b|\bmechatronics\b",
-            "Hands-on robotics / mechanical / electrical technician role is outside allowed scope.",
-        ),
-        (r"\bpsychiatrist\b|\bphysician\b|\bsurgeon\b|\btherapist\b|\bpatient care\b|\bhospital\b", "Medical / clinical role is outside allowed scope."),
+        (r"\bwaiter\b|\bwaitress\b|\bchef\b|\bkitchen assistant\b|\bkitchen porter\b", "Hospitality role is outside allowed tech/business scope."),
+        (r"\bcashier\b|\bretail assistant\b|\bsales associate\b|\bshop assistant\b|\bstore assistant\b", "Retail store role is outside allowed tech/business scope."),
+        (r"\bcivil engineer(?:ing)?\b|\bconstruction manager\b|\bsite manager\b|\bsite supervisor\b|\bquantity surveyor\b", "Construction / civil engineering role is outside allowed scope."),
+        (r"\bmanufacturing technician\b|\bproduction operator\b|\bassembly technician\b|\bplant operator\b", "Manufacturing / shop-floor role is outside allowed scope."),
+        (r"\brobotics technician\b|\belectro[- ]?mechanical\b|\bmechanical technician\b|\belectrical technician\b|\bmechatronics\b", "Hands-on robotics / mechanical / electrical technician role is outside allowed scope."),
+        (r"\bpsychiatrist\b|\bphysician\b|\bsurgeon\b|\btherapist\b|\bpatient care\b", "Medical / clinical role is outside allowed scope."),
         (r"\brf test engineer\b|\bradio frequency test engineer\b", "RF test engineering role is outside allowed target scope."),
     ]
 
-    for pattern, reason in exclusion_patterns:
-        if re.search(pattern, text):
+    for pattern, reason in title_exclusion_patterns:
+        if re.search(pattern, title):
+            return True, reason
+
+    # Description-based exclusions require role/action context, not just industry words.
+    role_context_exclusion_patterns = [
+        (
+            r"\bresponsible for\b.{0,80}\b(shop floor|production line|assembly line|plant machinery|machine operation)\b",
+            "Manufacturing / shop-floor role is outside allowed scope.",
+        ),
+        (
+            r"\b(?:operate|repair|maintain|install|assemble|weld|fabricate)\b.{0,80}\b(machine|machinery|mechanical|electrical equipment|plant equipment|hardware)\b",
+            "Hands-on mechanical / electrical role is outside allowed scope.",
+        ),
+        (
+            r"\bprovide\b.{0,80}\b(patient care|clinical care|medical care)\b",
+            "Medical / clinical role is outside allowed scope.",
+        ),
+        (
+            r"\bworking on(?:-|\s)?site\b.{0,80}\b(construction site|building site)\b",
+            "Construction / site-based role is outside allowed scope.",
+        ),
+    ]
+
+    for pattern, reason in role_context_exclusion_patterns:
+        if re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL):
             return True, reason
 
     return False, ""
@@ -248,6 +273,24 @@ def detect_quick_tp_from_title(position_name: str) -> str:
     return "Not T&P" if title else ""
 
 
+def _has_retail_store_context(text: str) -> bool:
+    negative_retail_terms = [
+        "retail store",
+        "store sales",
+        "shop floor",
+        "showroom",
+        "cashier",
+        "sales assistant",
+        "sales associate",
+        "customer floor",
+        "in-store",
+        "instore",
+        "counter sales",
+        "store manager",
+    ]
+    return any(term in text for term in negative_retail_terms)
+
+
 def detect_relevant_business_sales_role(position_name: str, description: str) -> bool:
     title = lower_text(position_name)
     text = lower_text(f"{position_name}\n{description}")
@@ -272,27 +315,19 @@ def detect_relevant_business_sales_role(position_name: str, description: str) ->
         "customer success",
         "implementation manager",
         "lead generation",
-    ]
-
-    negative_retail_terms = [
-        "retail",
-        "store",
-        "shop",
-        "showroom",
-        "cashier",
-        "sales assistant",
-        "sales associate",
-        "customer floor",
-        "in-store",
-        "instore",
-        "counter sales",
+        "client success",
+        "client relationship",
+        "customer operations",
+        "customer support",
+        "customer service representative",
+        "customer service rep",
     ]
 
     if any(term in title for term in positive_terms):
-        return not any(term in text for term in negative_retail_terms)
+        return not _has_retail_store_context(text)
 
-    if "sales" in title or "commercial" in title:
-        return not any(term in text for term in negative_retail_terms)
+    if ("sales" in title or "commercial" in title or "client" in title or "customer" in title) and not _has_retail_store_context(text):
+        return True
 
     return False
 
@@ -324,6 +359,9 @@ def detect_relevant_finance_accounting_role(position_name: str, description: str
         "bookkeeper",
         "finance manager",
         "accounting manager",
+        "credit controller",
+        "billing analyst",
+        "revenue accountant",
     ]
 
     hard_negative_title_terms = [
@@ -361,6 +399,10 @@ def detect_relevant_finance_accounting_role(position_name: str, description: str
         "controller",
         "sap",
         "oracle finance",
+        "invoice",
+        "invoicing",
+        "billing",
+        "credit control",
     ]
 
     if any(term in title for term in hard_negative_title_terms):
@@ -369,10 +411,65 @@ def detect_relevant_finance_accounting_role(position_name: str, description: str
     if any(term in title for term in positive_title_terms):
         return True
 
-    if ("finance" in title or "accounting" in title or "accountant" in title) and any(term in text for term in finance_context_terms):
+    if ("finance" in title or "accounting" in title or "accountant" in title or "billing" in title or "credit controller" in title) and any(term in text for term in finance_context_terms):
         return True
 
     return False
+
+
+def detect_relevant_general_business_role(position_name: str, description: str) -> bool:
+    title = lower_text(position_name)
+    text = lower_text(f"{position_name}\n{description}")
+
+    business_title_terms = [
+        "business analyst",
+        "business operations",
+        "operations analyst",
+        "operations manager",
+        "project manager",
+        "project coordinator",
+        "program manager",
+        "programme manager",
+        "pmo",
+        "change manager",
+        "transformation",
+        "implementation manager",
+        "legal counsel",
+        "commercial counsel",
+        "legal assistant",
+        "paralegal",
+        "human resources",
+        "hr manager",
+        "people ops",
+        "talent acquisition",
+        "recruiter",
+        "executive assistant",
+        "chief of staff",
+        "marketing manager",
+        "marketing executive",
+        "content marketing",
+        "digital marketing",
+        "product marketing",
+        "brand marketing",
+        "communications manager",
+        "pr manager",
+        "media planner",
+        "growth marketing",
+        "crm manager",
+    ]
+
+    if any(term in title for term in business_title_terms):
+        return not _has_retail_store_context(text)
+
+    return False
+
+
+def detect_allowed_corporate_role(position_name: str, description: str) -> bool:
+    return (
+        detect_relevant_business_sales_role(position_name, description)
+        or detect_relevant_finance_accounting_role(position_name, description)
+        or detect_relevant_general_business_role(position_name, description)
+    )
 
 
 def title_has_leadership_signal(position_name: str) -> bool:
@@ -905,7 +1002,7 @@ def reason_strongly_says_not_relevant(reason: str) -> bool:
     if not r:
         return False
 
-    signals = [
+    hard_negative_signals = [
         "outside allowed",
         "outside allowed scope",
         "outside target scope",
@@ -913,17 +1010,17 @@ def reason_strongly_says_not_relevant(reason: str) -> bool:
         "educational",
         "informational",
         "checklist",
-        "medical",
-        "clinical",
-        "retail",
-        "shop-floor",
-        "manufacturing",
-        "construction",
-        "civil engineering",
-        "rf test",
+        "medical role",
+        "clinical role",
+        "patient care",
+        "retail store role",
+        "shop-floor role",
+        "manufacturing / shop-floor role",
+        "construction / civil engineering role",
+        "rf test engineering role",
         "robotics technician",
-        "mechanical",
-        "electrical technician",
+        "hands-on robotics",
+        "mechanical / electrical technician",
         "language other than english",
         "job description is primarily in another language",
         "location is not allowed",
@@ -934,7 +1031,6 @@ def reason_strongly_says_not_relevant(reason: str) -> bool:
         "apac only",
         "latam only",
         "africa only",
-        "not matching predefined relevant job titles",
-        "not matching predefined job titles",
     ]
-    return any(s in r for s in signals)
+
+    return any(s in r for s in hard_negative_signals)
