@@ -48,22 +48,28 @@ def build_unified_job_extraction_prompt(
         {job_titles_str}
 
         Also allowed when clearly genuine corporate roles:
-        - finance / accounting / FP&A / tax / treasury / audit / controller / accounts payable / accounts receivable / billing / credit control
-        - business operations / program / PMO / transformation / change / analyst roles
+        - finance / accounting / FP&A / tax / treasury / audit / controller / accounts payable / accounts receivable / billing / credit control / investment operations / fund accounting / transfer pricing
+        - risk / compliance / credit risk / financial crime / regulatory compliance / AML / KYC roles
+        - business operations / program / PMO / transformation / change / analyst / business support / data administrator roles
         - account / client / customer / renewals / partnerships / implementation / customer success / customer support roles
-        - marketing / growth / content / CRM / communications / product marketing / demand generation / brand marketing roles
+        - marketing / growth / content / CRM / communications / PR / product marketing / demand generation / brand marketing / influencer marketing / events / community roles
         - brand design / visual design / graphic design / brand designer / brand design lead roles
         - assistant brand manager / brand manager / brand marketing roles when they are genuine corporate marketing roles
-        - executive assistant / chief of staff / legal / commercial counsel / people ops / talent acquisition roles
+        - executive assistant / personal assistant / chief of staff / legal / commercial counsel / paralegal / company secretary roles
+        - HR / human resources / people ops / people operations / talent acquisition / recruitment / employee relations / total rewards / compensation and benefits roles
+        - procurement / sourcing / supply chain analyst / buyer roles when they are office/corporate roles
+        - quality assurance / QA analyst / quality engineer roles when they are not shop-floor/manufacturing inspection roles
         - technical support / IT / infrastructure / systems / network / support engineering roles when clearly technical
         - business development / BDR / SDR / account executive / sales consultant / commercial roles when clearly genuine business or B2B roles and not retail store sales
 
         Important industry-context rule:
-        - Do NOT mark a corporate business role Not Relevant only because the company, customer base, or industry mentions construction, property, manufacturing, hospitality, healthcare, maritime, or similar sectors.
+        - Do NOT mark a corporate business role Not Relevant only because the company, customer base, or industry mentions construction, property, manufacturing, hospitality, healthcare, maritime, automotive, retail, or similar sectors.
         - Judge the ACTUAL JOB FUNCTION, not only the company industry.
         - Example: Account Executive selling to construction/property clients can still be Relevant if the role itself is sales/business development.
         - Example: Finance Analyst at a manufacturing company can still be Relevant if the role itself is finance/accounting.
         - Example: Legal Counsel at a healthcare company can still be Relevant if the role itself is legal/commercial.
+        - Example: HR Advisor at a retail company can still be Relevant if the role itself is HR.
+        - Example: Procurement Manager at a manufacturing company can still be Relevant if the role itself is corporate procurement.
         - Only exclude when the actual role duties are construction/civil engineering, shop-floor, plant, factory, mechanical/electrical technician, medical/clinical/patient-care, retail-store, hospitality service, etc.
 
         Exclusions:
@@ -75,6 +81,7 @@ def build_unified_job_extraction_prompt(
         - Robotics technician / electro-mechanical / hands-on hardware build and maintenance roles
         - Medical / clinical / patient care roles
         - Beauty therapist / salon / cosmetology / in-store beauty advisor roles
+        - Hospitality service roles such as waiter, waitress, chef, kitchen roles
         - Any role clearly outside allowed tech/business functions
 
         2) job_category
@@ -85,7 +92,7 @@ def build_unified_job_extraction_prompt(
         T&P includes:
         software engineering, data, DevOps, QA, security, IT, support engineering, infrastructure, cloud, UX/UI, product, technical architecture, technical writing, ML/AI, systems, network, application engineering, and similar technical roles.
 
-        Most finance/accounting, sales, marketing, legal, HR, customer success, and operations roles are "Not T&P" unless they are clearly technical/product/data roles.
+        Most finance/accounting, risk/compliance, sales, marketing, legal, HR, customer success, procurement, and operations roles are "Not T&P" unless they are clearly technical/product/data roles.
 
         3) Location rules for relevance
         Relevant only if the role fits allowed locations:
@@ -93,10 +100,11 @@ def build_unified_job_extraction_prompt(
         - Ireland: only remote allowed
         - Europe: only explicitly remote Europe / remote EMEA allowed
         - Remote Global / worldwide allowed unless ad clearly restricts to APAC / LATAM / Africa / Asia / USA / Canada / another excluded region
-        - If the job clearly indicates USA / Canada / Philippines / another excluded region, mark Not Relevant
+        - If the job clearly indicates USA / Canada / Philippines / another excluded region as the actual job location, mark Not Relevant
         - If salary is only USD/CAD and nothing supports allowed regions, that is evidence for Not Relevant
         - Accept UK / Great Britain / England / Scotland / Wales / Northern Ireland / London etc. as UK
         - Ignore generic company office lists unless they clearly describe this role’s actual work location
+        - Do not mark Not Relevant just because boilerplate mentions global offices, US headquarters, customers in other countries, or international company presence.
 
         Very important for job_location:
         - Choose the MOST SPECIFIC acceptable normalized location from the predefined list.
