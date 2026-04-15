@@ -182,7 +182,6 @@ def obvious_excluded_role(position_name: str, description: str) -> tuple[bool, s
     title = lower_text(position_name)
     text = _actual_role_text(position_name, description)
 
-    # Hard title-based exclusions. These should be about the actual job title/function.
     title_exclusion_patterns = [
         (r"\bteacher\b|\bteaching assistant\b", "Teaching role is outside allowed tech/business scope."),
         (r"\bnurse\b|\bregistered nurse\b|\bhealthcare assistant\b", "Medical role is outside allowed tech/business scope."),
@@ -199,7 +198,6 @@ def obvious_excluded_role(position_name: str, description: str) -> tuple[bool, s
         if re.search(pattern, title):
             return True, reason
 
-    # Description-based exclusions require role/action context, not just industry words.
     role_context_exclusion_patterns = [
         (
             r"\bresponsible for\b.{0,80}\b(shop floor|production line|assembly line|plant machinery|machine operation)\b",
@@ -265,6 +263,8 @@ def detect_quick_tp_from_title(position_name: str) -> str:
         "designer",
         "brand designer",
         "backend engineer",
+        "qa engineer",
+        "quality assurance",
     ]
 
     if any(term in title for term in tp_terms):
@@ -287,6 +287,8 @@ def _has_retail_store_context(text: str) -> bool:
         "instore",
         "counter sales",
         "store manager",
+        "branch showroom",
+        "car showroom",
     ]
     return any(term in text for term in negative_retail_terms)
 
@@ -309,24 +311,28 @@ def detect_relevant_business_sales_role(position_name: str, description: str) ->
         "commercial manager",
         "sales consultant",
         "partnerships",
+        "partner manager",
         "renewals",
         "sales operations",
         "revenue operations",
+        "revops",
         "customer success",
-        "implementation manager",
-        "lead generation",
         "client success",
         "client relationship",
         "customer operations",
         "customer support",
         "customer service representative",
         "customer service rep",
+        "payment consultant",
+        "payments consultant",
+        "implementation manager",
+        "lead generation",
     ]
 
     if any(term in title for term in positive_terms):
         return not _has_retail_store_context(text)
 
-    if ("sales" in title or "commercial" in title or "client" in title or "customer" in title) and not _has_retail_store_context(text):
+    if ("sales" in title or "commercial" in title or "client" in title or "customer" in title or "partnership" in title) and not _has_retail_store_context(text):
         return True
 
     return False
@@ -362,6 +368,20 @@ def detect_relevant_finance_accounting_role(position_name: str, description: str
         "credit controller",
         "billing analyst",
         "revenue accountant",
+        "investment operations",
+        "fund accountant",
+        "management accountant",
+        "financial accountant",
+        "transfer pricing",
+        "pricing analyst",
+        "commercial finance",
+        "financial crime",
+        "credit risk",
+        "risk analyst",
+        "risk manager",
+        "compliance analyst",
+        "compliance manager",
+        "regulatory compliance",
     ]
 
     hard_negative_title_terms = [
@@ -403,6 +423,16 @@ def detect_relevant_finance_accounting_role(position_name: str, description: str
         "invoicing",
         "billing",
         "credit control",
+        "credit risk",
+        "financial crime",
+        "aml",
+        "kyc",
+        "compliance",
+        "regulatory",
+        "risk management",
+        "investment operations",
+        "fund accounting",
+        "transfer pricing",
     ]
 
     if any(term in title for term in hard_negative_title_terms):
@@ -411,7 +441,16 @@ def detect_relevant_finance_accounting_role(position_name: str, description: str
     if any(term in title for term in positive_title_terms):
         return True
 
-    if ("finance" in title or "accounting" in title or "accountant" in title or "billing" in title or "credit controller" in title) and any(term in text for term in finance_context_terms):
+    if (
+        "finance" in title
+        or "accounting" in title
+        or "accountant" in title
+        or "billing" in title
+        or "credit controller" in title
+        or "risk" in title
+        or "compliance" in title
+        or "financial crime" in title
+    ) and any(term in text for term in finance_context_terms):
         return True
 
     return False
@@ -424,27 +463,55 @@ def detect_relevant_general_business_role(position_name: str, description: str) 
     business_title_terms = [
         "business analyst",
         "business operations",
+        "business support",
         "operations analyst",
+        "operations associate",
         "operations manager",
+        "operations coordinator",
+        "data administrator",
+        "administrator",
         "project manager",
         "project coordinator",
+        "project lead",
         "program manager",
         "programme manager",
         "pmo",
         "change manager",
+        "change analyst",
         "transformation",
         "implementation manager",
+        "procurement",
+        "buyer",
+        "sourcing manager",
+        "supply chain analyst",
         "legal counsel",
         "commercial counsel",
         "legal assistant",
         "paralegal",
+        "company secretary",
+        "contracts manager",
+        "contract manager",
         "human resources",
+        "hr advisor",
+        "hr business partner",
         "hr manager",
+        "people partner",
         "people ops",
+        "people operations",
+        "people experience",
+        "employee relations",
+        "learning and development",
+        "l&d",
         "talent acquisition",
         "recruiter",
+        "recruitment coordinator",
+        "total rewards",
+        "reward analyst",
+        "compensation and benefits",
         "executive assistant",
+        "personal assistant",
         "chief of staff",
+        "office manager",
         "marketing manager",
         "marketing executive",
         "content marketing",
@@ -452,10 +519,24 @@ def detect_relevant_general_business_role(position_name: str, description: str) 
         "product marketing",
         "brand marketing",
         "communications manager",
+        "communications executive",
         "pr manager",
+        "public relations",
         "media planner",
+        "media planning",
         "growth marketing",
         "crm manager",
+        "crm executive",
+        "events manager",
+        "events executive",
+        "events coordinator",
+        "community manager",
+        "influencer marketing",
+        "social media",
+        "quality assurance",
+        "qa analyst",
+        "qa engineer",
+        "quality engineer",
     ]
 
     if any(term in title for term in business_title_terms):
