@@ -631,7 +631,7 @@ class JobClassifier:
                 if candidate in self.predefined_job_titles and candidate not in out:
                     out.append(candidate)
 
-        if not out and "accounts payable" in title_l:
+        if not out and any(x in title_l for x in ["accounts payable", "financial analyst", "finance analyst", "accountant", "accounting"]):
             for candidate in ["Finance/Accounting", "Operations"]:
                 if candidate in self.predefined_job_titles and candidate not in out:
                     out.append(candidate)
@@ -719,12 +719,21 @@ class JobClassifier:
             "notes": notes,
         }
 
-    def _has_hard_rejection(self, source_text: str, reason: str) -> bool:
+    def _has_hard_rejection(self, source_text: str, reason: str = "") -> bool:
+        """
+        Deterministic hard rejection only.
+
+        Do NOT use AI-generated negative reasoning here because the model can wrongly say
+        allowed corporate roles are outside scope, for example:
+        - Communications Lead
+        - HR Generalist
+        - AI Legal Specialist
+        - Financial Analyst
+        """
         return (
             text_is_predominantly_non_english(source_text)
             or text_requires_non_english_language(source_text)
             or has_disallowed_location_signal(source_text)
-            or self._reason_is_negative(reason)
         )
 
     def _apply_final_consistency(self, result: dict[str, Any], position_name: str, source_text: str) -> dict[str, Any]:
@@ -742,18 +751,20 @@ class JobClassifier:
             result["role_relevance"] = NOT_RELEVANT_LABEL
             result["role_relevance_reason"] = "Location is outside allowed regions or work-pattern rules."
 
-        if self._reason_is_negative(reason):
-            result["role_relevance"] = NOT_RELEVANT_LABEL
-
         hard_rejection = self._has_hard_rejection(source_text, result.get("role_relevance_reason", ""))
+        allowed_corporate_role = detect_allowed_corporate_role(position_name, source_text)
 
-        if not hard_rejection and detect_allowed_corporate_role(position_name, source_text):
+        if not hard_rejection and allowed_corporate_role:
             result["role_relevance"] = RELEVANT_LABEL
             if (
                 not result.get("role_relevance_reason")
                 or "not matching" in result.get("role_relevance_reason", "").lower()
+                or "not relevant" in result.get("role_relevance_reason", "").lower()
                 or "outside allowed scope" in result.get("role_relevance_reason", "").lower()
                 or "outside target scope" in result.get("role_relevance_reason", "").lower()
+                or "not in the predefined" in result.get("role_relevance_reason", "").lower()
+                or "not in predefined" in result.get("role_relevance_reason", "").lower()
+                or "not a recognized" in result.get("role_relevance_reason", "").lower()
                 or "construction" in result.get("role_relevance_reason", "").lower()
                 or "manufacturing" in result.get("role_relevance_reason", "").lower()
                 or "hospitality" in result.get("role_relevance_reason", "").lower()
@@ -762,7 +773,11 @@ class JobClassifier:
 
         if detect_relevant_business_sales_role(position_name, source_text) and result.get("role_relevance") != NOT_RELEVANT_LABEL:
             result["role_relevance"] = RELEVANT_LABEL
-            if not result.get("role_relevance_reason") or "not matching" in result.get("role_relevance_reason", "").lower():
+            if (
+                not result.get("role_relevance_reason")
+                or "not matching" in result.get("role_relevance_reason", "").lower()
+                or "not relevant" in result.get("role_relevance_reason", "").lower()
+            ):
                 result["role_relevance_reason"] = "Role is a genuine business development / sales role within target business scope."
 
         if detect_relevant_finance_accounting_role(position_name, source_text) and result.get("role_relevance") != NOT_RELEVANT_LABEL:
@@ -771,8 +786,12 @@ class JobClassifier:
                 not result.get("role_relevance_reason")
                 or "not matching" in result.get("role_relevance_reason", "").lower()
                 or "not relevant" in result.get("role_relevance_reason", "").lower()
+                or "outside allowed scope" in result.get("role_relevance_reason", "").lower()
             ):
                 result["role_relevance_reason"] = "Role is a genuine finance/accounting role within allowed business scope."
+
+        if self._reason_is_negative(reason) and not allowed_corporate_role:
+            result["role_relevance"] = NOT_RELEVANT_LABEL
 
         if result.get("role_relevance") == RELEVANT_LABEL:
             if not is_location_allowed(
@@ -857,6 +876,8 @@ class JobClassifier:
                     or "not matching" in parsed.get("role_relevance_reason", "").lower()
                     or "not relevant" in parsed.get("role_relevance_reason", "").lower()
                     or "outside allowed" in parsed.get("role_relevance_reason", "").lower()
+                    or "not in the predefined" in parsed.get("role_relevance_reason", "").lower()
+                    or "not a recognized" in parsed.get("role_relevance_reason", "").lower()
                 ):
                     parsed["role_relevance_reason"] = "Role is a genuine corporate business function within allowed scope."
 
