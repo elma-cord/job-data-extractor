@@ -38,6 +38,8 @@ def build_unified_job_extraction_prompt(
         - If the role requires any language other than English, output Not Relevant.
         - Do not map a foreign location to a UK location just because of generic words like city, centre, road, or united kingdom.
         - If an explicit location line says a foreign place such as Bonifacio Global City / Makati / Metro Manila / Philippines, output job_location = "Unknown" and role_relevance = "Not Relevant".
+        - If the actual job location is North Ryde / NSW / Australia, output job_location = "Unknown" and role_relevance = "Not Relevant".
+        - Be careful not to use locations from unrelated job cards, footer links, "More jobs", "Similar jobs", or "Related jobs" sections. Only use the actual role location.
 
         TASKS
 
@@ -48,15 +50,17 @@ def build_unified_job_extraction_prompt(
         {job_titles_str}
 
         Also allowed when clearly genuine corporate roles:
-        - finance / accounting / FP&A / tax / treasury / audit / controller / accounts payable / accounts receivable / billing / credit control / investment operations / fund accounting / transfer pricing
-        - risk / compliance / credit risk / financial crime / regulatory compliance / AML / KYC roles
+        - finance / accounting / financial analyst / finance analyst / FP&A / tax / treasury / audit / controller / accounts payable / accounts receivable / billing / credit control / investment operations / fund accounting / transfer pricing
+        - risk / compliance / credit risk / financial crime / regulatory compliance / AML / KYC / governance risk compliance / GRC roles
+        - legal / legal specialist / AI legal specialist / privacy / data protection / commercial counsel / legal counsel / paralegal / company secretary / contracts roles
+        - HR / human resources / HR generalist / people ops / people operations / talent acquisition / recruitment / employee relations / total rewards / compensation and benefits roles
+        - communications / corporate communications / internal communications / external communications / PR / public relations / public affairs roles
         - business operations / program / PMO / transformation / change / analyst / business support / data administrator roles
         - account / client / customer / renewals / partnerships / implementation / customer success / customer support roles
-        - marketing / growth / content / CRM / communications / PR / product marketing / demand generation / brand marketing / influencer marketing / events / community roles
+        - marketing / growth / content / CRM / product marketing / demand generation / brand marketing / influencer marketing / events / community roles
         - brand design / visual design / graphic design / brand designer / brand design lead roles
         - assistant brand manager / brand manager / brand marketing roles when they are genuine corporate marketing roles
-        - executive assistant / personal assistant / chief of staff / legal / commercial counsel / paralegal / company secretary roles
-        - HR / human resources / people ops / people operations / talent acquisition / recruitment / employee relations / total rewards / compensation and benefits roles
+        - executive assistant / personal assistant / chief of staff roles
         - procurement / sourcing / supply chain analyst / buyer roles when they are office/corporate roles
         - quality assurance / QA analyst / quality engineer roles when they are not shop-floor/manufacturing inspection roles
         - technical support / IT / infrastructure / systems / network / support engineering roles when clearly technical
@@ -67,16 +71,20 @@ def build_unified_job_extraction_prompt(
         - Judge the ACTUAL JOB FUNCTION, not only the company industry.
         - Example: Account Executive selling to construction/property clients can still be Relevant if the role itself is sales/business development.
         - Example: Finance Analyst at a manufacturing company can still be Relevant if the role itself is finance/accounting.
+        - Example: Financial Analyst / Finance Analyst / Accountant can still be Relevant if it is a genuine finance/accounting role.
         - Example: Legal Counsel at a healthcare company can still be Relevant if the role itself is legal/commercial.
-        - Example: HR Advisor at a retail company can still be Relevant if the role itself is HR.
+        - Example: AI Legal Specialist / Privacy Counsel / Compliance Specialist can still be Relevant if it is a genuine legal/compliance/privacy role.
+        - Example: HR Advisor / HR Generalist / People Advisor / Talent Acquisition role can still be Relevant if it is a genuine HR/People role.
+        - Example: Communications Lead / PR Lead / Corporate Communications role can still be Relevant if it is a genuine communications/PR corporate role.
         - Example: Procurement Manager at a manufacturing company can still be Relevant if the role itself is corporate procurement.
         - Only exclude when the actual role duties are construction/civil engineering, shop-floor, plant, factory, mechanical/electrical technician, medical/clinical/patient-care, retail-store, hospitality service, etc.
 
         Exclusions:
         - Not a real job posting
+        - Volunteer / voluntary / unpaid volunteer roles
         - Educational content, learning modules, checklists, articles, guides
-        - Actual construction, civil engineering, site manager, quantity surveyor, building-site roles
-        - Actual retail store roles, cashier, showroom/store/branch/shop-floor roles
+        - Actual construction, civil engineering, structural engineering, site manager, quantity surveyor, building-site roles
+        - Actual retail store roles, cashier, showroom/store/branch/shop-floor roles, branch and yard duties, trade counter roles
         - Actual electrical / mechanical / manufacturing / plant / factory / assembly / injection molding / maritime / microbiology roles
         - Robotics technician / electro-mechanical / hands-on hardware build and maintenance roles
         - Medical / clinical / patient care roles
@@ -92,19 +100,21 @@ def build_unified_job_extraction_prompt(
         T&P includes:
         software engineering, data, DevOps, QA, security, IT, support engineering, infrastructure, cloud, UX/UI, product, technical architecture, technical writing, ML/AI, systems, network, application engineering, and similar technical roles.
 
-        Most finance/accounting, risk/compliance, sales, marketing, legal, HR, customer success, procurement, and operations roles are "Not T&P" unless they are clearly technical/product/data roles.
+        Most finance/accounting, risk/compliance, sales, marketing, communications, PR, legal, HR, customer success, procurement, and operations roles are "Not T&P" unless they are clearly technical/product/data roles.
 
         3) Location rules for relevance
         Relevant only if the role fits allowed locations:
         - United Kingdom: onsite, hybrid, or remote allowed
         - Ireland: only remote allowed
         - Europe: only explicitly remote Europe / remote EMEA allowed
-        - Remote Global / worldwide allowed unless ad clearly restricts to APAC / LATAM / Africa / Asia / USA / Canada / another excluded region
-        - If the job clearly indicates USA / Canada / Philippines / another excluded region as the actual job location, mark Not Relevant
-        - If salary is only USD/CAD and nothing supports allowed regions, that is evidence for Not Relevant
+        - Remote Global / worldwide allowed unless ad clearly restricts to APAC / LATAM / Africa / Asia / USA / Canada / Australia / another excluded region
+        - If the job clearly indicates USA / Canada / Philippines / Australia / another excluded region as the actual job location, mark Not Relevant
+        - If the actual job location is North Ryde / NSW / Australia, mark Not Relevant
+        - If salary is only USD/CAD/AUD and nothing supports allowed regions, that is evidence for Not Relevant
         - Accept UK / Great Britain / England / Scotland / Wales / Northern Ireland / London etc. as UK
         - Ignore generic company office lists unless they clearly describe this role’s actual work location
-        - Do not mark Not Relevant just because boilerplate mentions global offices, US headquarters, customers in other countries, or international company presence.
+        - Do not mark Not Relevant just because boilerplate mentions global offices, US headquarters, customers in other countries, or international company presence
+        - Be careful not to use locations from unrelated job cards, footer links, "More jobs", "Similar jobs", or "Related jobs" sections. Only use the actual role location.
 
         Very important for job_location:
         - Choose the MOST SPECIFIC acceptable normalized location from the predefined list.
@@ -202,6 +212,10 @@ def build_unified_job_extraction_prompt(
         - For designer roles, prioritize the designer title over broader marketing labels if both are supported
         - Brand design / brand designer / brand design lead roles should include the best matching designer title if it exists in the predefined list, not only Brand Marketing
         - Assistant Brand Manager roles should prefer the closest brand/marketing title, not be treated as irrelevant
+        - Communications / PR roles should map to the closest communications, marketing, PR, brand, or corporate role available in the predefined list
+        - HR / People roles should map to the closest HR, People, Recruiting, Talent, Operations, or corporate role available in the predefined list
+        - Legal / Privacy / Compliance roles should map to the closest Legal, Compliance, Operations, or corporate role available in the predefined list
+        - Finance / Accounting / Financial Analyst roles should map to the closest Finance/Accounting, Analyst, or Operations title available in the predefined list
         - 1st line / IT support / technical support / application engineer roles should map to the most appropriate technical title, not customer service
         - Do not output unrelated titles
 
