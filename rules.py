@@ -112,7 +112,14 @@ def get_primary_text_window(text: str, max_chars: int = 12000) -> str:
         r"(?i)\brelated jobs\b",
         r"(?i)\bsee more jobs\b",
         r"(?i)\bview all jobs\b",
+        r"(?i)\brecommended jobs\b",
+        r"(?i)\bjobs for you\b",
+        r"(?i)\bhow would you rate your experience\b",
+        r"(?i)\bposted date\b",
+        r"(?i)\bposted date\s*\n",
+        r"(?i)\bcategory\s*\n\s*human resources\s*\n\s*posted date\b",
     ]
+
     for pattern in cut_markers:
         m = re.search(pattern, text)
         if m:
@@ -588,6 +595,30 @@ def detect_relevant_general_business_role(position_name: str, description: str) 
     ]
 
     if any(term in title for term in business_title_terms):
+        return not _has_retail_store_context(text)
+
+    hr_context_terms = [
+        "human resources",
+        "hr support",
+        "hr operations",
+        "employee lifecycle",
+        "people leaders",
+        "associates",
+        "case management system",
+        "workday",
+        "servicenow",
+        "onboarding",
+        "leave management",
+        "compensation",
+        "employment law",
+        "cipd",
+        "associate support",
+        "employee relations",
+        "talent acquisition",
+        "recruitment",
+    ]
+
+    if any(term in text for term in hr_context_terms):
         return not _has_retail_store_context(text)
 
     return False
