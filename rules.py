@@ -60,6 +60,9 @@ DISALLOWED_LOCATION_TERMS = [
     "japan",
     "china",
     "australia",
+    "new south wales",
+    "nsw",
+    "north ryde",
     "apac",
     "latam",
     "africa",
@@ -107,6 +110,8 @@ def get_primary_text_window(text: str, max_chars: int = 12000) -> str:
         r"(?i)\byou may also like\b",
         r"(?i)\bmore jobs\b",
         r"(?i)\brelated jobs\b",
+        r"(?i)\bsee more jobs\b",
+        r"(?i)\bview all jobs\b",
     ]
     for pattern in cut_markers:
         m = re.search(pattern, text)
@@ -183,11 +188,12 @@ def obvious_excluded_role(position_name: str, description: str) -> tuple[bool, s
     text = _actual_role_text(position_name, description)
 
     title_exclusion_patterns = [
+        (r"\bvolunteer\b|\bvoluntary\b|\bunpaid volunteer\b", "Volunteer role is outside allowed scope."),
         (r"\bteacher\b|\bteaching assistant\b", "Teaching role is outside allowed tech/business scope."),
         (r"\bnurse\b|\bregistered nurse\b|\bhealthcare assistant\b", "Medical role is outside allowed tech/business scope."),
         (r"\bwaiter\b|\bwaitress\b|\bchef\b|\bkitchen assistant\b|\bkitchen porter\b", "Hospitality role is outside allowed tech/business scope."),
         (r"\bcashier\b|\bretail assistant\b|\bsales associate\b|\bshop assistant\b|\bstore assistant\b", "Retail store role is outside allowed tech/business scope."),
-        (r"\bcivil engineer(?:ing)?\b|\bconstruction manager\b|\bsite manager\b|\bsite supervisor\b|\bquantity surveyor\b", "Construction / civil engineering role is outside allowed scope."),
+        (r"\bcivil engineer(?:ing)?\b|\bgraduate civil engineer\b|\bstructural engineer\b|\bconstruction manager\b|\bsite manager\b|\bsite supervisor\b|\bquantity surveyor\b", "Construction / civil engineering role is outside allowed scope."),
         (r"\bmanufacturing technician\b|\bproduction operator\b|\bassembly technician\b|\bplant operator\b", "Manufacturing / shop-floor role is outside allowed scope."),
         (r"\brobotics technician\b|\belectro[- ]?mechanical\b|\bmechanical technician\b|\belectrical technician\b|\bmechatronics\b", "Hands-on robotics / mechanical / electrical technician role is outside allowed scope."),
         (r"\bpsychiatrist\b|\bphysician\b|\bsurgeon\b|\btherapist\b|\bpatient care\b", "Medical / clinical role is outside allowed scope."),
@@ -214,6 +220,10 @@ def obvious_excluded_role(position_name: str, description: str) -> tuple[bool, s
         (
             r"\bworking on(?:-|\s)?site\b.{0,80}\b(construction site|building site)\b",
             "Construction / site-based role is outside allowed scope.",
+        ),
+        (
+            r"\b(branch and yard duties|yard duties|trade counter|shop floor|store floor|retail store)\b",
+            "Retail store / branch-floor role is outside allowed scope.",
         ),
     ]
 
@@ -289,6 +299,13 @@ def _has_retail_store_context(text: str) -> bool:
         "store manager",
         "branch showroom",
         "car showroom",
+        "branch and yard",
+        "yard duties",
+        "trade counter",
+        "branch sales",
+        "branch retail",
+        "store-floor",
+        "store floor",
     ]
     return any(term in text for term in negative_retail_terms)
 
@@ -443,6 +460,7 @@ def detect_relevant_finance_accounting_role(position_name: str, description: str
 
     if (
         "finance" in title
+        or "financial" in title
         or "accounting" in title
         or "accountant" in title
         or "billing" in title
@@ -487,15 +505,33 @@ def detect_relevant_general_business_role(position_name: str, description: str) 
         "legal counsel",
         "commercial counsel",
         "legal assistant",
+        "legal specialist",
+        "ai legal specialist",
+        "legal operations",
         "paralegal",
         "company secretary",
         "contracts manager",
         "contract manager",
+        "privacy",
+        "privacy counsel",
+        "privacy specialist",
+        "data protection",
+        "data protection officer",
+        "governance risk compliance",
+        "grc",
+        "compliance specialist",
+        "compliance officer",
+        "regulatory specialist",
         "human resources",
+        "hr generalist",
         "hr advisor",
         "hr business partner",
         "hr manager",
+        "hr specialist",
+        "hr coordinator",
         "people partner",
+        "people advisor",
+        "people specialist",
         "people ops",
         "people operations",
         "people experience",
@@ -503,8 +539,10 @@ def detect_relevant_general_business_role(position_name: str, description: str) 
         "learning and development",
         "l&d",
         "talent acquisition",
+        "talent partner",
         "recruiter",
         "recruitment coordinator",
+        "recruitment partner",
         "total rewards",
         "reward analyst",
         "compensation and benefits",
@@ -520,8 +558,18 @@ def detect_relevant_general_business_role(position_name: str, description: str) 
         "brand marketing",
         "communications manager",
         "communications executive",
+        "communications lead",
+        "communications specialist",
+        "communications officer",
+        "communications coordinator",
+        "corporate communications",
+        "internal communications",
+        "external communications",
         "pr manager",
+        "pr lead",
         "public relations",
+        "public relations lead",
+        "public affairs",
         "media planner",
         "media planning",
         "growth marketing",
@@ -605,23 +653,43 @@ def is_explicitly_foreign_location_text(value: str) -> bool:
 
 
 def has_disallowed_location_signal(text: str) -> bool:
-    text_l = lower_text(text)
+    text_l = lower_text(get_primary_text_window(text))
     if not text_l:
         return False
 
-    patterns = [
+    location_value_patterns = [
         r"(?im)^\s*location(?: city)?\s*[:\-]\s*(.+)$",
         r"(?im)^\s*job location\s*[:\-]\s*(.+)$",
         r"(?im)^\s*work location\s*[:\-]\s*(.+)$",
         r"(?im)^\s*city\s*[:\-]\s*(.+)$",
         r"(?im)^\s*based in\s+(.+)$",
+        r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$",
     ]
 
-    for pattern in patterns:
+    for pattern in location_value_patterns:
         for match in re.finditer(pattern, text_l):
             value = (match.group(1) or "").strip()
             if is_explicitly_foreign_location_text(value):
                 return True
+
+    disallowed_group = (
+        r"philippines|metro manila|makati|bonifacio global city|taguig|"
+        r"united states|usa|canada|australia|new south wales|nsw|north ryde|"
+        r"germany|france|spain|italy|netherlands|belgium|sweden|norway|"
+        r"denmark|finland|switzerland|austria|poland|portugal|india|"
+        r"singapore|japan|china"
+    )
+
+    strong_actual_location_patterns = [
+        rf"\b(?:location|job location|work location|city|based in|role is based in|position is based in)\b.{{0,100}}\b(?:{disallowed_group})\b",
+        rf"\b(?:{disallowed_group})\b.{{0,80}}\b(?:office based|onsite|on-site|hybrid|work location|job location)\b",
+        r"\bnorth ryde\b.{0,40}\b(?:nsw|australia)\b",
+        r"\b(?:nsw|new south wales)\b.{0,40}\baustralia\b",
+    ]
+
+    for pattern in strong_actual_location_patterns:
+        if re.search(pattern, text_l, flags=re.IGNORECASE | re.DOTALL):
+            return True
 
     remote_block_patterns = [
         "remote apac",
@@ -635,6 +703,8 @@ def has_disallowed_location_signal(text: str) -> bool:
         "usa only",
         "us only",
         "canada only",
+        "australia only",
+        "remote australia",
     ]
     return any(term in text_l for term in remote_block_patterns)
 
@@ -775,6 +845,7 @@ def infer_skills_from_position_context(position_name: str, description: str, all
         (["accounts payable", "accounts payable assistant"], ["Accounts Payable", "VAT", "Excel", "BACS"]),
         (["analytics manager", "data analyst", "insight analyst"], ["SQL", "Data Visualisation", "Performance Reporting", "Data Driven"]),
         (["business development", "bdr", "sdr", "account executive"], ["Business Development", "Lead Generation", "Sales"]),
+        (["finance analyst", "financial analyst", "accountant", "accounting analyst"], ["Excel", "Performance Reporting"]),
     ]
 
     allowed_lookup = {lower_text(x): x for x in allowed_skills}
@@ -820,6 +891,7 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
         (["administrator"], ["System Administrator", "Operations"]),
         (["analytics manager"], ["Business Analyst", "Data/Insight Analyst"]),
         (["accounts payable", "accounts payable assistant"], ["Finance/Accounting", "Operations"]),
+        (["finance analyst", "financial analyst", "accountant", "accounting analyst"], ["Finance/Accounting", "Operations"]),
         (["brand designer", "brand design", "brand design lead", "design lead"], ["Graphic Designer", "Brand Marketing"]),
         (["business development", "bdr", "sdr"], ["SDR/BDR", "Business Development Manager", "Account Executive"]),
     ]
@@ -1068,6 +1140,8 @@ def is_location_allowed(job_location: str, remote_preferences: list[str], source
             "usa only",
             "us only",
             "canada only",
+            "australia only",
+            "remote australia",
         ]
         return not any(term in text for term in blocked_regions)
 
@@ -1106,9 +1180,13 @@ def reason_strongly_says_not_relevant(reason: str) -> bool:
         "job description is primarily in another language",
         "location is not allowed",
         "outside allowed regions",
+        "volunteer role",
         "usa only",
         "canada only",
         "philippines",
+        "australia",
+        "north ryde",
+        "nsw",
         "apac only",
         "latam only",
         "africa only",
