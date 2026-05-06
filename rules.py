@@ -103,6 +103,7 @@ def dedupe_keep_order(items: list[str]) -> list[str]:
 def get_primary_text_window(text: str, max_chars: int = 12000) -> str:
     text = text or ""
 
+    # First cut obvious related-job / footer / survey sections.
     cut_markers = [
         r"(?i)\bour hiring process\b",
         r"(?i)\bother jobs\b",
@@ -115,9 +116,6 @@ def get_primary_text_window(text: str, max_chars: int = 12000) -> str:
         r"(?i)\brecommended jobs\b",
         r"(?i)\bjobs for you\b",
         r"(?i)\bhow would you rate your experience\b",
-        r"(?i)\bposted date\b",
-        r"(?i)\bposted date\s*\n",
-        r"(?i)\bcategory\s*\n\s*human resources\s*\n\s*posted date\b",
     ]
 
     for pattern in cut_markers:
@@ -125,6 +123,38 @@ def get_primary_text_window(text: str, max_chars: int = 12000) -> str:
         if m:
             text = text[:m.start()]
             break
+
+    # Some job boards append unrelated job cards without a clear "Related jobs" heading.
+    # Example:
+    #   Join our winning team today...
+    #   For more information, visit .
+    #   Location
+    #   Hoegaarden, Belgium
+    #   Category
+    #   Human Resources
+    #   Posted Date
+    #
+    # This should be cut before the unrelated second Location block.
+    trailing_card_patterns = [
+        r"(?is)\bfor more information,\s*visit\s*\.?\s*\n+\s*location\s*\n",
+        r"(?is)\bjoin our winning team today\..*?\n+\s*location\s*\n",
+        r"(?is)\bfor more information,\s*visit\b.*?\n+\s*location\s*\n",
+    ]
+
+    for pattern in trailing_card_patterns:
+        m = re.search(pattern, text)
+        if m:
+            text = text[:m.start()]
+            break
+
+    # If a related job card still remains, cut before a Location/Category/Posted Date block
+    # only when it appears after a substantial real job description.
+    related_card_match = re.search(
+        r"(?is)\n\s*location\s*\n\s*[^\n]+\n\s*category\s*\n\s*[^\n]+\n\s*posted date\b",
+        text,
+    )
+    if related_card_match and related_card_match.start() > 2500:
+        text = text[:related_card_match.start()]
 
     if len(text) > max_chars:
         text = text[:max_chars]
