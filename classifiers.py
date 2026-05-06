@@ -37,6 +37,7 @@ from rules import (
     extract_deterministic_skills,
     extract_remote_days,
     extract_remote_preferences,
+    get_primary_text_window,
     has_disallowed_location_signal,
     infer_job_titles_from_position_name,
     infer_skills_from_position_context,
@@ -177,7 +178,7 @@ class JobClassifier:
         return cleaned
 
     def _extract_weighted_location_candidates(self, text: str) -> list[tuple[int, int, str]]:
-        text = clean_description(text)
+        text = clean_description(get_primary_text_window(text))
         if not text:
             return []
 
@@ -194,7 +195,9 @@ class JobClassifier:
             (245, r"(?im)^\s*office location\s*[:\-]\s*(.+)$"),
             (240, r"(?im)^\s*city\s*[:\-]\s*(.+)$"),
             (230, r"(?im)^\s*based in\s+(.+)$"),
+            (225, r"(?im)^\s*location\s*$\n\s*([A-Za-z][^\n]+)$"),
             (220, r"(?im)\brole is based at (?:our )?(.+?)(?: office|\.)"),
+            (210, r"(?im)\bthis position is part of .+? and will be an? (?:on-site|onsite|hybrid|remote) role\b"),
             (160, r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$"),
             (80, r"(?im)\bhub based\s*\((.+?)\)"),
         ]
@@ -203,12 +206,19 @@ class JobClassifier:
 
         for base_weight, pattern in patterns:
             for match in re.finditer(pattern, text):
-                value = (match.group(1) or "").strip()
+                value = ""
+
+                if match.groups():
+                    value = (match.group(1) or "").strip()
+
+                if not value and "this position is part of" in match.group(0).lower():
+                    continue
+
                 if not value:
                     continue
 
                 value = re.split(
-                    r"(?i)\b(hybrid|remote|onsite|salary|schedule|travel required|shift|clearance|required|benefits|reporting to|employment type|industry|career level)\b",
+                    r"(?i)\b(hybrid|remote|onsite|on-site|salary|schedule|travel required|shift|clearance|required|benefits|reporting to|employment type|industry|career level|category|job id|posted date)\b",
                     value,
                     maxsplit=1,
                 )[0].strip(" ,:-")
@@ -221,7 +231,7 @@ class JobClassifier:
         return candidates
 
     def _description_has_ambiguous_location(self, description: str) -> bool:
-        d = clean_description(description).lower()
+        d = clean_description(get_primary_text_window(description)).lower()
 
         explicit_markers = [
             " hub based ",
@@ -283,7 +293,7 @@ class JobClassifier:
         return len(strong_candidates) == 1
 
     def _deterministic_location_from_text(self, text: str) -> str:
-        text = clean_description(text)
+        text = clean_description(get_primary_text_window(text))
         weighted = self._extract_weighted_location_candidates(text)
         if not weighted:
             return ""
@@ -349,6 +359,7 @@ class JobClassifier:
                 "remote",
                 "hybrid",
                 "onsite",
+                "on-site",
                 "office",
                 "work from home",
             ]
@@ -364,6 +375,9 @@ class JobClassifier:
                 "job type",
                 "salary",
                 "role purpose",
+                "what you will do",
+                "who you are",
+                "job description",
             ]
         )
         return not (has_location_signal and has_role_signal)
@@ -720,16 +734,6 @@ class JobClassifier:
         }
 
     def _has_hard_rejection(self, source_text: str, reason: str = "") -> bool:
-        """
-        Deterministic hard rejection only.
-
-        Do NOT use AI-generated negative reasoning here because the model can wrongly say
-        allowed corporate roles are outside scope, for example:
-        - Communications Lead
-        - HR Generalist
-        - AI Legal Specialist
-        - Financial Analyst
-        """
         return (
             text_is_predominantly_non_english(source_text)
             or text_requires_non_english_language(source_text)
