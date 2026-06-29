@@ -3,7 +3,11 @@ name: Job data extractor
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   PYTHONUNBUFFERED: "1"
-  BATCH_SIZE: "100"
+  # Large enough that the whole file runs as ONE batch, so the company-level
+  # T&P gate (Stage 1 & 2 in main.py) sees all of a company's positions together
+  # instead of split across batches. Lower this only if a single run risks the
+  # job timeout below.
+  BATCH_SIZE: "100000"
 
 on:
   workflow_dispatch:
