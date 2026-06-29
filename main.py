@@ -129,6 +129,11 @@ def main() -> None:
     remote_lookup = RemotePolicyLookup() if gemini_enabled else None
     output_rows = []
 
+    # The remote-working policy is a company-level fact, so look it up once per
+    # company and reuse it for every job at that company. Saves Gemini calls and
+    # guarantees the same company gets the same answer across rows.
+    remote_lookup_cache: dict[str, object] = {}
+
     total = len(rows)
     for idx, row in enumerate(rows, start=1):
         try:
@@ -153,7 +158,15 @@ def main() -> None:
                 if company_domain:
                     remote_row["company_domain"] = company_domain
 
-                remote_result = remote_lookup.lookup(remote_row)
+                cache_key = company_domain or str(row.get("company_name", "")).strip().lower()
+
+                if cache_key and cache_key in remote_lookup_cache:
+                    remote_result = remote_lookup_cache[cache_key]
+                else:
+                    remote_result = remote_lookup.lookup(remote_row)
+                    if cache_key:
+                        remote_lookup_cache[cache_key] = remote_result
+
                 gemini_remote = _normalize_remote_value(remote_result.remote_preferences)
                 gemini_note = (remote_result.note or "").strip()
 
