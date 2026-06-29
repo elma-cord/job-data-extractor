@@ -10,7 +10,8 @@ OUTPUT_COLUMNS = [
 
     "role_relevance",
     "role_relevance_reason",
-    "job_category",
+    "job_category_code_check",
+    "job_category_ai_check",
 
     "job_location",
     "remote_preferences",
@@ -65,7 +66,8 @@ def build_output_row(raw_row: dict[str, Any], result: dict[str, Any]) -> dict[st
 
         "role_relevance": result.get("role_relevance", ""),
         "role_relevance_reason": result.get("role_relevance_reason", ""),
-        "job_category": result.get("job_category", ""),
+        "job_category_code_check": result.get("job_category_code_check", ""),
+        "job_category_ai_check": result.get("job_category", ""),
 
         "job_location": result.get("job_location", ""),
         "remote_preferences": result.get("remote_preferences", ""),
