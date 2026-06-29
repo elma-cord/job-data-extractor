@@ -1,5 +1,6 @@
 import csv
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -96,8 +97,9 @@ class JobClassifier:
         last_error = None
         use_json_format = True
         use_temperature = True
+        retry_delays = [2, 5, 10]
 
-        for _ in range(MAX_RETRIES + 1):
+        for attempt in range(MAX_RETRIES + 1):
             try:
                 kwargs = {
                     "model": MAIN_MODEL,
@@ -130,6 +132,12 @@ class JobClassifier:
                     use_json_format = False
                 elif use_temperature and "temperature" in message:
                     use_temperature = False
+
+            # Back off before the next attempt so transient errors (e.g. 429
+            # rate limits) get a chance to clear instead of failing instantly.
+            # No sleep after the final attempt.
+            if attempt < MAX_RETRIES:
+                time.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
 
         raise RuntimeError(f"model_call_failed: {last_error}")
 
