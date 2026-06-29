@@ -2,6 +2,7 @@ import csv
 import os
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -9,6 +10,7 @@ from classifiers import JobClassifier
 from config import INPUT_CSV, OUTPUT_CSV
 from formatters import OUTPUT_COLUMNS, build_output_row
 from remote_policy_lookup import RemotePolicyLookup
+from rules import detect_quick_tp_from_title
 
 
 VALID_REMOTE_VALUES = {"onsite", "hybrid", "remote"}
@@ -111,6 +113,22 @@ def _is_gemini_remote_lookup_enabled() -> bool:
     return raw in {"1", "true", "yes", "y", "on"}
 
 
+def _company_key(row: dict) -> str:
+    domain = _get_best_company_domain(row)
+    if domain:
+        return domain
+    return str(row.get("company_name", "")).strip().lower()
+
+
+def _company_list_status(row: dict) -> str:
+    # The "List" column marks a company as Active / Inactive / Churned.
+    return str(row.get("List", "") or "").strip().lower()
+
+
+def _position_title(row: dict) -> str:
+    return str(row.get("job_title", row.get("position_name", "")) or "")
+
+
 def main() -> None:
     input_path = Path(INPUT_CSV)
     output_path = Path(OUTPUT_CSV)
@@ -134,14 +152,65 @@ def main() -> None:
     # guarantees the same company gets the same answer across rows.
     remote_lookup_cache: dict[str, object] = {}
 
+    # --- Company-level pre-pass (Inactive-company T&P gate) ---
+    # Group every row by company and remember each company's "List" status.
+    company_to_rows: dict[str, list] = defaultdict(list)
+    company_status: dict[str, str] = {}
+    for i, row in enumerate(rows):
+        key = _company_key(row)
+        company_to_rows[key].append(i)
+        status = _company_list_status(row)
+        if status and key not in company_status:
+            company_status[key] = status
+
+    # STAGE 1 (cheap, no AI): an Inactive company with NO T&P-looking title on
+    # ANY of its positions is dropped wholesale before we spend anything on the
+    # model. Uses the broad title-based T&P detector.
+    stage1_dropped: set = set()
+    for key, idxs in company_to_rows.items():
+        if company_status.get(key) != "inactive":
+            continue
+        has_tp_title = any(
+            detect_quick_tp_from_title(_position_title(rows[i])) == "T&P job"
+            for i in idxs
+        )
+        if not has_tp_title:
+            stage1_dropped.add(key)
+
+    def _no_tp_row(src: dict, code_check: str, ai_check: str, note: str) -> dict:
+        blanked = build_output_row(
+            src,
+            classifier._blank_result(
+                role_relevance="Not Relevant",
+                role_relevance_reason="No T&P jobs",
+                job_category="",
+                notes=note,
+            ),
+        )
+        blanked["company_domain"] = _get_best_company_domain(src)
+        blanked["job_category_code_check"] = code_check
+        blanked["job_category_ai_check"] = ai_check
+        return blanked
+
     total = len(rows)
     for idx, row in enumerate(rows, start=1):
+        code_check = detect_quick_tp_from_title(_position_title(row))
+        key = _company_key(row)
+
+        # Stage 1 drop: inactive company with no T&P-looking title -> skip the model.
+        if key in stage1_dropped:
+            output_rows.append(_no_tp_row(row, code_check, "", "rule:inactive_no_tp_code"))
+            if idx % 10 == 0 or idx == total:
+                print(f"Processed {idx}/{total}")
+            continue
+
         try:
             result = classifier.classify_job(row)
             final_row = build_output_row(row, result)
 
             company_domain = _get_best_company_domain(row)
             final_row["company_domain"] = company_domain
+            final_row["job_category_code_check"] = code_check
 
             openai_remote = _normalize_remote_value(final_row.get("remote_preferences", ""))
             gemini_remote = ""
@@ -158,7 +227,7 @@ def main() -> None:
                 if company_domain:
                     remote_row["company_domain"] = company_domain
 
-                cache_key = company_domain or str(row.get("company_name", "")).strip().lower()
+                cache_key = key
 
                 if cache_key and cache_key in remote_lookup_cache:
                     remote_result = remote_lookup_cache[cache_key]
@@ -212,11 +281,32 @@ def main() -> None:
                 },
             )
             final_row["company_domain"] = _get_best_company_domain(row)
+            final_row["job_category_code_check"] = code_check
 
         output_rows.append(final_row)
 
         if idx % 10 == 0 or idx == total:
             print(f"Processed {idx}/{total}")
+
+    # STAGE 2 (AI accuracy catch): for Inactive companies that survived Stage 1,
+    # if NONE of their positions were classified as a T&P job by the model, drop
+    # the whole company too. No extra model cost - classification already ran.
+    for key, idxs in company_to_rows.items():
+        if company_status.get(key) != "inactive" or key in stage1_dropped:
+            continue
+        has_ai_tp = any(
+            output_rows[i].get("job_category_ai_check", "") == "T&P job"
+            for i in idxs
+        )
+        if has_ai_tp:
+            continue
+        for i in idxs:
+            output_rows[i] = _no_tp_row(
+                rows[i],
+                output_rows[i].get("job_category_code_check", ""),
+                output_rows[i].get("job_category_ai_check", ""),
+                "rule:inactive_no_tp_ai",
+            )
 
     write_output_csv(output_path, output_rows)
     print(f"Done. Output written to: {output_path}")
