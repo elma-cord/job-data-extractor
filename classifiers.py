@@ -94,18 +94,43 @@ class JobClassifier:
 
     def _call_model(self, prompt: str) -> str:
         last_error = None
+        use_json_format = True
+        use_temperature = True
+
         for _ in range(MAX_RETRIES + 1):
             try:
-                response = self.client.responses.create(
-                    model=MAIN_MODEL,
-                    input=prompt,
-                    max_output_tokens=MAX_OUTPUT_TOKENS,
-                )
-                text = response.output_text.strip()
-                if text:
+                kwargs = {
+                    "model": MAIN_MODEL,
+                    "input": prompt,
+                    "max_output_tokens": MAX_OUTPUT_TOKENS,
+                }
+                # temperature=0 makes the structured extraction deterministic
+                # (same job -> same answer) and reduces hallucinated values.
+                if use_temperature:
+                    kwargs["temperature"] = 0
+                # Ask the model for a JSON object so we don't have to scrape it
+                # out of prose.
+                if use_json_format:
+                    kwargs["text"] = {"format": {"type": "json_object"}}
+
+                response = self.client.responses.create(**kwargs)
+                text = (response.output_text or "").strip()
+
+                # Only accept a response we can actually parse as a JSON object.
+                # A non-empty-but-unparseable answer counts as a failed attempt
+                # and is retried instead of being silently passed downstream.
+                if text and extract_json_object(text):
                     return text
             except Exception as exc:
                 last_error = exc
+                # If this SDK/model build rejects the optional args, drop them
+                # and keep retrying rather than failing the whole row.
+                message = str(exc).lower()
+                if use_json_format and ("format" in message or "text" in message):
+                    use_json_format = False
+                elif use_temperature and "temperature" in message:
+                    use_temperature = False
+
         raise RuntimeError(f"model_call_failed: {last_error}")
 
     @staticmethod
@@ -132,6 +157,14 @@ class JobClassifier:
             "skills": [],
             "notes": notes,
         }
+
+    @staticmethod
+    def _append_note(existing: str, tag: str) -> str:
+        existing = (existing or "").strip()
+        tag = (tag or "").strip()
+        if not tag:
+            return existing
+        return f"{existing}; {tag}" if existing else tag
 
     @staticmethod
     def _is_broad_location(value: str) -> bool:
@@ -746,20 +779,24 @@ class JobClassifier:
         if text_is_predominantly_non_english(source_text):
             result["role_relevance"] = NOT_RELEVANT_LABEL
             result["role_relevance_reason"] = "Job description is primarily in another language."
+            result["notes"] = self._append_note(result.get("notes", ""), "rule:non_english_text")
 
         if text_requires_non_english_language(source_text):
             result["role_relevance"] = NOT_RELEVANT_LABEL
             result["role_relevance_reason"] = "Role requires a language other than English."
+            result["notes"] = self._append_note(result.get("notes", ""), "rule:non_english_required")
 
         if has_disallowed_location_signal(source_text):
             result["role_relevance"] = NOT_RELEVANT_LABEL
             result["role_relevance_reason"] = "Location is outside allowed regions or work-pattern rules."
+            result["notes"] = self._append_note(result.get("notes", ""), "rule:disallowed_location")
 
         hard_rejection = self._has_hard_rejection(source_text, result.get("role_relevance_reason", ""))
         allowed_corporate_role = detect_allowed_corporate_role(position_name, source_text)
 
         if not hard_rejection and allowed_corporate_role:
             result["role_relevance"] = RELEVANT_LABEL
+            result["notes"] = self._append_note(result.get("notes", ""), "rule:corporate_rescue")
             if (
                 not result.get("role_relevance_reason")
                 or "not matching" in result.get("role_relevance_reason", "").lower()
@@ -777,6 +814,7 @@ class JobClassifier:
 
         if detect_relevant_business_sales_role(position_name, source_text) and result.get("role_relevance") != NOT_RELEVANT_LABEL:
             result["role_relevance"] = RELEVANT_LABEL
+            result["notes"] = self._append_note(result.get("notes", ""), "rule:sales_rescue")
             if (
                 not result.get("role_relevance_reason")
                 or "not matching" in result.get("role_relevance_reason", "").lower()
@@ -786,6 +824,7 @@ class JobClassifier:
 
         if detect_relevant_finance_accounting_role(position_name, source_text) and result.get("role_relevance") != NOT_RELEVANT_LABEL:
             result["role_relevance"] = RELEVANT_LABEL
+            result["notes"] = self._append_note(result.get("notes", ""), "rule:finance_rescue")
             if (
                 not result.get("role_relevance_reason")
                 or "not matching" in result.get("role_relevance_reason", "").lower()
@@ -796,6 +835,7 @@ class JobClassifier:
 
         if self._reason_is_negative(reason) and not allowed_corporate_role:
             result["role_relevance"] = NOT_RELEVANT_LABEL
+            result["notes"] = self._append_note(result.get("notes", ""), "rule:negative_reason_override")
 
         if result.get("role_relevance") == RELEVANT_LABEL:
             if not is_location_allowed(
@@ -806,6 +846,7 @@ class JobClassifier:
                 result["role_relevance"] = NOT_RELEVANT_LABEL
                 result["job_category"] = result.get("job_category") or NOT_TP_LABEL
                 result["role_relevance_reason"] = "Location is outside allowed regions or work-pattern rules."
+                result["notes"] = self._append_note(result.get("notes", ""), "rule:location_gate")
 
         if result.get("role_relevance") == NOT_RELEVANT_LABEL:
             return self._blank_result(
@@ -830,6 +871,7 @@ class JobClassifier:
                 role_relevance=NOT_RELEVANT_LABEL,
                 role_relevance_reason="Content is educational, informational, checklist-based, or not a real job posting.",
                 job_category=NOT_TP_LABEL,
+                notes="rule:non_job_content",
             )
 
         excluded, excluded_reason = obvious_excluded_role(position_name, job_description)
@@ -838,6 +880,7 @@ class JobClassifier:
                 role_relevance=NOT_RELEVANT_LABEL,
                 role_relevance_reason=excluded_reason,
                 job_category=detect_quick_tp_from_title(position_name) or NOT_TP_LABEL,
+                notes="rule:excluded_role",
             )
 
         source_text, source_note, used_fetched_page, page_text = self._build_source_text(job_description, job_url)
@@ -848,7 +891,7 @@ class JobClassifier:
                 role_relevance=NOT_RELEVANT_LABEL,
                 role_relevance_reason=excluded_after_fetch_reason,
                 job_category=detect_quick_tp_from_title(position_name) or NOT_TP_LABEL,
-                notes=source_note,
+                notes=self._append_note(source_note, "rule:excluded_role_after_fetch"),
             )
 
         raw = self._call_model(
