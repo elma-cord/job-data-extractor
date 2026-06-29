@@ -11,7 +11,6 @@ def build_unified_job_extraction_prompt(
     allowed_nontp_skills: list[str],
 ) -> str:
     job_titles_str = ", ".join(predefined_job_titles)
-    locations_str = ", ".join(predefined_locations)
     salaries_str = ", ".join(str(x) for x in predefined_salaries)
     tp_skills_str = ", ".join(allowed_tp_skills)
     nontp_skills_str = ", ".join(allowed_nontp_skills)
@@ -117,15 +116,13 @@ def build_unified_job_extraction_prompt(
         - Be careful not to use locations from unrelated job cards, footer links, "More jobs", "Similar jobs", or "Related jobs" sections. Only use the actual role location.
 
         Very important for job_location:
-        - Choose the MOST SPECIFIC acceptable normalized location from the predefined list.
-        - Do NOT fall back to a more specific neighborhood or office if the text only says a broader place.
-        - Example: if the text says London, UK and that exact normalized location exists, choose London, UK, not Abbey Road, London, United Kingdom.
-        - If the posting says a town/city like Stansted, Huntingdon, Bathgate, Shrewsbury, Glasgow, Worthing etc., and the acceptable list contains a more specific normalized option that corresponds to that place, choose that more specific option.
+        - Report the location exactly as the posting states it for this role. Do not invent a more specific neighbourhood, street, or office than the text supports.
+        - Do NOT fall back to a more specific neighborhood or office if the text only says a broader place. Example: if the text only says London, UK, output "London, UK", not a specific street or office in London.
         - If the description has a clear explicit location, prefer that over generic office-list text from later page text.
         - If multiple locations are mentioned but one later explicit line or label clearly states the actual role location, prefer that clearer explicit location.
         - If there is an ambiguous hub-based / multiple-office statement AND a separate explicit location field elsewhere in the text, prefer the explicit location field.
         - For ambiguous "hub based" or "multiple office" wording, use the most clearly role-specific location if supported by the text. If not clear, output "Unknown".
-        - If the explicit location is outside the allowed set and no acceptable normalized match exists, output "Unknown". Do not guess a UK location.
+        - If the location is outside the allowed regions, output "Unknown". Do not guess a UK location.
 
         4) Language rule
         - If the job description is mainly written in another language, mark Not Relevant.
@@ -136,16 +133,13 @@ def build_unified_job_extraction_prompt(
         - English-only is fine.
 
         5) job_location
-        Extract and normalize exactly one value from the acceptable locations list below.
+        Extract the single real work location for THIS role as plain text.
         Rules:
-        - Prefer explicit location fields
-        - Choose the most specific real job location
-        - If a small place is not in the list, choose the closest broader acceptable location from the list
-        - If no supported match exists, output "Unknown"
-        - Output must be exactly one value from the acceptable locations list or "Unknown"
-
-        Acceptable normalized locations:
-        {locations_str}
+        - Prefer explicit location fields (e.g. "Location:", "based in", office/city lines)
+        - Choose the most specific real job location stated for this role
+        - Write it in plain "City, Country" form when possible (e.g. "Manchester, UK", "London, UK"); it will be normalized to the canonical location afterwards
+        - Do NOT use locations from unrelated job cards, footers, "More jobs", "Similar jobs", or "Related jobs" sections
+        - If the location is a foreign/excluded place, or no real location for this role is supported, output "Unknown"
 
         6) remote_preferences
         Allowed values only: "onsite", "hybrid", "remote"
