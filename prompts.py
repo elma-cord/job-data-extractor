@@ -251,22 +251,17 @@ def build_unified_job_extraction_prompt(
         ["junior", "mid", "senior"] when you genuinely cannot tell - it is a last resort, not a default.
 
         13) skills
-        Choose 0 to 10 skills.
-        Hard rules:
+        Choose the skills that are MOST APPROPRIATE for THIS specific role (up to 10).
         - The allowed skills depend on the final job_category:
           - If job_category = "T&P job", use ONLY the Allowed T&P skills list
           - If job_category = "Not T&P", use ONLY the Allowed Non-T&P skills list
-        - Use exact strings from the relevant allowed list only
-        - Prefer concrete skills clearly evidenced by the source text
-        - Do not invent tools/languages/frameworks
-        - If the source does not support a skill, do not include it
-        - Better 2 accurate skills than 10 weak skills
-        - Do not include skills just because they are common for the role
-        - Be careful with false positives:
+        - Use exact strings from the relevant allowed list only.
+        - Prefer skills clearly evidenced by the source text.
+        - If the description is thin or does not explicitly list skills, INFER the skills most typical and appropriate for this kind of role (still only from the allowed list). A Relevant job should normally receive at least 3-5 appropriate skills - do not leave skills empty for a relevant role.
+        - Every skill you choose MUST genuinely fit this specific role. Do NOT add skills unrelated to the role, and do not invent tools/languages/frameworks that would not plausibly apply.
+        - Be careful with false positives when reading the text:
           - do not infer "R" from words like New Relic
           - do not infer "Flutter" from company names unless the framework is clearly referenced
-        - Only include inferential skills in rare obvious cases
-        - If the description is thin and only a few skills are obvious, return just the most appropriate 2-4 supported skills
 
         Allowed T&P skills:
         {tp_skills_str}
