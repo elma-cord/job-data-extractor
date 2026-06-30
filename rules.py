@@ -704,6 +704,37 @@ def title_has_leadership_signal(position_name: str) -> bool:
     return any(term in title for term in leadership_terms)
 
 
+# Seniority leadership is decided from the TAGGED (normalized) job title using this
+# controlled set, PLUS any "... Director" title. Everything else is NOT leadership
+# (so "Account Coordinator" / "Account Manager" / "Product Manager" take their level
+# from experience/seniority, not leadership).
+LEADERSHIP_JOB_TITLES = {
+    "CDO", "CFO", "CIO", "CLO", "CMO", "COO", "CPO", "CRO", "CSO", "CTO",
+    "VP of Engineering",
+    "Engineering Manager",
+    "Founder",
+    "Chief of Staff",
+    "Technical Director",
+    "Head of Customer", "Head of Data", "Head of Design", "Head of Engineering",
+    "Head of Finance", "Head of HR", "Head of Infrastructure", "Head of Marketing",
+    "Head of Operations", "Head of Product", "Head of QA", "Head of Sales",
+}
+
+
+def is_leadership_job_title(job_titles: list[str]) -> bool:
+    for title in job_titles or []:
+        clean = (title or "").strip()
+        if not clean:
+            continue
+        low = clean.lower()
+        if clean in LEADERSHIP_JOB_TITLES:
+            return True
+        # Any "Head of ..." or any "... Director" title counts as leadership.
+        if low.startswith("head of ") or "director" in low:
+            return True
+    return False
+
+
 def _canonical_location_key(text: str) -> str:
     text = lower_text(text)
     text = text.replace("&", " and ")
