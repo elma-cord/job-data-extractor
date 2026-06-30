@@ -529,51 +529,30 @@ class JobClassifier:
         return cleaned[:max_items]
 
     def _finalize_seniorities(self, position_name: str, seniorities: list[str], description: str) -> list[str]:
-        title = clean_description(position_name).lower()
-        desc = clean_description(description).lower()
+        # Seniority is AI-led: the model applies the leadership rule, the
+        # explicit-title-level rule, and the experience buckets from the prompt,
+        # because it understands context a regex can't (e.g. "Mid-Market" is not
+        # mid-level; "Lead Generation" is not a lead seniority). Here we only
+        # enforce the hard guardrails: leadership is exclusive, canonical order,
+        # max 3, and a last-resort default.
+        order = ["entry", "junior", "mid", "senior", "lead", "leadership"]
 
+        # An unambiguous leadership title is always leadership-only.
         if title_has_leadership_signal(position_name):
             return ["leadership"]
 
-        if "assistant manager" in title or "assistant brand manager" in title:
-            return ["junior", "mid"]
+        cleaned = [s for s in seniorities if s in order]
 
-        if "manager" in title:
-            return ["senior", "lead"]
+        # leadership is exclusive - never combine it with other levels.
+        if "leadership" in cleaned:
+            return ["leadership"]
 
-        if "assistant" in title:
-            cleaned = [x for x in seniorities if x not in {"senior", "lead", "leadership"}]
-            return cleaned[:3] if cleaned else ["junior", "mid"]
+        # de-duplicate, order canonically, cap at 3
+        cleaned = sorted(set(cleaned), key=order.index)[:3]
+        if cleaned:
+            return cleaned
 
-        if seniorities:
-            cleaned = seniorities[:]
-
-            if "lead" in cleaned and "manager" not in title and not self._is_complex_non_manager_role(description):
-                cleaned = [x for x in cleaned if x != "lead"]
-
-            if "entry" in cleaned:
-                strong_non_entry_markers = [
-                    "years of experience",
-                    "stakeholder",
-                    "ownership",
-                    "cross-functional",
-                    "client-facing",
-                    "commercial",
-                    "strategy",
-                    "campaigns",
-                    "brand identity",
-                    "sql",
-                    "requirements",
-                    "analytics",
-                ]
-                if any(marker in desc for marker in strong_non_entry_markers):
-                    cleaned = [x for x in cleaned if x != "entry"]
-
-            return cleaned[:3] if cleaned else ["junior", "mid"]
-
-        if any(x in title for x in ["engineer", "developer", "analyst", "designer"]):
-            return ["junior", "mid", "senior"]
-
+        # Last-resort default only when the model returned nothing usable.
         return ["junior", "mid", "senior"]
 
     def _filter_job_titles(self, position_name: str, job_titles: list[str]) -> list[str]:
@@ -909,22 +888,18 @@ class JobClassifier:
 
         allowed_skills = self.predefined_tp_skills if parsed["job_category"] == TP_LABEL else self.predefined_nontp_skills
 
-        deterministic_skills = extract_deterministic_skills(
-            position_name=position_name,
-            description=source_text,
-            allowed_skills=allowed_skills,
-            max_items=MAX_SKILLS,
-        )
-
+        # AI-led skills: keep the skills the MODEL judged relevant to this job
+        # (validated against the allowed list, with a light check that each skill
+        # is genuinely supported by the text to block hallucination). We no longer
+        # keyword-match every allowed skill against the text, which attached
+        # unrelated skills (e.g. "Business Analysis" on an engineer just because
+        # the word "requirements" appeared).
         ai_skills = validate_skills(payload.get("skills", []), allowed_skills, max_items=MAX_SKILLS)
-        ai_skills = self._clean_skill_list(ai_skills, source_text, MAX_SKILLS)
+        final_skills = self._clean_skill_list(ai_skills, source_text, MAX_SKILLS)
 
-        final_skills = deterministic_skills[:]
-        for skill in ai_skills:
-            if skill not in final_skills:
-                final_skills.append(skill)
-
-        if len(final_skills) < 2:
+        # Only if the model returned nothing usable, fall back to light
+        # title-context inference so thin descriptions still get a few skills.
+        if not final_skills:
             inferred = infer_skills_from_position_context(
                 position_name=position_name,
                 description=source_text,
