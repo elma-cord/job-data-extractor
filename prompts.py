@@ -214,28 +214,41 @@ def build_unified_job_extraction_prompt(
         - Do not output unrelated titles
 
         12) seniorities
-        Select up to 3 values from:
-        entry, junior, mid, senior, lead, leadership
+        Select up to 3 values from: entry, junior, mid, senior, lead, leadership
+        - Lowercase only.
+        - Always order them as: entry, junior, mid, senior, lead
+        - "leadership" is EXCLUSIVE: if it applies, output ONLY ["leadership"] (never combine it with senior, lead, etc.)
 
-        Rules:
-        - Lowercase only
-        - Order must always be:
-          entry, junior, mid, senior, lead, leadership
-        - "head of", "director", "vp", "chief", "engineering manager", "technical director" => leadership only
-        - "assistant manager" is usually junior, mid
-        - Other assistant roles are usually junior, mid unless the text clearly proves something else
-        - Generic "manager" should usually be senior, lead
-        - Generic non-manager professional roles without clear years can be junior, mid, senior
-        - Do not use lead for non-manager roles unless the text clearly shows strong ownership / mentoring / cross-functional leadership
-        - 0-1 years => entry, junior
-        - 2 years => junior, mid
-        - 3-5 years => senior
-        - 5+ years or strong ownership / mentoring / managerial responsibility => senior, lead
-        - avoid entry unless the posting truly looks early-career
-        - do not add junior/mid to clearly senior management roles
-        - assistant brand manager should usually NOT be senior, lead
-        - if unsure for a non-manager professional role, junior, mid, senior is safer than lead
-        - do not overuse lead
+        Decide using the FIRST rule below that clearly applies:
+
+        a) LEADERSHIP TITLE => ["leadership"] only.
+           Applies if the position is Head of ... / Director / VP / Vice President / Chief ... /
+           a C-level role (CEO, CTO, CFO, COO, CIO, CMO, CRO, CPO) / Engineering Manager.
+
+        b) EXPLICIT LEVEL IN THE POSITION NAME => output ONLY that level.
+           If the position name itself states the level, that IS the seniority:
+           - "graduate" / "intern" / "trainee" / "apprentice" / "entry-level"  => ["entry"]
+           - "junior" / "jr"                                                   => ["junior"]
+           - "mid" / "mid-level"                                               => ["mid"]
+             (but IGNORE "mid-market" and similar - that is a market segment, NOT a seniority)
+           - "senior" / "snr" / "sr"                                           => ["senior"]
+           - "lead" / "principal" / "staff engineer"                           => ["lead"]
+             (but IGNORE "lead generation" - that is sales, NOT a seniority)
+
+        c) EXPERIENCE-BASED (when the text states years of experience):
+           - less than 1 year / 0-1 years => ["entry"]
+           - 1-2 years                    => ["junior", "mid"]
+           - 3-4 years                    => ["senior"]
+           - 4+ years                     => ["senior", "lead"] if it is NOT really a manager role;
+                                             ["lead"] if it IS a manager role
+
+        d) Otherwise use responsibility / ownership signals to choose the MOST ACCURATE level(s):
+           - individual contributor  => entry / junior / mid / senior (pick the best fit)
+           - owns a team             => ["lead"]
+           - owns an org or function => ["leadership"]
+
+        Be smart and pick the most precise level you can justify. Only fall back to
+        ["junior", "mid", "senior"] when you genuinely cannot tell - it is a last resort, not a default.
 
         13) skills
         Choose 0 to 10 skills.
