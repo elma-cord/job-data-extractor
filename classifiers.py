@@ -43,6 +43,7 @@ from rules import (
     infer_job_titles_from_position_name,
     infer_skills_from_position_context,
     is_explicitly_foreign_location_text,
+    is_leadership_job_title,
     is_location_allowed,
     load_single_column_csv,
     looks_like_non_job_content,
@@ -528,24 +529,21 @@ class JobClassifier:
                 cleaned.append(skill)
         return cleaned[:max_items]
 
-    def _finalize_seniorities(self, position_name: str, seniorities: list[str], description: str) -> list[str]:
-        # Seniority is AI-led: the model applies the leadership rule, the
-        # explicit-title-level rule, and the experience buckets from the prompt,
-        # because it understands context a regex can't (e.g. "Mid-Market" is not
-        # mid-level; "Lead Generation" is not a lead seniority). Here we only
-        # enforce the hard guardrails: leadership is exclusive, canonical order,
-        # max 3, and a last-resort default.
+    def _finalize_seniorities(self, position_name: str, seniorities: list[str], description: str, job_titles=None) -> list[str]:
+        # Seniority is AI-led for the level itself (the model applies the
+        # explicit-title-level rule and the experience buckets from the prompt).
+        # But LEADERSHIP is decided ONLY from the TAGGED job title (controlled
+        # vocabulary): any "Head of ..." / "... Director" / C-level / VP /
+        # Engineering Manager / Founder / Chief of Staff is leadership; everything
+        # else is NOT - so we strip a stray "leadership" the model may have added
+        # to a non-leadership title (e.g. Account Coordinator, Principal Architect).
         order = ["entry", "junior", "mid", "senior", "lead", "leadership"]
 
-        # An unambiguous leadership title is always leadership-only.
-        if title_has_leadership_signal(position_name):
+        if is_leadership_job_title(job_titles or []):
             return ["leadership"]
 
-        cleaned = [s for s in seniorities if s in order]
-
-        # leadership is exclusive - never combine it with other levels.
-        if "leadership" in cleaned:
-            return ["leadership"]
+        # Not a leadership title -> "leadership" must not appear, even if the model returned it.
+        cleaned = [s for s in seniorities if s in order and s != "leadership"]
 
         # de-duplicate, order canonically, cap at 3
         cleaned = sorted(set(cleaned), key=order.index)[:3]
@@ -880,15 +878,24 @@ class JobClassifier:
                 ):
                     parsed["role_relevance_reason"] = "Role is a genuine corporate business function within allowed scope."
 
+        # Finalise the job title FIRST so seniority can base its leadership
+        # decision on the normalized (tagged) title, not the raw position name.
+        parsed["job_titles"] = self._fallback_job_titles(
+            position_name=position_name,
+            source_text=source_text,
+            existing_titles=parsed.get("job_titles", []),
+        )
+
         parsed["seniorities"] = self._finalize_seniorities(
             position_name,
             parsed.get("seniorities", []),
             source_text,
+            job_titles=parsed["job_titles"],
         )
 
         allowed_skills = self.predefined_tp_skills if parsed["job_category"] == TP_LABEL else self.predefined_nontp_skills
 
-       # AI-led skills: trust the skills the MODEL judged most appropriate for
+        # AI-led skills: trust the skills the MODEL judged most appropriate for
         # this role (validated against the allowed list). We do NOT require each
         # skill to appear literally in the text - a Relevant role should still get
         # the skills typical of that role even when the description is thin. The
@@ -910,12 +917,6 @@ class JobClassifier:
                     final_skills.append(skill)
 
         parsed["skills"] = final_skills[:MAX_SKILLS]
-
-        parsed["job_titles"] = self._fallback_job_titles(
-            position_name=position_name,
-            source_text=source_text,
-            existing_titles=parsed.get("job_titles", []),
-        )
 
         if source_note:
             parsed["notes"] = "; ".join([x for x in [parsed.get("notes", ""), source_note] if x])
