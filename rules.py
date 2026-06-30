@@ -928,6 +928,8 @@ def infer_skills_from_position_context(position_name: str, description: str, all
         (["analytics manager", "data analyst", "insight analyst"], ["SQL", "Data Visualisation", "Performance Reporting", "Data Driven"]),
         (["business development", "bdr", "sdr", "account executive"], ["Business Development", "Lead Generation", "Sales"]),
         (["finance analyst", "financial analyst", "accountant", "accounting analyst"], ["Excel", "Performance Reporting"]),
+        (["account director", "account manager", "account exec", "sales director", "sales manager", "sales executive", "sales consultant", "commercial manager", "client director", "client partner", "partnerships", "customer success", "renewals"], ["Account Management", "Business Development", "CRM", "Client relations", "Stakeholder Management"]),
+        (["1st line", "2nd line", "3rd line", "first line", "second line", "third line", "technical analyst", "technical support", "it support", "support engineer", "service desk", "help desk", "helpdesk", "desktop support", "infrastructure engineer", "systems engineer", "system engineer", "network engineer"], ["Troubleshooting", "Technical support", "Technical Documentation"]),
     ]
 
     allowed_lookup = {lower_text(x): x for x in allowed_skills}
