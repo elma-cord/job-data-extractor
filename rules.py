@@ -23,6 +23,10 @@ GENERIC_LOCATION_TOKENS = {
     "center",
     "county",
     "region",
+    "north",
+    "south",
+    "east",
+    "west",
     "remote",
     "hybrid",
     "onsite",
@@ -66,8 +70,13 @@ DISALLOWED_LOCATION_TERMS = [
     "apac",
     "latam",
     "africa",
+    "america",
+    "americas",
+    "north america",
+    "south america",
+    "central america",
+    "latin america",
 ]
-
 
 def load_single_column_csv(path: Path) -> list[str]:
     values = []
@@ -648,7 +657,19 @@ def detect_relevant_general_business_role(position_name: str, description: str) 
         "recruitment",
     ]
 
-    if any(term in text for term in hr_context_terms):
+    # The HR-context fallback must only rescue genuinely HR/People roles. It used
+    # to fire on boilerplate words ("onboarding", "compensation", "recruitment")
+    # found in ANY description, wrongly marking unrelated roles (e.g. a sports
+    # coach or a holiday-park manager) as relevant. Require an HR-ish TITLE first.
+    hr_title_signals = [
+        "hr", "human resources", "people", "talent", "recruit",
+        "employee relations", "l&d", "learning and development",
+        "reward", "compensation and benefits", "cipd", "hris",
+    ]
+    title_is_hr = bool(
+        re.search(r"\b(" + "|".join(re.escape(s) for s in hr_title_signals) + r")\b", title)
+    )
+    if title_is_hr and any(term in text for term in hr_context_terms):
         return not _has_retail_store_context(text)
 
     return False
@@ -738,7 +759,7 @@ def has_disallowed_location_signal(text: str) -> bool:
         r"united states|usa|canada|australia|new south wales|nsw|north ryde|"
         r"germany|france|spain|italy|netherlands|belgium|sweden|norway|"
         r"denmark|finland|switzerland|austria|poland|portugal|india|"
-        r"singapore|japan|china"
+        r"singapore|japan|china|americas|america"
     )
 
     strong_actual_location_patterns = [
