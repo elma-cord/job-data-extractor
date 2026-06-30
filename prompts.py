@@ -222,14 +222,15 @@ def build_unified_job_extraction_prompt(
         Decide using the FIRST rule below that clearly applies:
 
         a) LEADERSHIP => ["leadership"] only.
-           Leadership means genuine org/function leadership: a "Head of ..." role,
-           a C-level role (CEO/CTO/CFO/COO/CIO/CMO/CRO/CPO/CDO/CLO/CSO), VP of Engineering,
-           Engineering Manager, Founder, Chief of Staff, or Technical Director.
-           Titles like "Account Director", "Sales Director", "Client Director",
-           "Product Manager", "Project Manager", "Account Manager" are NOT leadership.
-           Do NOT force them to a fixed level - decide their seniority from the
-           experience / explicit-level / ownership rules below (b, c, d). For example
-           a Product Manager may be junior, mid, senior, or lead depending on the role.
+           Leadership means: any "Head of ..." role, ANY "... Director" title
+           (e.g. Account Director, Sales Director, Client Director, Technical Director,
+           Creative Director), a C-level role (CEO/CTO/CFO/COO/CIO/CMO/CRO/CPO/CDO/CLO/CSO),
+           VP of Engineering, Engineering Manager, Founder, or Chief of Staff.
+           NOT leadership: "Account Manager", "Account Coordinator", "Product Manager",
+           "Project Manager", "CSM" and similar (note: a "Manager"/"Coordinator" without
+           "Director"/"Head of"/C-level is NOT leadership). Decide their seniority from the
+           experience / explicit-level / ownership rules below (b, c, d) - do not force a
+           level. For example a Product Manager may be junior, mid, senior, or lead.
 
         b) EXPLICIT LEVEL IN THE POSITION NAME => output ONLY that level.
            If the position name itself states the level, that IS the seniority:
