@@ -888,17 +888,16 @@ class JobClassifier:
 
         allowed_skills = self.predefined_tp_skills if parsed["job_category"] == TP_LABEL else self.predefined_nontp_skills
 
-        # AI-led skills: keep the skills the MODEL judged relevant to this job
-        # (validated against the allowed list, with a light check that each skill
-        # is genuinely supported by the text to block hallucination). We no longer
-        # keyword-match every allowed skill against the text, which attached
-        # unrelated skills (e.g. "Business Analysis" on an engineer just because
-        # the word "requirements" appeared).
-        ai_skills = validate_skills(payload.get("skills", []), allowed_skills, max_items=MAX_SKILLS)
-        final_skills = self._clean_skill_list(ai_skills, source_text, MAX_SKILLS)
+       # AI-led skills: trust the skills the MODEL judged most appropriate for
+        # this role (validated against the allowed list). We do NOT require each
+        # skill to appear literally in the text - a Relevant role should still get
+        # the skills typical of that role even when the description is thin. The
+        # old false-positive risk came from blind keyword matching of every allowed
+        # skill (now removed); the model only picks skills that fit the specific job.
+        final_skills = validate_skills(payload.get("skills", []), allowed_skills, max_items=MAX_SKILLS)
 
-        # Only if the model returned nothing usable, fall back to light
-        # title-context inference so thin descriptions still get a few skills.
+        # Safety net: if the model still returned nothing, infer a few from the
+        # role/title context so a relevant job is not left with empty skills.
         if not final_skills:
             inferred = infer_skills_from_position_context(
                 position_name=position_name,
