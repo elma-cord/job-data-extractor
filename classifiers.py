@@ -457,56 +457,21 @@ class JobClassifier:
         page_text: str,
         used_fetched_page: bool,
     ) -> str:
+        # Normalize the location the MODEL stated for this role. We deliberately
+        # do NOT scrape or fuzzy-match the raw description / page text, which used
+        # to pull stray fragments (e.g. "North" out of "North or South America")
+        # and match them to unrelated UK places. The model reads the context and
+        # states the location; here we only canonicalize that single value.
+        # (description_text / page_text / used_fetched_page are kept in the
+        # signature for compatibility but are no longer used for selection.)
         ai_location_s = safe_str(ai_location)
-        direct = ""
-        if ai_location_s:
-            if ai_location_s.lower() == "unknown":
-                direct = LOCATION_UNKNOWN
-            else:
-                direct = normalize_location_match(ai_location_s, self.predefined_locations) or LOCATION_UNKNOWN
-
-        explicit_desc_location = self._explicit_description_location(description_text)
-        if explicit_desc_location:
-            return explicit_desc_location
-
-        if self._has_strong_disallowed_explicit_location(description_text):
+        if not ai_location_s or ai_location_s.lower() == "unknown":
             return LOCATION_UNKNOWN
 
-        desc_ambiguous = self._description_has_ambiguous_location(description_text)
-        desc_det = self._deterministic_location_from_text(description_text)
-        desc_single_clear = self._has_clear_single_location_in_text(description_text)
-
-        page_det = self._deterministic_location_from_text(page_text) if page_text else ""
-        page_single_clear = self._has_clear_single_location_in_text(page_text) if page_text else False
-
-        if page_text and self._has_strong_disallowed_explicit_location(page_text):
+        if is_explicitly_foreign_location_text(ai_location_s):
             return LOCATION_UNKNOWN
 
-        if used_fetched_page:
-            if page_det and page_single_clear:
-                return page_det
-
-            if not page_det and desc_ambiguous and not desc_single_clear:
-                return LOCATION_UNKNOWN
-
-            if page_det:
-                return page_det
-
-            if direct and not self._is_broad_location(direct):
-                return direct
-
-            return LOCATION_UNKNOWN
-
-        if desc_ambiguous:
-            return LOCATION_UNKNOWN
-
-        if desc_det and (self._is_broad_location(direct) or not direct):
-            return desc_det
-
-        if desc_det and direct and self._is_broad_location(direct) and not self._is_broad_location(desc_det):
-            return desc_det
-
-        return direct or desc_det or LOCATION_UNKNOWN
+        return normalize_location_match(ai_location_s, self.predefined_locations) or LOCATION_UNKNOWN
 
     def _coerce_salary_value(self, value: Any) -> str:
         value_s = safe_str(value).replace(",", "")
