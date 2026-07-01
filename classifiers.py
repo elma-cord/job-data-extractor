@@ -582,9 +582,15 @@ class JobClassifier:
         )
 
         if strongly_technical:
+            # An engineering/technical role must never be tagged with a non-engineering
+            # manager title. e.g. "Product Engineer" is a software engineer, NOT a
+            # "Product Manager".
             banned_for_technical = {
                 "Customer Service Representative",
                 "Customer Support",
+                "Product Manager",
+                "Product Owner",
+                "Project Manager",
             }
             titles = [t for t in titles if t not in banned_for_technical]
 
