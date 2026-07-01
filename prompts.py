@@ -202,6 +202,17 @@ def build_unified_job_extraction_prompt(
         Select up to 3 exact job titles from the predefined job titles list.
         - Use exact strings from the list only
         - Prefer fewer, more accurate titles
+        - A Relevant role must ALWAYS get at least one job title. Never leave job_titles empty for a Relevant role - pick the single closest predefined title.
+        - There is no generic "Software Engineer"/"Developer" in the list, so decide what KIND of engineer this specific role is from the description and map to the most fitting predefined title. Examples:
+          - AI / ML / deep learning / LLM work => "AI Engineer" or "Machine Learning Engineer"
+          - back-end / server / API work => "Back End"
+          - front-end / UI work => "Front End"
+          - both front and back end => "Full Stack"
+          - data pipelines / warehousing => "Data Engineer"; data science => "Data Scientist"
+          - cloud / infrastructure => "Cloud Engineer"; devops / CI-CD => "DevOps Engineer"
+          - embedded / firmware / hardware-adjacent => "Embedded Developer"
+          - security => "Security Engineer"; QA / test automation => "QA Automation Tester" or "Developer in Test"
+          - if the specialization is genuinely unclear, choose "Full Stack" or "Back End" as the closest general software title
         - If position name exactly matches one predefined job title, usually return just that one, unless the description clearly supports a second closely related exact title
         - For designer roles, prioritize the designer title over broader marketing labels if both are supported
         - Brand design / brand designer / brand design lead roles should include the best matching designer title if it exists in the predefined list, not only Brand Marketing
