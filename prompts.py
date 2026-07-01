@@ -203,6 +203,7 @@ def build_unified_job_extraction_prompt(
         - Use exact strings from the list only
         - Prefer fewer, more accurate titles
         - A Relevant role must ALWAYS get at least one job title. Never leave job_titles empty for a Relevant role - pick the single closest predefined title.
+        - An engineering/technical role (anything "... Engineer" or "... Developer", including "Product Engineer") is a SOFTWARE/TECHNICAL ENGINEER. NEVER map it to "Product Manager", "Product Owner", or "Project Manager". (A "Product Engineer" is an engineer, not a Product Manager.)
         - There is no generic "Software Engineer"/"Developer" in the list, so decide what KIND of engineer this specific role is from the description and map to the most fitting predefined title. Examples:
           - AI / ML / deep learning / LLM work => "AI Engineer" or "Machine Learning Engineer"
           - back-end / server / API work => "Back End"
