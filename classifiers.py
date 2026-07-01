@@ -542,6 +542,12 @@ class JobClassifier:
         if is_leadership_job_title(job_titles or []):
             return ["leadership"]
 
+        # "Principal" / "Staff Engineer" titles are lead-level individual
+        # contributors -> always tag them "lead" (not the generic default).
+        name_l = (position_name or "").lower()
+        if re.search(r"\bprincipal\b", name_l) or re.search(r"\bstaff\s+engineer\b", name_l):
+            return ["lead"]
+
         # Not a leadership title -> "leadership" must not appear, even if the model returned it.
         cleaned = [s for s in seniorities if s in order and s != "leadership"]
 
