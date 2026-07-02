@@ -150,11 +150,12 @@ def build_unified_job_extraction_prompt(
         - If not specified, return []
 
         Important:
-        - If the posting clearly says "Remote", "fully remote", "remote only", or "mostly async from anywhere", prefer ["remote"].
-        - Do not add onsite or hybrid unless explicitly supported.
-        - If the posting clearly says on-site / onsite / office-based / F/T Site, include onsite.
-        - If the posting clearly says hybrid / occasional home working / one day work from home / flexibility for occasional home working, include hybrid.
-        - Do not output onsite and remote together unless the text explicitly supports both.
+        - Output EVERY work pattern the role genuinely supports, in the order onsite, hybrid, remote. Combinations are encouraged when the ad supports more than one - e.g. a role that can be office-based or hybrid should be ["onsite", "hybrid"].
+        - If the posting clearly says "Remote", "fully remote", "remote only", or "mostly async from anywhere", include "remote".
+        - If the posting clearly says on-site / onsite / office-based / F/T Site, include "onsite".
+        - If the posting clearly says hybrid / occasional home working / one day work from home / flexibility for occasional home working, include "hybrid".
+        - Do not add a pattern that is not supported by the text.
+        - Do not output "onsite" and "remote" together unless the text explicitly supports both fully-office and fully-remote working.
 
         7) remote_days
         Return only:
@@ -240,33 +241,36 @@ def build_unified_job_extraction_prompt(
         - Do not output unrelated titles
 
         12) seniorities
-        Select up to 3 values from: entry, junior, mid, senior, lead, leadership
+        Select 1 to 3 values from: entry, junior, mid, senior, lead, leadership
         - Lowercase only.
-        - Always order them as: entry, junior, mid, senior, lead
-        - "leadership" is EXCLUSIVE: if it applies, output ONLY ["leadership"] (never combine it with senior, lead, etc.)
+        - Always order them as: entry, junior, mid, senior, lead, leadership
+        - Use MORE THAN ONE value when the role spans levels - reflect the FULL level of the role (up to 3). Do not collapse a multi-level title down to a single value.
 
-        Decide using the FIRST rule below that clearly applies:
+        Decide using these rules:
 
-        a) LEADERSHIP => ["leadership"] only.
+        a) LEADERSHIP titles.
            Leadership means: any "Head of ..." role, ANY "... Director" title
            (e.g. Account Director, Sales Director, Client Director, Technical Director,
            Creative Director), a C-level role (CEO/CTO/CFO/COO/CIO/CMO/CRO/CPO/CDO/CLO/CSO),
-           VP of Engineering, Engineering Manager, Founder, or Chief of Staff.
+           VP / Vice President, Engineering Manager, Founder, or Chief of Staff.
+           - Always include "leadership" for these.
+           - "leadership" is NOT exclusive: COMBINE it with the levels the title spans:
+             * "Senior Director" / "Senior Vice President" / "SVP"  => ["senior", "lead", "leadership"]
+             * a plain "Head of X" / "Director" / C-level           => ["lead", "leadership"]
            NOT leadership: "Account Manager", "Account Coordinator", "Product Manager",
-           "Project Manager", "CSM" and similar (note: a "Manager"/"Coordinator" without
-           "Director"/"Head of"/C-level is NOT leadership). Decide their seniority from the
-           experience / explicit-level / ownership rules below (b, c, d) - do not force a
-           level. For example a Product Manager may be junior, mid, senior, or lead.
+           "Project Manager", "CSM" and similar (a "Manager"/"Coordinator" without
+           "Director"/"Head of"/C-level is NOT leadership). Decide their level from rules b, c, d.
 
-        b) EXPLICIT LEVEL IN THE POSITION NAME => output ONLY that level.
-           If the position name itself states the level, that IS the seniority:
-           - "graduate" / "intern" / "trainee" / "apprentice" / "entry-level"  => ["entry"]
-           - "junior" / "jr"                                                   => ["junior"]
-           - "mid" / "mid-level"                                               => ["mid"]
+        b) EXPLICIT LEVEL(S) IN THE POSITION NAME => output ALL levels the name states (in order).
+           - "graduate" / "intern" / "trainee" / "apprentice" / "entry-level"  => entry
+           - "junior" / "jr"                                                   => junior
+           - "mid" / "mid-level"                                               => mid
              (but IGNORE "mid-market" and similar - that is a market segment, NOT a seniority)
-           - "senior" / "snr" / "sr"                                           => ["senior"]
-           - "lead" / "principal" / "staff engineer"                           => ["lead"]
+           - "senior" / "snr" / "sr"                                           => senior
+           - "lead" / "principal" / "staff engineer"                           => lead
              (but IGNORE "lead generation" - that is sales, NOT a seniority)
+           If several appear, output them all, e.g. "Senior Lead ..." => ["senior", "lead"];
+           "Senior Principal ..." => ["senior", "lead"].
 
         c) EXPERIENCE-BASED (when the text states years of experience):
            - less than 1 year / 0-1 years => ["entry"]
@@ -290,7 +294,7 @@ def build_unified_job_extraction_prompt(
           - If job_category = "Not T&P", use ONLY the Allowed Non-T&P skills list
         - Use exact strings from the relevant allowed list only.
         - Prefer skills clearly evidenced by the source text.
-        - If the description is thin or does not explicitly list skills, INFER the skills most typical and appropriate for this kind of role (still only from the allowed list). A Relevant job should normally receive at least 3-5 appropriate skills - do not leave skills empty for a relevant role.
+        - If the description is thin or does not explicitly list skills, INFER the skills most typical and appropriate for this kind of role (still only from the allowed list). A Relevant job should normally receive at least 3-5 appropriate skills, and NEVER fewer than 2 - always pick at least the two most appropriate skills for the role, even when you have to infer them. Do not leave skills empty or with a single item for a relevant role.
         - Every skill you choose MUST genuinely fit this specific role. Do NOT add skills unrelated to the role, and do not invent tools/languages/frameworks that would not plausibly apply.
         - Be careful with false positives when reading the text:
           - do not infer "R" from words like New Relic
