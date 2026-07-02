@@ -1,6 +1,48 @@
+import html
 import json
 import re
 from typing import Any, Iterable
+
+
+# Digits observed standing in for a lost apostrophe (CORD-6921). The apostrophe
+# most often becomes a "7" ("We 7re" -> "We're"), but 2/9/27/39/92/99 have also
+# been seen. We only touch a digit that sits where an apostrophe grammatically
+# belongs - directly before a contraction ending or a possessive - so real
+# numbers ("7 years", "70,000", "24/7", "7am") are never altered.
+_APOSTROPHE_DIGIT_RE = re.compile(
+    r"\b([A-Za-z]+)\s*(?:2|7|9|27|39|92|99)\s*(ll|re|ve|s|d|m|t)\b",
+    re.IGNORECASE,
+)
+
+# Curly / non-standard punctuation -> plain ASCII.
+_PUNCT_MAP = {
+    "\u2018": "'", "\u2019": "'",
+    "\u201c": '"', "\u201d": '"',
+    "\u2013": "-", "\u2014": "-",
+    "\u00a0": " ",
+}
+
+
+def repair_text(text: str) -> str:
+    """Fix character-encoding damage in job text.
+
+    - Decodes HTML entities (&amp;, &#39;, &#x27;, &rsquo;, ...).
+    - Restores apostrophes corrupted into stray digits ("We 7re" -> "We're",
+      "don7t" -> "don't", "company7s" -> "company's"), but only where the digit
+      stands in for an apostrophe. Real numbers are left untouched.
+    - Normalises curly quotes/dashes and non-breaking spaces to plain ASCII.
+
+    Idempotent and safe on both plain text and simple HTML.
+    """
+    if not text:
+        return text
+
+    s = str(text)
+    s = html.unescape(s)
+    s = _APOSTROPHE_DIGIT_RE.sub(r"\1'\2", s)
+    for bad, good in _PUNCT_MAP.items():
+        s = s.replace(bad, good)
+    return s
 
 
 def normalize_whitespace(value: str) -> str:
@@ -10,7 +52,10 @@ def normalize_whitespace(value: str) -> str:
 
 
 def clean_description(text: str) -> str:
-    text = text or ""
+    # Repair encoding damage FIRST (decode entities, fix apostrophe-as-digit
+    # artifacts) so every downstream consumer - classification, matching, and
+    # the trimmed description - works on clean text.
+    text = repair_text(text or "")
     text = text.replace("\u00a0", " ")
     text = re.sub(r"\r\n?", "\n", text)
     text = re.sub(r"[ \t]+", " ", text)
