@@ -2,7 +2,9 @@ import csv
 import os
 import re
 import sys
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -129,6 +131,18 @@ def _position_title(row: dict) -> str:
     return str(row.get("job_title", row.get("position_name", "")) or "")
 
 
+def _num_workers() -> int:
+    # How many jobs to classify in parallel. Each job is independent, so this only
+    # affects speed, never the per-row result. Tune down via the WORKERS env var if
+    # you hit OpenAI rate limits. Clamped to a sane range.
+    raw = (os.getenv("WORKERS", "8") or "8").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 8
+    return max(1, min(n, 16))
+
+
 def main() -> None:
     input_path = Path(INPUT_CSV)
     output_path = Path(OUTPUT_CSV)
@@ -145,12 +159,13 @@ def main() -> None:
     classifier = JobClassifier()
     gemini_enabled = _is_gemini_remote_lookup_enabled()
     remote_lookup = RemotePolicyLookup() if gemini_enabled else None
-    output_rows = []
 
     # The remote-working policy is a company-level fact, so look it up once per
     # company and reuse it for every job at that company. Saves Gemini calls and
-    # guarantees the same company gets the same answer across rows.
+    # guarantees the same company gets the same answer across rows. The lock keeps
+    # the cache safe when rows are processed by several worker threads at once.
     remote_lookup_cache: dict[str, object] = {}
+    remote_lookup_lock = threading.Lock()
 
     # --- Company-level pre-pass (Inactive-company T&P gate) ---
     # Group every row by company and remember each company's "List" status.
@@ -193,16 +208,17 @@ def main() -> None:
         return blanked
 
     total = len(rows)
-    for idx, row in enumerate(rows, start=1):
+
+    def _process_row(idx: int, row: dict) -> dict:
+        # Classify ONE job and build its output row. Pure per-row work (no shared
+        # state except the locked remote-lookup cache), so it is safe to run many
+        # of these at once in the thread pool below.
         code_check = detect_quick_tp_from_title(_position_title(row))
         key = _company_key(row)
 
         # Stage 1 drop: inactive company with no T&P-looking title -> skip the model.
         if key in stage1_dropped:
-            output_rows.append(_no_tp_row(row, code_check, "", "rule:inactive_no_tp_code"))
-            if idx % 10 == 0 or idx == total:
-                print(f"Processed {idx}/{total}")
-            continue
+            return _no_tp_row(row, code_check, "", "rule:inactive_no_tp_code")
 
         try:
             result = classifier.classify_job(row)
@@ -229,12 +245,18 @@ def main() -> None:
 
                 cache_key = key
 
-                if cache_key and cache_key in remote_lookup_cache:
-                    remote_result = remote_lookup_cache[cache_key]
+                cached = None
+                if cache_key:
+                    with remote_lookup_lock:
+                        cached = remote_lookup_cache.get(cache_key)
+
+                if cached is not None:
+                    remote_result = cached
                 else:
                     remote_result = remote_lookup.lookup(remote_row)
                     if cache_key:
-                        remote_lookup_cache[cache_key] = remote_result
+                        with remote_lookup_lock:
+                            remote_lookup_cache[cache_key] = remote_result
 
                 gemini_remote = _normalize_remote_value(remote_result.remote_preferences)
                 gemini_note = (remote_result.note or "").strip()
@@ -255,6 +277,8 @@ def main() -> None:
                     final_row.get("notes", ""),
                     gemini_note,
                 )
+
+            return final_row
 
         except Exception as exc:
             final_row = build_output_row(
@@ -282,11 +306,25 @@ def main() -> None:
             )
             final_row["company_domain"] = _get_best_company_domain(row)
             final_row["job_category_code_check"] = code_check
+            return final_row
 
-        output_rows.append(final_row)
+    # Preallocate so each result lands at its original row index regardless of the
+    # order the worker threads finish in.
+    output_rows = [None] * total
+    workers = _num_workers()
+    done = 0
 
-        if idx % 10 == 0 or idx == total:
-            print(f"Processed {idx}/{total}")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_idx = {
+            executor.submit(_process_row, idx, row): idx
+            for idx, row in enumerate(rows)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            output_rows[idx] = future.result()
+            done += 1
+            if done % 20 == 0 or done == total:
+                print(f"Processed {done}/{total}")
 
     # STAGE 2 (AI accuracy catch): for Inactive companies that survived Stage 1,
     # if NONE of their positions were classified as a T&P job by the model, drop
