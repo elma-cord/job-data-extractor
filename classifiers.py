@@ -726,34 +726,47 @@ class JobClassifier:
         return cleaned[:max_items]
 
     def _finalize_seniorities(self, position_name: str, seniorities: list[str], description: str, job_titles=None) -> list[str]:
-        # Seniority is AI-led for the level itself (the model applies the
-        # explicit-title-level rule and the experience buckets from the prompt).
-        # But LEADERSHIP is decided ONLY from the TAGGED job title (controlled
-        # vocabulary): any "Head of ..." / "... Director" / C-level / VP /
-        # Engineering Manager / Founder / Chief of Staff is leadership; everything
-        # else is NOT - so we strip a stray "leadership" the model may have added
-        # to a non-leadership title (e.g. Account Coordinator, Principal Architect).
+        # Seniority is AI-led, but we make sure a role's level SPAN is reflected
+        # (up to 3 values). Leadership is NOT exclusive: a senior leadership title
+        # ("Senior Director", "Senior VP") spans senior + lead + leadership, and a
+        # title like "Senior Lead" spans senior + lead.
         order = ["entry", "junior", "mid", "senior", "lead", "leadership"]
 
-        if is_leadership_job_title(job_titles or []):
-            return ["leadership"]
+        levels = [s for s in seniorities if s in order]
 
-        # "Principal" / "Staff Engineer" titles are lead-level individual
-        # contributors -> always tag them "lead" (not the generic default).
         name_l = (position_name or "").lower()
-        if re.search(r"\bprincipal\b", name_l) or re.search(r"\bstaff\s+engineer\b", name_l):
-            return ["lead"]
+        has_senior = bool(re.search(r"\b(senior|snr|sr|svp)\b", name_l))
+        has_lead_word = bool(re.search(r"\blead\b", name_l)) and "lead generation" not in name_l
+        has_principal = bool(re.search(r"\bprincipal\b", name_l)) or bool(re.search(r"\bstaff\s+engineer\b", name_l))
 
-        # Not a leadership title -> "leadership" must not appear, even if the model returned it.
-        cleaned = [s for s in seniorities if s in order and s != "leadership"]
+        if has_principal and "lead" not in levels:
+            levels.append("lead")
+        if has_lead_word and "lead" not in levels:
+            levels.append("lead")
+        if has_senior and "senior" not in levels:
+            levels.append("senior")
 
-        # de-duplicate, order canonically, cap at 3
-        cleaned = sorted(set(cleaned), key=order.index)[:3]
-        if cleaned:
-            return cleaned
+        if is_leadership_job_title(job_titles or []):
+            if "leadership" not in levels:
+                levels.append("leadership")
+            # A senior leadership title also spans lead level.
+            if has_senior and "lead" not in levels:
+                levels.append("lead")
+        else:
+            # Non-leadership title -> never carry a stray "leadership" the model
+            # may have added (e.g. Account Coordinator, Principal Architect).
+            levels = [s for s in levels if s != "leadership"]
 
-        # Last-resort default only when the model returned nothing usable.
-        return ["junior", "mid", "senior"]
+        if not levels:
+            # Last-resort default only when nothing else applies.
+            return ["junior", "mid", "senior"]
+
+        # Order canonically, de-duplicate, and keep the highest 3 so the role's
+        # top level is always reflected when more than three would apply.
+        levels = sorted(set(levels), key=order.index)
+        if len(levels) > 3:
+            levels = levels[-3:]
+        return levels
 
     # A position name only supports a leadership/C-level title if it actually
     # carries a leadership signal. Word boundaries keep "coordinator" from
@@ -880,16 +893,27 @@ class JobClassifier:
 
         ai_remote_preferences = normalize_remote_preferences(payload.get("remote_preferences", []))
         det_remote_preferences = extract_remote_preferences(source_text)
-        remote_preferences_list = det_remote_preferences or ai_remote_preferences
+        # Union the deterministic and model-detected work patterns (canonical
+        # order) so genuine combinations like ["onsite", "hybrid"] are KEPT rather
+        # than collapsed to a single value - a role then surfaces for candidates
+        # filtering on either pattern.
+        remote_set = set(det_remote_preferences) | set(ai_remote_preferences)
+        remote_preferences_list = [x for x in ["onsite", "hybrid", "remote"] if x in remote_set]
 
         det_remote_days = extract_remote_days(source_text)
         ai_remote_days = normalize_remote_days(payload.get("remote_days", ""))
         remote_days = det_remote_days if det_remote_days != "not specified" else ai_remote_days
 
-        if "remote" in remote_preferences_list and "hybrid" in remote_preferences_list and "occasional home working" not in source_text.lower():
-            remote_preferences_list = ["remote"]
-        if "remote" in remote_preferences_list and "onsite" in remote_preferences_list and "f/t site" not in source_text.lower():
-            remote_preferences_list = [x for x in remote_preferences_list if x != "onsite"]
+        # onsite + remote together is contradictory unless the ad explicitly
+        # supports both; in that case drop the fully-remote tag and keep the
+        # onsite (and hybrid, if present) pattern.
+        if (
+            "onsite" in remote_preferences_list
+            and "remote" in remote_preferences_list
+            and "hybrid" not in remote_preferences_list
+            and "f/t site" not in source_text.lower()
+        ):
+            remote_preferences_list = [x for x in remote_preferences_list if x != "remote"]
 
         salary_min = self._coerce_salary_value(payload.get("salary_min", ""))
         salary_max = self._coerce_salary_value(payload.get("salary_max", ""))
@@ -1119,9 +1143,10 @@ class JobClassifier:
         # skill (now removed); the model only picks skills that fit the specific job.
         final_skills = validate_skills(payload.get("skills", []), allowed_skills, max_items=MAX_SKILLS)
 
-        # Safety net: if the model still returned nothing, infer a few from the
-        # role/title context so a relevant job is not left with empty skills.
-        if not final_skills:
+        # Safety net: a relevant role should never come back with fewer than TWO
+        # skills. If the model returned 0 or 1, infer a few more from the
+        # role/title context and top up (deduped).
+        if len(final_skills) < 2:
             inferred = infer_skills_from_position_context(
                 position_name=position_name,
                 description=source_text,
