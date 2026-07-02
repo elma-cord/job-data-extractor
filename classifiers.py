@@ -45,6 +45,7 @@ from rules import (
     has_disallowed_location_signal,
     infer_job_titles_from_position_name,
     infer_skills_from_position_context,
+    infer_skills_from_titles,
     is_explicitly_foreign_location_text,
     is_leadership_job_title,
     is_location_allowed,
@@ -1154,6 +1155,16 @@ class JobClassifier:
                 max_items=4,
             )
             for skill in inferred:
+                if skill not in final_skills:
+                    final_skills.append(skill)
+
+        # Still short? Fall back to the NORMALIZED job title(s), which are reliable
+        # even when the raw position name is oddly worded (e.g. "Rotary Operations
+        # Controller" -> Operations skills, "Quality Engineer" -> testing skills).
+        # If this still can't reach 2, we leave it - a genuinely thin posting is a
+        # fair signal, and we do NOT fabricate skills that do not fit.
+        if len(final_skills) < 2:
+            for skill in infer_skills_from_titles(parsed["job_titles"], allowed_skills, max_items=4):
                 if skill not in final_skills:
                     final_skills.append(skill)
 
