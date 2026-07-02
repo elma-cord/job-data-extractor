@@ -176,6 +176,27 @@ def looks_like_non_job_content(position_name: str, description: str) -> bool:
     if not text:
         return True
 
+    # Some scraped rows are not real vacancies - JD templates/samples, talent-pool
+    # sign-ups, speculative applications. Flag these from the TITLE regardless of
+    # any job-like words the body may contain.
+    title = lower_text(position_name)
+    title_non_job_markers = [
+        "job description template",
+        "jd template",
+        "job description sample",
+        "job description example",
+        "free template",
+        "register your interest",
+        "expression of interest",
+        "talent pool",
+        "talent community",
+        "talent network",
+        "speculative application",
+        "speculative cv",
+    ]
+    if any(marker in title for marker in title_non_job_markers):
+        return True
+
     hard_non_job_terms = [
         "course module",
         "learning module",
@@ -1019,7 +1040,13 @@ _TITLE_SKILL_HINTS = {
     "Cloud Engineer": ["Cloud Computing", "Cloud Security", "Troubleshooting"],
     "Site Reliability Engineer": ["Cloud Computing", "Automations", "Troubleshooting"],
     "Solutions Engineer": ["Troubleshooting", "Technical support", "Technical Documentation"],
+    "Technical Architect": ["Cloud Computing", "Microservices", "Technical Documentation"],
+    "Data Architect": ["SQL", "Data Security", "Cloud Computing"],
     # --- Non-T&P titles ---
+    "Sales Engineer": ["Account Management", "Client relations", "Stakeholder Management"],
+    "Customer Service Representative": ["Customer service", "Client relations", "Communication software"],
+    "Customer Support": ["Customer service", "Client relations", "Communication software"],
+    "Business Analyst": ["Business Analysis", "Stakeholder Management", "Project Management"],
     "Operations": ["Stakeholder Management", "Process management", "Project Management", "Excel"],
     "Business Operations": ["Stakeholder Management", "Process management", "Project Management", "Excel"],
     "Customer Operations": ["Stakeholder Management", "Client relations", "Communication software"],
@@ -1119,6 +1146,16 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
         (["ux designer"], ["UX Designer"]),
         (["customer assurance", "assurance coordinator", "customer coordinator"], ["Customer Operations", "Customer Support"]),
         (["application lead", "application specialist", "application analyst", "application support", "application consultant", "application manager"], ["Support Engineer", "System Engineer", "Solutions Engineer"]),
+        (["data architect"], ["Data Architect"]),
+        (["solution architect", "solutions architect", "technical architect", "enterprise architect", "software architect"], ["Technical Architect", "Solutions Engineer"]),
+        (["it infrastructure", "infrastructure lead", "infrastructure site", "infrastructure analyst"], ["Cloud Engineer", "System Engineer", "Support Engineer"]),
+        (["engineering lead", "technology lead", "technical lead", "engineering & technology", "engineering and technology"], ["Technical Architect", "Solutions Engineer"]),
+        (["architect"], ["Technical Architect"]),
+        (["procurement", "sourcing", "buyer", "category manager"], ["Operations", "Business Operations"]),
+        (["contracts manager", "contract manager", "contracts consultant"], ["Operations", "Legal"]),
+        (["commercial executive", "commercial associate", "customer development", "business development executive"], ["Business Development Manager", "Account Executive"]),
+        (["actuarial", "actuary"], ["Finance/Accounting", "Data/Insight Analyst"]),
+        (["insurance adviser", "insurance advisor", "underwriter", "underwriting", "motor claims", "claims handler", "claims advisor", "claims adviser"], ["Operations", "Customer Operations"]),
         (["coordinator"], ["Operations", "Business Operations"]),
         (["controller"], ["Operations", "Finance/Accounting"]),
     ]
