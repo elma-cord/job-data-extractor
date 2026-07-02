@@ -111,7 +111,7 @@ def build_unified_job_extraction_prompt(
         - If the actual job location is North Ryde / NSW / Australia, mark Not Relevant
         - If salary is only USD/CAD/AUD and nothing supports allowed regions, that is evidence for Not Relevant
         - Accept UK / Great Britain / England / Scotland / Wales / Northern Ireland / London etc. as UK
-        - Ignore generic company office lists unless they clearly describe this role’s actual work location
+        - Ignore generic company office lists unless they clearly describe this role's actual work location
         - Do not mark Not Relevant just because boilerplate mentions global offices, US headquarters, customers in other countries, or international company presence
         - Be careful not to use locations from unrelated job cards, footer links, "More jobs", "Similar jobs", or "Related jobs" sections. Only use the actual role location.
 
@@ -121,8 +121,8 @@ def build_unified_job_extraction_prompt(
         - If the description has a clear explicit location, prefer that over generic office-list text from later page text.
         - If multiple locations are mentioned but one later explicit line or label clearly states the actual role location, prefer that clearer explicit location.
         - If there is an ambiguous hub-based / multiple-office statement AND a separate explicit location field elsewhere in the text, prefer the explicit location field.
-        - For ambiguous "hub based" or "multiple office" wording, use the most clearly role-specific location if supported by the text. If not clear, output "Unknown".
-        - If the location is outside the allowed regions, output "Unknown". Do not guess a UK location.
+        - For ambiguous "hub based" or "multiple office" wording, use the most clearly role-specific location if supported by the text. If it is clearly a UK role but no single city is clear, output "United Kingdom". Only output "Unknown" when the location is genuinely unclear or not an allowed region.
+        - If the actual location is outside the allowed regions, output "Unknown". Do not guess a UK location for a role that is really elsewhere.
 
         4) Language rule
         - If the job description is mainly written in another language, mark Not Relevant.
@@ -135,11 +135,13 @@ def build_unified_job_extraction_prompt(
         5) job_location
         Extract the single real work location for THIS role as plain text.
         Rules:
-        - Prefer explicit location fields (e.g. "Location:", "based in", office/city lines)
-        - Choose the most specific real job location stated for this role
-        - Write it in plain "City, Country" form when possible (e.g. "Manchester, UK", "London, UK"); it will be normalized to the canonical location afterwards
-        - Do NOT use locations from unrelated job cards, footers, "More jobs", "Similar jobs", or "Related jobs" sections
-        - If the location is a foreign/excluded place, or no real location for this role is supported, output "Unknown"
+        - The location may be a labelled field ("Location:", "based in", office/city line) OR unlabelled and inline, often near the top - read the WHOLE posting, do not only look for a "Location" label.
+        - Write it in plain "City, Country" form when possible (e.g. "Manchester, UK"); it will be normalized to the canonical location afterwards.
+        - If the role is clearly in the UK but NO single city is named (or several UK cities are listed), output "United Kingdom". Do NOT output "Unknown" just because a specific city is missing.
+        - LONDON: if the role is anywhere in London (central London, a London borough, or a London suburb such as Shoreditch/Croydon/Wimbledon), output exactly "London, UK" - do not output the specific neighbourhood.
+        - Do not invent a more specific neighbourhood, street, or office than the text supports.
+        - Do NOT use locations from unrelated job cards, footers, "More jobs", "Similar jobs", or "Related jobs" sections.
+        - Output "Unknown" ONLY when the role is genuinely remote-anywhere with no allowed region, or the actual location is a foreign/excluded place, or there is truly no supported location at all.
 
         6) remote_preferences
         Allowed values only: "onsite", "hybrid", "remote"
@@ -223,6 +225,18 @@ def build_unified_job_extraction_prompt(
         - Legal / Privacy / Compliance roles should map to the closest Legal, Compliance, Operations, or corporate role available in the predefined list
         - Finance / Accounting / Financial Analyst roles should map to the closest Finance/Accounting, Analyst, or Operations title available in the predefined list
         - 1st line / IT support / technical support / application engineer roles should map to the most appropriate technical title, not customer service
+        - ALWAYS output the title EXACTLY as it appears in the predefined list. If the natural title is not literally in the list, pick the CLOSEST predefined equivalent rather than leaving it blank. Examples:
+          - Customer Success Manager => "CSM/Account Manager"
+          - Business Intelligence Developer / BI Analyst => "BI Developer"
+          - IT Support Analyst / Service Desk / Desktop Support => "Support Engineer" or "System Administrator"
+          - Risk Manager / Compliance Analyst / Regulatory / AML / KYC => "Risk and Compliance"
+          - Sales Manager / Sales Executive / Commercial Manager => "Business Development Manager" or "Account Executive"
+          - Programme Manager / Delivery Manager / PMO / Project Coordinator => "Project Manager"
+          - Office Manager / Personal Assistant / Executive Assistant => "Executive Assistant" or "Operations"
+          - Payroll / Pensions / Accounts Assistant => "Finance/Accounting" or "Operations"
+          - Marketing Manager / Digital Marketing / Brand Manager => the closest Marketing title (e.g. "Generalist Marketing", "Digital Marketing", "Content Marketing", "Brand Marketing")
+          - HR Advisor / People Partner / Recruiter / Talent => "Human Resources" or "Talent Acquisition"
+          - Communications / PR Manager / Public Relations => "PR/Communications"
         - Do not output unrelated titles
 
         12) seniorities
@@ -296,12 +310,33 @@ def build_unified_job_extraction_prompt(
         15) notes
         Very short note about extraction confidence/source. Keep concise.
 
+        16) clean_job_title
+        Output a cleaned version of the ORIGINAL position name: keep only the core
+        job title, stripped of trailing company names, locations, contract types,
+        and separators.
+        - Keep only the core title at the start, stopping at the first separator or
+          trailing detail. Separators include "\u00b7", "-", "|", commas that begin
+          trailing info, and words/markers like Full-Time, Part-Time, Contract,
+          Permanent, Remote, Hybrid, Location, Office, Ltd, Limited, Inc, or a
+          city/country name.
+        - Preserve the exact wording and order of the title portion. Do not rephrase,
+          translate, expand, or add words. Preserve commas/hyphens that are genuinely
+          inside the core title (e.g. "Analyst, Commercial Analytics").
+        - Examples:
+          - "Account Director Event Concept Ltd Full-Time Contract" => "Account Director"
+          - "Analyst, Commercial Analytics - NORAM & LATAM KAYAK \u00b7 Commercial" => "Analyst, Commercial Analytics"
+          - "Senior Software Engineer - New York, NY" => "Senior Software Engineer"
+          - "Marketing Manager | Remote" => "Marketing Manager"
+          - "Business Analyst, San Francisco" => "Business Analyst"
+        - If the position name is already clean, return it unchanged.
+
         OUTPUT JSON SCHEMA
         {{
           "role_relevance": "Relevant" or "Not Relevant",
           "role_relevance_reason": "",
           "job_category": "T&P job" or "Not T&P",
           "job_location": "",
+          "clean_job_title": "",
           "remote_preferences": [],
           "remote_days": "",
           "salary_min": "",
@@ -320,5 +355,48 @@ def build_unified_job_extraction_prompt(
 
         Source text:
         {source_text}
+        """
+    ).strip()
+
+
+def build_relevant_description_prompt(description_text: str) -> str:
+    return dedent(
+        f"""
+        You are given a raw job description. Extract only the parts that describe
+        the job itself, clean them up, and return them as simple HTML.
+
+        INCLUDE
+        - The role's purpose and responsibilities ("About the Role", "Responsibilities", "Key Duties", "What you'll do").
+        - Candidate requirements, qualifications, skills and experience ("About You", "Requirements", "What you'll bring", "Ideally you'll have").
+        - Any sentence that directly explains what the job involves or what the candidate must bring.
+
+        EXCLUDE
+        - Company background / "about us" marketing.
+        - Benefits, perks, salary-sell, culture fluff.
+        - Legal disclaimers, equal-opportunity statements, application instructions, "how to apply".
+        - Recruiter/agency boilerplate and unrelated content.
+
+        CHARACTER & ENCODING RULES (important)
+        - Output clean, correctly-encoded text.
+        - Decode any HTML entities to their real character (&amp;->&, &#39;/&#x27;/&rsquo;->', &quot;->").
+        - Repair corrupted punctuation. In this data an apostrophe is often replaced by a stray digit - most commonly a 7, sometimes 2, 9, 27, 39, 92 or 99 - sitting between a word and a contraction or possessive. Restore the apostrophe whenever a digit appears where one grammatically belongs:
+          "We 7re" -> "We're", "You 7ll" -> "You'll", "don 7t" / "don7t" -> "don't", "company7s" -> "company's", "we 27re" -> "we're".
+        - ONLY fix a digit that is standing in for an apostrophe (directly before a contraction ending ll/re/ve/s/t/d/m, or a possessive 's). NEVER change a digit that is a real number - leave "7 years", "7am", "\u00a370,000", "level 3", "24/7" exactly as they are.
+        - Normalise curly quotes/apostrophes and dashes to plain forms; do not otherwise alter wording.
+
+        FORMATTING RULES
+        - Use ONLY these tags: <p>, <strong>, <ul>, <ol>, <li>, <br>. No other tags, no markdown, no code fences.
+        - Section titles => <p><strong>Title</strong></p>, keeping the original wording (convert ALL-CAPS headers to Title Case). If the header is "About the Role" / "The Role" / "About this Role", drop the header and keep its content.
+        - Bullets => <ul><li>...</li></ul>: one point per <li>, no blank lines between items, no <p> inside <li>. Only make bullets where the source actually had them; do not turn prose into bullets.
+        - If bullets appear with no header above them: duties => <p><strong>Responsibilities</strong></p>; qualifications/skills => <p><strong>Requirements</strong></p>. Do not invent headers for plain prose.
+
+        PRESERVATION
+        - Keep included sentences word-for-word apart from the character/encoding repairs above. Do not rephrase, summarise, or add anything.
+        - If nothing meaningful remains after removing excluded content, output an empty string.
+
+        Return only the HTML. No explanations.
+
+        RAW JOB DESCRIPTION:
+        {description_text}
         """
     ).strip()
