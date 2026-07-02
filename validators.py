@@ -129,10 +129,11 @@ def normalize_remote_preferences(value: Any) -> list[str]:
         if item_l in allowed and item_l not in cleaned:
             cleaned.append(item_l)
 
+    # Keep every supported work pattern (e.g. ["onsite", "hybrid"]) in canonical
+    # order. Combinations are allowed so a role surfaces for candidates filtering
+    # on either pattern; the one contradictory pair (onsite + remote) is handled
+    # downstream in the classifier.
     ordered = [x for x in ["onsite", "hybrid", "remote"] if x in cleaned]
-
-    if "hybrid" in ordered and "remote" in ordered:
-        ordered = [x for x in ordered if x != "remote"]
 
     return ordered
 
