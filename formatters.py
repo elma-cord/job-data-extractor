@@ -5,8 +5,10 @@ OUTPUT_COLUMNS = [
     "company_name",
     "company_domain",
     "position_name",
+    "clean_job_title",
     "job_url",
     "job_description",
+    "relevant_description",
 
     "role_relevance",
     "role_relevance_reason",
@@ -61,8 +63,10 @@ def build_output_row(raw_row: dict[str, Any], result: dict[str, Any]) -> dict[st
         "company_name": raw_row.get("company_name", ""),
         "company_domain": raw_row.get("company_domain", ""),
         "position_name": raw_row.get("job_title", raw_row.get("position_name", "")),
+        "clean_job_title": result.get("clean_job_title", ""),
         "job_url": raw_row.get("job_url", ""),
         "job_description": raw_row.get("job_description", ""),
+        "relevant_description": result.get("relevant_description", ""),
 
         "role_relevance": result.get("role_relevance", ""),
         "role_relevance_reason": result.get("role_relevance_reason", ""),
