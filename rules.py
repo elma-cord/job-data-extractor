@@ -1064,6 +1064,9 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
         (["product designer", "ui/ux", "ux/ui"], ["UI/UX Designer", "UX Designer"]),
         (["ui designer"], ["UI Designer"]),
         (["ux designer"], ["UX Designer"]),
+        (["customer assurance", "assurance coordinator", "customer coordinator"], ["Customer Operations", "Customer Support"]),
+        (["coordinator"], ["Operations", "Business Operations"]),
+        (["controller"], ["Operations", "Finance/Accounting"]),
     ]
 
     for triggers, candidates in rules:
