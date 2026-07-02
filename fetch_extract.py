@@ -63,43 +63,72 @@ def _join_address_parts(parts: list[str]) -> str:
     return ", ".join(clean)
 
 
+def _address_to_line(addr) -> str:
+    if isinstance(addr, dict):
+        return _join_address_parts([
+            str(addr.get("addressLocality") or ""),
+            str(addr.get("addressRegion") or ""),
+            str(addr.get("addressCountry") or ""),
+        ])
+    if isinstance(addr, str):
+        return addr.strip()
+    return ""
+
+
+def _extract_job_location_lines(job_location, out: list[str]) -> None:
+    # A JobPosting.jobLocation is a Place (or list of Places); the address lives
+    # under "address". We ONLY read locations from here - never from a top-level
+    # Organization / hiringOrganization address (that is the company HQ, not the
+    # role location, and was wrongly overriding real UK roles - CORD issue).
+    if isinstance(job_location, list):
+        for item in job_location:
+            _extract_job_location_lines(item, out)
+        return
+
+    if isinstance(job_location, dict):
+        addr = job_location.get("address", job_location)
+        if isinstance(addr, list):
+            for a in addr:
+                line = _address_to_line(a)
+                if line:
+                    out.append(f"Location: {line}")
+        else:
+            line = _address_to_line(addr)
+            if line:
+                out.append(f"Location: {line}")
+    elif isinstance(job_location, str):
+        out.append(f"Location: {job_location.strip()}")
+
+
 def _collect_structured_lines(obj, out: list[str]) -> None:
+    # Find JobPosting objects anywhere in the ld+json graph and extract ONLY
+    # their role-specific location fields.
     if isinstance(obj, dict):
-        address_locality = obj.get("addressLocality")
-        address_region = obj.get("addressRegion")
-        address_country = obj.get("addressCountry")
+        types = obj.get("@type")
+        type_list = types if isinstance(types, list) else [types]
+        is_job_posting = any(str(t).lower() == "jobposting" for t in type_list if t)
 
-        if any([address_locality, address_region, address_country]):
-            location_line = _join_address_parts([
-                str(address_locality or ""),
-                str(address_region or ""),
-                str(address_country or ""),
-            ])
-            if location_line:
-                out.append(f"Location: {location_line}")
+        if is_job_posting:
+            if "jobLocation" in obj:
+                _extract_job_location_lines(obj.get("jobLocation"), out)
 
-        for key, value in obj.items():
-            key_l = str(key).lower()
+            alr = obj.get("applicantLocationRequirements")
+            if isinstance(alr, str):
+                out.append(f"Location: {alr}")
+            elif isinstance(alr, dict) and alr.get("name"):
+                out.append(f"Location: {alr.get('name')}")
+            elif isinstance(alr, list):
+                for a in alr:
+                    if isinstance(a, dict) and a.get("name"):
+                        out.append(f"Location: {a.get('name')}")
 
-            if key_l in {"location", "joblocation", "baselocation", "locations"} and isinstance(value, str):
-                out.append(f"Location: {value}")
+            workplace = obj.get("jobLocationType")
+            if isinstance(workplace, str) and workplace.strip():
+                out.append(f"Workplace type: {workplace.strip()}")
 
-            elif key_l in {"workplacetype", "remotestatus", "locationtype", "remote_type", "workplace"} and isinstance(value, str):
-                out.append(f"Workplace type: {value}")
-
-            elif key_l == "applicantlocationrequirements":
-                if isinstance(value, str):
-                    out.append(f"Location: {value}")
-                elif isinstance(value, dict):
-                    _collect_structured_lines(value, out)
-                elif isinstance(value, list):
-                    for item in value:
-                        _collect_structured_lines(item, out)
-
-            elif key_l in {"address", "joblocation"} and isinstance(value, dict):
-                _collect_structured_lines(value, out)
-
-            elif isinstance(value, (dict, list)):
+        # Recurse so nested / @graph-wrapped JobPostings are still found.
+        for value in obj.values():
+            if isinstance(value, (dict, list)):
                 _collect_structured_lines(value, out)
 
     elif isinstance(obj, list):
