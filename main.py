@@ -135,7 +135,7 @@ def _num_workers() -> int:
     # How many jobs to classify in parallel. Each job is independent, so this only
     # affects speed, never the per-row result. Tune down via the WORKERS env var if
     # you hit OpenAI rate limits. Clamped to a sane range.
-    raw = (os.getenv("WORKERS", "8") or "8").strip()
+    raw = (os.getenv("WORKERS", "5") or "5").strip()
     try:
         n = int(raw)
     except ValueError:
