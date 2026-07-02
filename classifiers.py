@@ -28,7 +28,10 @@ from config import (
     TP_LABEL,
 )
 from fetch_extract import fetch_job_page_text
-from prompts import build_unified_job_extraction_prompt
+from prompts import (
+    build_relevant_description_prompt,
+    build_unified_job_extraction_prompt,
+)
 from rules import (
     closest_salary_value,
     detect_allowed_corporate_role,
@@ -60,6 +63,7 @@ from validators import (
     clean_description,
     extract_json_object,
     normalize_relevance_label,
+    repair_text,
     normalize_remote_days,
     normalize_remote_preferences,
     normalize_tp_label,
@@ -141,6 +145,97 @@ class JobClassifier:
                 time.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
 
         raise RuntimeError(f"model_call_failed: {last_error}")
+
+    def _call_model_raw(self, prompt: str, max_output_tokens: int = 1600) -> str:
+        # Plain-text model call (no JSON mode) for the relevant-description trim.
+        # This is a best-effort enrichment: if it fails we return "" so a failed
+        # trim never blanks the whole row.
+        last_error = None
+        use_temperature = True
+        retry_delays = [2, 5, 10]
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                kwargs = {
+                    "model": MAIN_MODEL,
+                    "input": prompt,
+                    "max_output_tokens": max_output_tokens,
+                }
+                if use_temperature:
+                    kwargs["temperature"] = 0
+
+                response = self.client.responses.create(**kwargs)
+                text = (response.output_text or "").strip()
+                if text:
+                    return text
+            except Exception as exc:
+                last_error = exc
+                if use_temperature and "temperature" in str(exc).lower():
+                    use_temperature = False
+
+            if attempt < MAX_RETRIES:
+                time.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
+
+        return ""
+
+    def _extract_relevant_description(self, source_text: str) -> str:
+        # Trim a job description down to the role-relevant content and return it
+        # as clean HTML (used to populate the `relevant_description` column for
+        # Relevant roles only). repair_text guarantees no apostrophe-as-digit
+        # artifacts survive into the stored description.
+        text = clean_description(source_text or "")
+        if not text:
+            return ""
+
+        html = self._call_model_raw(build_relevant_description_prompt(text))
+        html = repair_text(html or "").strip()
+        # Strip accidental markdown code fences if the model added them.
+        html = re.sub(r"^```(?:html)?\s*", "", html, flags=re.IGNORECASE)
+        html = re.sub(r"\s*```$", "", html).strip()
+        return html
+
+    @staticmethod
+    def _sanitize_notes_for_relevant(notes: str) -> str:
+        # When the final decision is Relevant, drop any AI-authored note segment
+        # that contradicts it (e.g. "location outside acceptable list", "title not
+        # in predefined list"). Keeps our own rule:/source tags intact.
+        if not notes:
+            return notes
+
+        contradictory = [
+            "outside allowed",
+            "outside acceptable",
+            "acceptable location",
+            "allowed location",
+            "not relevant",
+            "not matching",
+            "not in the predefined",
+            "not in predefined",
+            "not a recognized",
+            "not a recognised",
+            "does not match",
+            "outside target scope",
+            "outside allowed scope",
+        ]
+
+        kept = []
+        for segment in [s.strip() for s in notes.split(";")]:
+            if not segment:
+                continue
+            low = segment.lower()
+            if (
+                low.startswith("rule:")
+                or low.startswith("used ")
+                or "lookup" in low
+                or "url_fetch" in low
+            ):
+                kept.append(segment)
+                continue
+            if any(term in low for term in contradictory):
+                continue
+            kept.append(segment)
+
+        return "; ".join(kept)
 
     @staticmethod
     def _blank_result(
@@ -240,7 +335,7 @@ class JobClassifier:
             (225, r"(?im)^\s*location\s*$\n\s*([A-Za-z][^\n]+)$"),
             (220, r"(?im)\brole is based at (?:our )?(.+?)(?: office|\.)"),
             (210, r"(?im)\bthis position is part of .+? and will be an? (?:on-site|onsite|hybrid|remote) role\b"),
-            (160, r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$"),
+            (160, r"(?im)^\s*where you[\u2019']ll work\s*[:\-]?\s*(.+)$"),
             (80, r"(?im)\bhub based\s*\((.+?)\)"),
         ]
 
@@ -396,7 +491,7 @@ class JobClassifier:
                 "location city:",
                 "job location",
                 "based in",
-                "where you’ll work",
+                "where you\u2019ll work",
                 "where you'll work",
                 "remote",
                 "hybrid",
@@ -451,6 +546,93 @@ class JobClassifier:
 
         return source_text, "; ".join(notes), used_fetched_page, page_text
 
+    # Broad UK terms that are NOT in the predefined location list (which only has
+    # "United Kingdom" + cities). Map them to "United Kingdom" so a clearly-UK
+    # role is never left as Unknown just because no city was named.
+    _UK_BROAD_TERMS = {
+        "uk", "united kingdom", "great britain", "britain", "gb",
+        "england", "scotland", "wales", "northern ireland",
+    }
+    _UK_REGION_RE = r"(?:England|Scotland|Wales|Northern Ireland|United Kingdom|U\.?K\.?|Great Britain)"
+
+    def _as_uk_broad(self, value: str) -> str:
+        v = (value or "").strip().lower().replace(".", "")
+        v = re.sub(r"\s+", " ", v).strip()
+        return "United Kingdom" if v in self._UK_BROAD_TERMS else ""
+
+    def _collapse_london(self, value: str) -> str:
+        # Any London-area location -> "London, UK" (a real predefined entry).
+        # Treat London as one market. Careful NOT to collapse street/place names
+        # that merely contain the word "London" (e.g. "London Rd, Reading, UK",
+        # "Londonderry, UK").
+        if not value:
+            return value
+        low = value.strip().lower()
+
+        if low in {
+            "london", "london, uk", "london, england", "london, england, uk",
+            "greater london", "greater london, uk",
+            "london metropolitan area, uk",
+            "city of london", "city of london, uk",
+        }:
+            return "London, UK"
+
+        # London as a locality component ("<suburb>, London, UK").
+        if re.search(r",\s*london\b", low):
+            return "London, UK"
+
+        # London boroughs and the directional London areas.
+        if low.startswith("london borough of"):
+            return "London, UK"
+        if re.match(r"(?:east|west|north|south|central)\s+london\b", low):
+            return "London, UK"
+
+        return value
+
+    def _recover_location_from_text(self, *texts: str) -> str:
+        # Fallback used when the model gave "Unknown" (or an unmatchable value)
+        # but a real UK location IS present in the text. Reads labelled location
+        # lines and inline "City, <UK region>" patterns only - no loose fragment
+        # scraping (which used to pull "North" out of "North or South America").
+        labelled_patterns = [
+            r"(?im)^\s*(?:job\s+)?location(?:\s+city)?\s*[:\-]\s*(.+)$",
+            r"(?im)^\s*work location\s*[:\-]\s*(.+)$",
+            r"(?im)^\s*office location\s*[:\-]\s*(.+)$",
+            r"(?im)^\s*based in\s+(.+)$",
+        ]
+
+        for text in texts:
+            text = clean_description(get_primary_text_window(text or ""))
+            if not text:
+                continue
+
+            for pattern in labelled_patterns:
+                for match in re.finditer(pattern, text):
+                    value = (match.group(1) or "").strip()
+                    value = re.split(
+                        r"(?i)\b(hybrid|remote|onsite|on-site|salary|per annum|schedule|category|posted|employment type)\b",
+                        value,
+                        maxsplit=1,
+                    )[0].strip(" ,:-")
+                    if not value or is_explicitly_foreign_location_text(value):
+                        continue
+                    normalized = normalize_location_match(value, self.predefined_locations)
+                    if normalized and not self._is_broad_location(normalized):
+                        return normalized
+                    broad = self._as_uk_broad(value)
+                    if broad:
+                        return broad
+
+            for match in re.finditer(
+                rf"([A-Z][A-Za-z.\-' ]+?),\s*{self._UK_REGION_RE}\b", text
+            ):
+                city = (match.group(1) or "").strip()
+                normalized = normalize_location_match(f"{city}, UK", self.predefined_locations)
+                if normalized and not self._is_broad_location(normalized):
+                    return normalized
+
+        return ""
+
     def _choose_best_location(
         self,
         ai_location: Any,
@@ -458,21 +640,35 @@ class JobClassifier:
         page_text: str,
         used_fetched_page: bool,
     ) -> str:
-        # Normalize the location the MODEL stated for this role. We deliberately
-        # do NOT scrape or fuzzy-match the raw description / page text, which used
-        # to pull stray fragments (e.g. "North" out of "North or South America")
-        # and match them to unrelated UK places. The model reads the context and
-        # states the location; here we only canonicalize that single value.
-        # (description_text / page_text / used_fetched_page are kept in the
-        # signature for compatibility but are no longer used for selection.)
+        # 1) Primary: normalize the location the MODEL stated for this role.
         ai_location_s = safe_str(ai_location)
-        if not ai_location_s or ai_location_s.lower() == "unknown":
-            return LOCATION_UNKNOWN
+        ai_said_foreign = bool(ai_location_s) and is_explicitly_foreign_location_text(ai_location_s)
+        if ai_location_s and ai_location_s.lower() != "unknown":
+            if not ai_said_foreign:
+                normalized = normalize_location_match(ai_location_s, self.predefined_locations)
+                if normalized:
+                    return self._collapse_london(normalized)
+                broad = self._as_uk_broad(ai_location_s)
+                if broad:
+                    return broad
 
-        if is_explicitly_foreign_location_text(ai_location_s):
-            return LOCATION_UNKNOWN
+        # 2) Recover a real UK location from the text when the model whiffed.
+        recovered = self._recover_location_from_text(description_text, page_text)
+        if recovered:
+            return self._collapse_london(recovered)
 
-        return normalize_location_match(ai_location_s, self.predefined_locations) or LOCATION_UNKNOWN
+        # 3) Last resort: clearly UK but no city named -> "United Kingdom".
+        #    Guarded so a role the model explicitly placed abroad, or any text
+        #    with a disallowed-location signal, can never be defaulted to the UK.
+        combined = f"{description_text}\n{page_text}"
+        if not ai_said_foreign and not has_disallowed_location_signal(combined) and re.search(
+            r"\b(united kingdom|england|scotland|wales|northern ireland|uk)\b",
+            combined,
+            flags=re.IGNORECASE,
+        ):
+            return "United Kingdom"
+
+        return LOCATION_UNKNOWN
 
     def _coerce_salary_value(self, value: Any) -> str:
         value_s = safe_str(value).replace(",", "")
@@ -563,36 +759,23 @@ class JobClassifier:
         title_l = clean_description(position_name).lower()
         titles = job_titles[:]
 
-        strongly_technical = any(
-            term in title_l
-            for term in [
-                "engineer",
-                "it ",
-                "it-",
-                "support",
-                "application engineer",
-                "1st line",
-                "2nd line",
-                "3rd line",
-                "systems",
-                "network",
-                "infrastructure",
-                "administrator",
-            ]
-        )
+        # A pure engineering/developer role (e.g. "Product Engineer", "Software
+        # Engineer") is a software engineer and must not be mislabelled as a
+        # Product Manager / Owner or Customer Service. We deliberately do NOT ban
+        # "Project Manager" here - an "IT Project Manager" is a genuine Project
+        # Manager, and the old blanket ban was blanking those titles entirely.
+        is_engineer_role = bool(
+            re.search(r"\b(engineer|developer|programmer)\b", title_l)
+        ) and not re.search(r"\b(product|project|program|programme)\s+manager\b", title_l)
 
-        if strongly_technical:
-            # An engineering/technical role must never be tagged with a non-engineering
-            # manager title. e.g. "Product Engineer" is a software engineer, NOT a
-            # "Product Manager".
-            banned_for_technical = {
+        if is_engineer_role:
+            banned_for_engineer = {
                 "Customer Service Representative",
                 "Customer Support",
                 "Product Manager",
                 "Product Owner",
-                "Project Manager",
             }
-            titles = [t for t in titles if t not in banned_for_technical]
+            titles = [t for t in titles if t not in banned_for_engineer]
 
         if any(x in title_l for x in ["designer", "design lead", "brand design", "brand designer"]):
             designer_titles = ["Graphic Designer", "UI Designer", "UI/UX Designer", "UX Designer"]
@@ -710,12 +893,14 @@ class JobClassifier:
         job_titles = validate_job_titles(payload.get("job_titles", []), self.predefined_job_titles, max_items=MAX_JOB_TITLES)
         seniorities = validate_seniorities(payload.get("seniorities", []), ALLOWED_SENIORITIES, max_items=3)
         notes = safe_str(payload.get("notes", ""))
+        clean_job_title = safe_str(payload.get("clean_job_title", ""))
 
         return {
             "role_relevance": role_relevance,
             "role_relevance_reason": role_relevance_reason,
             "job_category": job_category,
             "job_location": job_location,
+            "clean_job_title": clean_job_title,
             "remote_preferences_list": remote_preferences_list,
             "remote_days": remote_days,
             "salary_min": salary_min,
@@ -821,6 +1006,9 @@ class JobClassifier:
         result["remote_preferences"] = ", ".join(result.get("remote_preferences_list", [])) if result.get("remote_preferences_list") else ""
         if not result.get("role_relevance_reason"):
             result["role_relevance_reason"] = "Role fits allowed scope and location rules."
+        # A rescue rule may have flipped this role to Relevant; drop any stale AI
+        # note that still claims it was Not Relevant / outside the allowed lists.
+        result["notes"] = self._sanitize_notes_for_relevant(result.get("notes", ""))
         return result
 
     def classify_job(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -934,4 +1122,14 @@ class JobClassifier:
             parsed["notes"] = "; ".join([x for x in [parsed.get("notes", ""), source_note] if x])
 
         final_result = self._apply_final_consistency(parsed, position_name, source_text)
+
+        # Clean job title + trimmed relevant description are produced for
+        # RELEVANT roles only (skipped for Not Relevant to save cost/time).
+        if final_result.get("role_relevance") == RELEVANT_LABEL:
+            final_result["clean_job_title"] = final_result.get("clean_job_title") or position_name
+            final_result["relevant_description"] = self._extract_relevant_description(source_text)
+        else:
+            final_result["clean_job_title"] = ""
+            final_result["relevant_description"] = ""
+
         return final_result
