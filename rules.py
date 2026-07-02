@@ -1155,6 +1155,7 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
         (["contracts manager", "contract manager", "contracts consultant"], ["Operations", "Legal"]),
         (["commercial executive", "commercial associate", "customer development", "business development executive"], ["Business Development Manager", "Account Executive"]),
         (["actuarial", "actuary"], ["Finance/Accounting", "Data/Insight Analyst"]),
+        (["financial planner", "financial adviser", "financial advisor", "wealth planner", "paraplanner", "auditor", "internal audit", "external audit", "ims auditor"], ["Finance/Accounting", "Operations"]),
         (["insurance adviser", "insurance advisor", "underwriter", "underwriting", "motor claims", "claims handler", "claims advisor", "claims adviser"], ["Operations", "Customer Operations"]),
         (["coordinator"], ["Operations", "Business Operations"]),
         (["controller"], ["Operations", "Finance/Accounting"]),
