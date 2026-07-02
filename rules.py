@@ -776,7 +776,7 @@ def has_disallowed_location_signal(text: str) -> bool:
         r"(?im)^\s*work location\s*[:\-]\s*(.+)$",
         r"(?im)^\s*city\s*[:\-]\s*(.+)$",
         r"(?im)^\s*based in\s+(.+)$",
-        r"(?im)^\s*where you[’']ll work\s*[:\-]?\s*(.+)$",
+        r"(?im)^\s*where you[\u2019']ll work\s*[:\-]?\s*(.+)$",
     ]
 
     for pattern in location_value_patterns:
@@ -961,6 +961,20 @@ def infer_skills_from_position_context(position_name: str, description: str, all
         (["finance analyst", "financial analyst", "accountant", "accounting analyst"], ["Excel", "Performance Reporting"]),
         (["account director", "account manager", "account exec", "sales director", "sales manager", "sales executive", "sales consultant", "commercial manager", "client director", "client partner", "partnerships", "customer success", "renewals"], ["Account Management", "Business Development", "CRM", "Client relations", "Stakeholder Management"]),
         (["1st line", "2nd line", "3rd line", "first line", "second line", "third line", "technical analyst", "technical support", "it support", "support engineer", "service desk", "help desk", "helpdesk", "desktop support", "infrastructure engineer", "systems engineer", "system engineer", "network engineer"], ["Troubleshooting", "Technical support", "Technical Documentation"]),
+        # Admin / operations / EA families.
+        (["administrator", "administration", "office administrator", "data administrator", "data entry"], ["Excel", "Stakeholder Management", "Communication software", "Project Management"]),
+        (["executive assistant", "personal assistant", "office manager"], ["Stakeholder Management", "Communication software", "Project Management", "Excel"]),
+        (["operations manager", "operations analyst", "operations associate", "operations coordinator", "business operations"], ["Stakeholder Management", "Project Management", "Excel", "Account Management"]),
+        # HR / People.
+        (["human resources", "hr advisor", "hr manager", "hr business partner", "hr generalist", "hr coordinator", "hr assistant", "people ops", "people operations", "people partner", "talent acquisition", "recruiter", "recruitment"], ["Onboarding", "Stakeholder Management", "Communication software"]),
+        # Payroll / pensions.
+        (["payroll", "pension"], ["Payroll processing", "Excel", "Financial reporting"]),
+        # Legal / compliance / risk.
+        (["legal", "paralegal", "counsel", "privacy", "compliance", "regulatory", "governance", "company secretary"], ["Stakeholder Management", "Communication software", "Client relations"]),
+        # Product.
+        (["product manager", "product owner", "product lead"], ["Stakeholder Management", "Project Management", "CRM"]),
+        # Marketing / brand / comms.
+        (["marketing", "brand", "content marketing", "communications", "public relations", "social media", "seo", "growth marketing"], ["CRM", "Communication software", "Stakeholder Management"]),
     ]
 
     allowed_lookup = {lower_text(x): x for x in allowed_skills}
@@ -1023,6 +1037,33 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
         (["finance analyst", "financial analyst", "accountant", "accounting analyst"], ["Finance/Accounting", "Operations"]),
         (["brand designer", "brand design", "brand design lead", "design lead"], ["Graphic Designer", "Brand Marketing"]),
         (["business development", "bdr", "sdr"], ["SDR/BDR", "Business Development Manager", "Account Executive"]),
+        # Coverage for common non-engineering roles whose exact title is not in
+        # the predefined list, so the AI's near-miss title would otherwise be
+        # dropped and leave the role blank.
+        (["customer success", "csm"], ["CSM/Account Manager", "Account Executive"]),
+        (["business intelligence", "bi developer", "bi analyst"], ["BI Developer", "Data/Insight Analyst"]),
+        (["risk ", "compliance", "regulatory", "financial crime", "governance"], ["Risk and Compliance", "Operations"]),
+        (["it support", "service desk", "helpdesk", "help desk", "desktop support"], ["Support Engineer", "System Administrator"]),
+        (["sales manager", "sales executive", "sales representative", "commercial manager", "sales consultant"], ["Business Development Manager", "Account Executive"]),
+        (["account manager", "client manager", "client director", "renewals"], ["CSM/Account Manager", "Account Director"]),
+        (["account director"], ["Account Director"]),
+        (["executive assistant", "personal assistant", "office manager", "office administrator"], ["Executive Assistant", "Operations"]),
+        (["payroll", "pension", "accounts assistant", "finance assistant"], ["Finance/Accounting", "Operations"]),
+        (["programme manager", "program manager", "delivery manager", "pmo", "project coordinator"], ["Project Manager", "Business Operations"]),
+        (["project manager"], ["Project Manager"]),
+        (["marketing manager", "marketing executive", "digital marketing", "content marketing", "brand manager", "growth marketing", "performance marketing"], ["Generalist Marketing", "Digital Marketing"]),
+        (["human resources", "hr advisor", "hr manager", "hr business partner", "hr generalist", "hr coordinator", "hr assistant", "people ops", "people operations", "people partner", "talent acquisition", "recruiter", "recruitment"], ["Human Resources", "Talent Acquisition"]),
+        (["legal", "paralegal", "counsel", "privacy", "data protection", "company secretary"], ["Legal", "Operations"]),
+        (["communications", "pr manager", "public relations", "public affairs"], ["PR/Communications", "Generalist Marketing"]),
+        (["operations manager", "operations analyst", "operations associate", "business operations"], ["Business Operations", "Operations"]),
+        (["business analyst"], ["Business Analyst", "Data/Insight Analyst"]),
+        (["product manager"], ["Product Manager"]),
+        (["product owner"], ["Product Owner"]),
+        (["scrum master"], ["Scrum Master"]),
+        (["ux researcher", "user researcher"], ["UX Researcher"]),
+        (["product designer", "ui/ux", "ux/ui"], ["UI/UX Designer", "UX Designer"]),
+        (["ui designer"], ["UI Designer"]),
+        (["ux designer"], ["UX Designer"]),
     ]
 
     for triggers, candidates in rules:
@@ -1056,9 +1097,9 @@ def salary_context_exists(text: str) -> bool:
         r"\bcompensation\b",
         r"\bpay\b",
         r"\bpackage\b",
-        r"£\s*\d",
+        r"\u00a3\s*\d",
         r"\$\s*\d",
-        r"€\s*\d",
+        r"\u20ac\s*\d",
         r"\bgbp\b",
         r"\busd\b",
         r"\beur\b",
@@ -1202,13 +1243,13 @@ def text_is_predominantly_non_english(text: str) -> bool:
     non_english_markers = [
         "responsabilidades",
         "requisitos",
-        "ubicación",
+        "ubicaci\u00f3n",
         "salario",
         "beneficios",
         "puesto",
         "empleo",
         "experiencia requerida",
-        "responsabilités",
+        "responsabilit\u00e9s",
         "exigences",
         "lieu",
         "salaire",
@@ -1225,8 +1266,8 @@ def text_is_predominantly_non_english(text: str) -> bool:
     if sum(1 for x in non_english_markers if x in lower) >= 2:
         return True
 
-    accented = len(re.findall(r"[à-ÿÀ-Ÿ]", t))
-    letters = len(re.findall(r"[A-Za-zÀ-Ÿ]", t))
+    accented = len(re.findall(r"[\u00e0-\u00ff\u00c0-\u0178]", t))
+    letters = len(re.findall(r"[A-Za-z\u00c0-\u0178]", t))
     if letters >= 200 and accented / max(letters, 1) > 0.03:
         return True
 
