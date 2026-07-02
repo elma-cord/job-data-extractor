@@ -903,7 +903,7 @@ _SAFE_SKILL_ALIASES = {
     "Flutter": [r"\bflutter framework\b", r"\bflutter development\b", r"\bflutter sdk\b", r"\bdart/flutter\b"],
     "Project Management": [r"\bproject management\b", r"\bmanage projects\b", r"\bdelivery of critical projects\b"],
     "Project Management Tools": [r"\bproject management tools\b", r"\bproject tools\b", r"\broadmap\b", r"\bplanned delivery\b"],
-    "Business Analysis": [r"\bbusiness analyst\b", r"\bbusiness analysis\b", r"\brequirements\b", r"\brequirements elicitation\b"],
+    "Business Analysis": [r"\bbusiness analyst\b", r"\bbusiness analysis\b", r"\brequirements elicitation\b", r"\brequirements gathering\b"],
     "Graphic Design": [r"\bgraphic design\b", r"\bbrand designer\b", r"\bvisual design\b"],
     "Brand Marketing": [r"\bbrand marketing\b", r"\bbrand identity\b", r"\bbrand designer\b"],
     "Business Development": [r"\bbusiness development\b"],
@@ -996,6 +996,59 @@ def infer_skills_from_position_context(position_name: str, description: str, all
     return out[:max_items]
 
 
+# Typical skills for a normalized (tagged) job title. Used as a LAST-resort
+# top-up when the model returned no/one skill AND the raw-title inference above
+# found nothing - the tagged title is reliable even when the position name is
+# oddly worded. Candidates are filtered against the relevant allowed list, so a
+# T&P role only keeps T&P skills and vice-versa.
+_TITLE_SKILL_HINTS = {
+    # --- T&P titles ---
+    "QA Automation Tester": ["Automated Testing", "Selenium", "Regression Testing", "Manual Testing"],
+    "QA Manual Tester": ["Manual Testing", "Functional Testing", "Regression Testing"],
+    "Developer in Test": ["Automated Testing", "Selenium", "API Testing"],
+    "Testing Manager": ["Automated Testing", "Manual Testing", "Regression Testing"],
+    "Quality Assurance": ["Manual Testing", "Automated Testing", "Functional Testing"],
+    "Security Engineer": ["Cyber Security", "Network Security", "Penetration Testing", "Security Testing"],
+    "Security": ["Cyber Security", "Network Security", "Security Testing"],
+    "Penetration Tester": ["Penetration Testing", "Cyber Security", "Security Testing"],
+    "Support Engineer": ["Troubleshooting", "Technical support", "Technical Documentation"],
+    "System Administrator": ["Troubleshooting", "Technical support", "Technical Documentation"],
+    "System Engineer": ["Troubleshooting", "Technical support"],
+    "Network Engineer": ["Network Security", "Troubleshooting", "Technical support"],
+    "DevOps Engineer": ["Cloud Computing", "Automations", "Troubleshooting"],
+    "Cloud Engineer": ["Cloud Computing", "Cloud Security", "Troubleshooting"],
+    "Site Reliability Engineer": ["Cloud Computing", "Automations", "Troubleshooting"],
+    "Solutions Engineer": ["Troubleshooting", "Technical support", "Technical Documentation"],
+    # --- Non-T&P titles ---
+    "Operations": ["Stakeholder Management", "Process management", "Project Management", "Excel"],
+    "Business Operations": ["Stakeholder Management", "Process management", "Project Management", "Excel"],
+    "Customer Operations": ["Stakeholder Management", "Client relations", "Communication software"],
+    "Finance/Accounting": ["Excel", "Financial reporting", "Stakeholder Management"],
+    "Human Resources": ["Onboarding", "Stakeholder Management", "Communication software"],
+    "People Ops": ["Onboarding", "Stakeholder Management", "Communication software"],
+    "Talent Acquisition": ["Recruitment strategy", "Onboarding", "Stakeholder Management"],
+    "Legal": ["Stakeholder Management", "Communication software", "Client relations"],
+    "Risk and Compliance": ["Stakeholder Management", "Communication software", "Client relations"],
+    "CSM/Account Manager": ["Account Management", "Client relations", "Stakeholder Management"],
+    "Account Director": ["Account Management", "Client relations", "Stakeholder Management"],
+    "Account Executive": ["Account Management", "Client relations", "Stakeholder Management"],
+    "Executive Assistant": ["Stakeholder Management", "Communication software", "Excel"],
+    "Product Manager": ["Stakeholder Management", "Project Management", "Product operations"],
+    "Product Owner": ["Stakeholder Management", "Project Management", "Product operations"],
+}
+
+
+def infer_skills_from_titles(job_titles: list[str], allowed_skills: list[str], max_items: int = 4) -> list[str]:
+    allowed_lookup = {lower_text(x): x for x in allowed_skills}
+    out = []
+    for title in job_titles or []:
+        for skill in _TITLE_SKILL_HINTS.get((title or "").strip(), []):
+            key = lower_text(skill)
+            if key in allowed_lookup and allowed_lookup[key] not in out:
+                out.append(allowed_lookup[key])
+    return out[:max_items]
+
+
 def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: list[str]) -> list[str]:
     title = lower_text(position_name)
     allowed_lookup = {lower_text(x): x for x in allowed_job_titles}
@@ -1065,6 +1118,7 @@ def infer_job_titles_from_position_name(position_name: str, allowed_job_titles: 
         (["ui designer"], ["UI Designer"]),
         (["ux designer"], ["UX Designer"]),
         (["customer assurance", "assurance coordinator", "customer coordinator"], ["Customer Operations", "Customer Support"]),
+        (["application lead", "application specialist", "application analyst", "application support", "application consultant", "application manager"], ["Support Engineer", "System Engineer", "Solutions Engineer"]),
         (["coordinator"], ["Operations", "Business Operations"]),
         (["controller"], ["Operations", "Finance/Accounting"]),
     ]
