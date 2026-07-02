@@ -755,9 +755,25 @@ class JobClassifier:
         # Last-resort default only when the model returned nothing usable.
         return ["junior", "mid", "senior"]
 
+    # A position name only supports a leadership/C-level title if it actually
+    # carries a leadership signal. Word boundaries keep "coordinator" from
+    # matching "coo", etc.
+    _LEADERSHIP_NAME_RE = re.compile(
+        r"\b(?:chief|head\s+of|director|vice\s+president|vp|founder|co-?founder|"
+        r"managing\s+director|chief\s+of\s+staff|engineering\s+manager|c[a-z]o|cxo)\b",
+        re.IGNORECASE,
+    )
+
     def _filter_job_titles(self, position_name: str, job_titles: list[str]) -> list[str]:
         title_l = clean_description(position_name).lower()
         titles = job_titles[:]
+
+        # Guard against the model tagging a plainly non-leadership role (e.g.
+        # "Customer Assurance Coordinator") with a leadership/C-level title (e.g.
+        # "COO"). If the position name shows no leadership signal, drop any
+        # leadership title so a real title is chosen by the fallback instead.
+        if not self._LEADERSHIP_NAME_RE.search(title_l):
+            titles = [t for t in titles if not is_leadership_job_title([t])]
 
         # A pure engineering/developer role (e.g. "Product Engineer", "Software
         # Engineer") is a software engineer and must not be mislabelled as a
