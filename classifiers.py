@@ -671,6 +671,59 @@ class JobClassifier:
 
         return LOCATION_UNKNOWN
 
+    def _worldwide_location(
+        self,
+        ai_location: Any,
+        gate_location: str,
+        description_text: str,
+        page_text: str,
+    ) -> str:
+        # OUTPUT value for the job_location column: the role's REAL location,
+        # worldwide (e.g. "Dublin, Ireland", "New York, USA", "Global"), instead
+        # of blanking anything non-UK to "Unknown". This is display-only:
+        # relevance is decided from the UK-scoped `gate_location` (see
+        # _apply_final_consistency), so widening this value can NEVER change
+        # whether a role is Relevant.
+        #
+        # 1) If the UK-scoped chooser already resolved a concrete place, trust it
+        #    verbatim - this preserves the London-collapse and the "United
+        #    Kingdom" fallback exactly as before for UK roles.
+        if gate_location and gate_location != LOCATION_UNKNOWN:
+            return gate_location
+        # 2) Otherwise keep the location the MODEL stated, worldwide (the old
+        #    chooser threw this away for anywhere outside the UK).
+        ai_location_s = safe_str(ai_location)
+        if ai_location_s and ai_location_s.lower() != "unknown":
+            return self._collapse_london(ai_location_s)
+        # 3) Last resort: recover a real location from the page text.
+        recovered = self._recover_location_from_text(description_text, page_text)
+        if recovered:
+            return self._collapse_london(recovered)
+        return LOCATION_UNKNOWN
+
+    def _single_remote(self, remote_preferences_list: list, remote_days: str) -> str:
+        # OUTPUT value for the remote_preferences column: exactly ONE of
+        # onsite/hybrid/remote, or "" when the posting gives no signal (never
+        # default to onsite). The internal `remote_preferences_list` union is
+        # kept untouched for the relevance gate; this only shapes what is shown.
+        days = safe_str(remote_days)
+        # A day-count is the most reliable signal. A split week is hybrid.
+        if days in {"1", "2", "3", "4"}:
+            return "hybrid"
+        if days == "5":
+            return "remote"
+        if days == "0":
+            return "onsite"
+        # No day-count: collapse the detected work-patterns to a single value.
+        prefs = remote_preferences_list or []
+        if "hybrid" in prefs:
+            return "hybrid"
+        if "onsite" in prefs and "remote" in prefs:
+            return "hybrid"
+        if len(prefs) == 1:
+            return prefs[0]
+        return ""
+
     def _coerce_salary_value(self, value: Any) -> str:
         value_s = safe_str(value).replace(",", "")
         if not value_s.isdigit():
@@ -885,11 +938,19 @@ class JobClassifier:
         job_category = normalize_tp_label(payload.get("job_category", "")) or NOT_TP_LABEL
         role_relevance_reason = safe_str(payload.get("role_relevance_reason", ""))
 
-        job_location = self._choose_best_location(
+        # UK-scoped value that drives the relevance gate (unchanged behaviour).
+        job_location_for_gate = self._choose_best_location(
             ai_location=payload.get("job_location", ""),
             description_text=description_text,
             page_text=page_text,
             used_fetched_page=used_fetched_page,
+        )
+        # Real, worldwide value shown in the output column (display-only).
+        job_location = self._worldwide_location(
+            ai_location=payload.get("job_location", ""),
+            gate_location=job_location_for_gate,
+            description_text=description_text,
+            page_text=page_text,
         )
 
         ai_remote_preferences = normalize_remote_preferences(payload.get("remote_preferences", []))
@@ -941,6 +1002,7 @@ class JobClassifier:
             "role_relevance_reason": role_relevance_reason,
             "job_category": job_category,
             "job_location": job_location,
+            "job_location_for_gate": job_location_for_gate,
             "clean_job_title": clean_job_title,
             "remote_preferences_list": remote_preferences_list,
             "remote_days": remote_days,
@@ -1026,8 +1088,10 @@ class JobClassifier:
             result["notes"] = self._append_note(result.get("notes", ""), "rule:negative_reason_override")
 
         if result.get("role_relevance") == RELEVANT_LABEL:
+            # Relevance uses the UK-scoped location, never the widened output
+            # value - so the worldwide job_location column changes NOTHING here.
             if not is_location_allowed(
-                result.get("job_location", ""),
+                result.get("job_location_for_gate", result.get("job_location", "")),
                 result.get("remote_preferences_list", []),
                 source_text,
             ):
@@ -1035,6 +1099,9 @@ class JobClassifier:
                 result["job_category"] = result.get("job_category") or NOT_TP_LABEL
                 result["role_relevance_reason"] = "Location is outside allowed regions or work-pattern rules."
                 result["notes"] = self._append_note(result.get("notes", ""), "rule:location_gate")
+
+        # Internal-only key; never written to output.
+        result.pop("job_location_for_gate", None)
 
         if result.get("role_relevance") == NOT_RELEVANT_LABEL:
             return self._blank_result(
@@ -1044,7 +1111,10 @@ class JobClassifier:
                 notes=result.get("notes", ""),
             )
 
-        result["remote_preferences"] = ", ".join(result.get("remote_preferences_list", [])) if result.get("remote_preferences_list") else ""
+        result["remote_preferences"] = self._single_remote(
+            result.get("remote_preferences_list", []),
+            result.get("remote_days", ""),
+        )
         if not result.get("role_relevance_reason"):
             result["role_relevance_reason"] = "Role fits allowed scope and location rules."
         # A rescue rule may have flipped this role to Relevant; drop any stale AI
