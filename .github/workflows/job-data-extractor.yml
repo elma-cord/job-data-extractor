@@ -8,6 +8,10 @@ env:
   # instead of split across batches. Lower this only if a single run risks the
   # job timeout below.
   BATCH_SIZE: "100000"
+  # Headless-Chrome render fallback for JavaScript-only job pages (People-First,
+  # some Workday tenants, etc.). Fires only when the ATS API + static fetch can't
+  # locate the job. Set to "0" to run ATS + static only (no Playwright).
+  ENABLE_RENDER: "1"
 
 on:
   workflow_dispatch:
@@ -31,6 +35,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
 
       - name: Validate required input files
         run: |
