@@ -1,4 +1,5 @@
 import csv
+import os
 import re
 import time
 from pathlib import Path
@@ -520,6 +521,27 @@ class JobClassifier:
         )
         return not (has_location_signal and has_role_signal)
 
+    def _has_location_signal(self, text: str) -> bool:
+        # Deterministic check (no model call): can we already tell WHERE this job
+        # is from this text? Used to decide whether to fetch the live page and
+        # whether a headless render is still needed. A disallowed/foreign signal
+        # counts as "located" too - relevance can act on it without a render.
+        if not text:
+            return False
+        if re.search(r"(?im)^\s*location\b", text):
+            return True
+        if has_disallowed_location_signal(text):
+            return True
+        if self._recover_location_from_text(text):
+            return True
+        if re.search(
+            r"\b(united kingdom|england|scotland|wales|northern ireland)\b",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        return False
+
     def _build_source_text(self, description: str, job_url: str) -> tuple[str, str, bool, str]:
         description = clean_description(description)
         notes = []
@@ -527,19 +549,45 @@ class JobClassifier:
         used_fetched_page = False
         page_text = ""
 
-        if job_url and self._should_fetch_url(description):
+        # Fetch the live job page when a URL exists AND either the usual fetch
+        # heuristic says so OR the description alone can't locate the job. The
+        # upgraded fetch_extract tries an ATS API fast-path first (Workday,
+        # Greenhouse, Lever, Ashby, SmartRecruiters, Workable, Oracle, BambooHR,
+        # Recruitee), then a plain static fetch.
+        want_fetch = bool(job_url) and (
+            self._should_fetch_url(description) or not self._has_location_signal(description)
+        )
+
+        if want_fetch:
+            render_enabled = os.getenv("ENABLE_RENDER", "1").strip() == "1"
+
             fetched = fetch_job_page_text(job_url)
-            if fetched.ok and fetched.text:
-                page_text = clean_description(fetched.text)
-                if page_text:
-                    used_fetched_page = True
-                    if description:
-                        source_text = f"{description}\n\n--- JOB PAGE TEXT ---\n\n{page_text}"
-                        notes.append("used current description + page text")
-                    else:
-                        source_text = page_text
-                        notes.append("used page text")
-            else:
+            page_text = clean_description(fetched.text) if (fetched.ok and fetched.text) else ""
+            source_tag = getattr(fetched, "source", "static")
+
+            # Render-on-miss: if ATS + static still don't locate the job (e.g. a
+            # JavaScript-only page like People-First), re-fetch with a headless
+            # Chrome render and use that text instead.
+            if render_enabled and not self._has_location_signal(f"{description}\n{page_text}"):
+                rendered = fetch_job_page_text(job_url, render=True)
+                rendered_text = clean_description(rendered.text) if (rendered.ok and rendered.text) else ""
+                if rendered_text:
+                    page_text = rendered_text
+                    source_tag = "render"
+                elif not page_text:
+                    notes.append(
+                        f"render_failed: {rendered.error or rendered.status_code or 'unknown'}"
+                    )
+
+            if page_text:
+                used_fetched_page = True
+                if description:
+                    source_text = f"{description}\n\n--- JOB PAGE TEXT ---\n\n{page_text}"
+                    notes.append(f"used current description + page text ({source_tag})")
+                else:
+                    source_text = page_text
+                    notes.append(f"used page text ({source_tag})")
+            elif not notes:
                 notes.append(f"url_fetch_failed: {fetched.error or fetched.status_code or 'unknown'}")
         else:
             if description:
