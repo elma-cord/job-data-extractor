@@ -199,9 +199,18 @@ def _html_to_text(html_doc: str) -> str:
             meta_texts.append(node.get("content", ""))
 
     for tag in soup(["script", "style", "noscript", "svg", "img", "picture", "source"]):
-        if tag.get("type") == "application/ld+json":
+        try:
+            # Decomposing a matched parent (e.g. <picture>) detaches its matched
+            # children (<source>/<img>); when the loop later reaches such a
+            # detached tag its attrs are None. Skip those instead of crashing the
+            # whole fetch (which would blank the row -> Unknown).
+            if getattr(tag, "attrs", None) is None:
+                continue
+            if tag.get("type") == "application/ld+json":
+                continue
+            tag.decompose()
+        except Exception:
             continue
-        tag.decompose()
 
     body_text = soup.get_text(separator="\n")
 
