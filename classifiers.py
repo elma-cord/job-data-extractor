@@ -562,7 +562,13 @@ class JobClassifier:
             render_enabled = os.getenv("ENABLE_RENDER", "1").strip() == "1"
 
             fetched = fetch_job_page_text(job_url)
-            page_text = clean_description(fetched.text) if (fetched.ok and fetched.text) else ""
+            fetched_text = clean_description(fetched.text) if fetched.text else ""
+            # Keep the fetched text when the request was clean OR it already
+            # contains a location. The block heuristic can false-positive on
+            # pages (e.g. Cloudflare-fronted job boards return a complete body
+            # with the word "cloudflare" in it), and we must not throw away good
+            # text that already states the location.
+            page_text = fetched_text if (fetched.ok or self._has_location_signal(fetched_text)) else ""
             source_tag = getattr(fetched, "source", "static")
 
             # Render-on-miss: if ATS + static still don't locate the job (e.g. a
@@ -570,8 +576,8 @@ class JobClassifier:
             # Chrome render and use that text instead.
             if render_enabled and not self._has_location_signal(f"{description}\n{page_text}"):
                 rendered = fetch_job_page_text(job_url, render=True)
-                rendered_text = clean_description(rendered.text) if (rendered.ok and rendered.text) else ""
-                if rendered_text:
+                rendered_text = clean_description(rendered.text) if rendered.text else ""
+                if rendered_text and (rendered.ok or self._has_location_signal(rendered_text)):
                     page_text = rendered_text
                     source_tag = "render"
                 elif not page_text:
