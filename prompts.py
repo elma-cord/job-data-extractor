@@ -141,7 +141,8 @@ def build_unified_job_extraction_prompt(
         - LONDON: if the role is anywhere in London (central London, a London borough, or a London suburb such as Shoreditch/Croydon/Wimbledon), output exactly "London, UK" - do not output the specific neighbourhood.
         - Do not invent a more specific neighbourhood, street, or office than the text supports.
         - Do NOT use locations from unrelated job cards, footers, "More jobs", "Similar jobs", or "Related jobs" sections.
-        - Output "Unknown" ONLY when the role is genuinely remote-anywhere with no allowed region, or the actual location is a foreign/excluded place, or there is truly no supported location at all.
+        - Output "Unknown" for a foreign/excluded location (relevance is handled separately), or when there is truly no supported location anywhere in the posting.
+        - BUT do NOT use "Unknown" for an ALLOWED remote role just because no UK city is named. If the role is remote Global / worldwide, output "Global"; remote Europe / EMEA, output "Remote - Europe"; remote Ireland, output "Ireland" (or the stated Irish city, e.g. "Dublin, Ireland"). Report the real allowed region rather than "Unknown".
 
         6) remote_preferences
         Allowed values only: "onsite", "hybrid", "remote"
