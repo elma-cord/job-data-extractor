@@ -75,10 +75,21 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
+def _scalar(value) -> str:
+    # schema.org address fields are sometimes objects rather than strings, e.g.
+    # addressCountry = {"@type": "Country", "name": "GB"}. Pull the readable
+    # value so it never leaks a raw dict into the location line.
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("value") or "").strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def _join_address_parts(parts) -> str:
     clean = []
     for part in parts:
-        part = str(part or "").strip()
+        part = _scalar(part)
         if part and part.lower() not in ("none", "null") and part not in clean:
             clean.append(part)
     return ", ".join(clean)
