@@ -1,8 +1,10 @@
 import csv
+import json
 import os
 import re
 import sys
 import threading
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -11,11 +13,42 @@ from urllib.parse import urlparse
 from classifiers import JobClassifier
 from config import INPUT_CSV, OUTPUT_CSV
 from formatters import OUTPUT_COLUMNS, build_output_row
-from remote_policy_lookup import RemotePolicyLookup
+from remote_policy_lookup import RemotePolicyLookup, RemotePolicyResult
 from rules import detect_quick_tp_from_title
 
 
 VALID_REMOTE_VALUES = {"onsite", "hybrid", "remote"}
+
+# --- Persistent company-level remote-policy cache -------------------------------
+# A company's remote policy barely changes, so we cache each company's Gemini
+# result to a JSON file and reuse it on future runs (restored/saved across GitHub
+# Actions runs via actions/cache). This does NOT change how a lookup is computed -
+# it only avoids paying to look up the SAME company again. A TTL forces a refresh
+# after REMOTE_CACHE_TTL_DAYS so a company that changes policy is not stuck forever.
+REMOTE_CACHE_PATH = Path(os.getenv("REMOTE_CACHE_PATH", "remote_policy_cache.json"))
+try:
+    REMOTE_CACHE_TTL_DAYS = float(os.getenv("REMOTE_CACHE_TTL_DAYS", "90") or 90)
+except ValueError:
+    REMOTE_CACHE_TTL_DAYS = 90.0
+
+
+def _load_remote_cache(path: Path) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_remote_cache(path: Path, data: dict) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=0)
+    except Exception as exc:
+        print(f"warning: could not save remote-policy cache: {exc}")
+
+
 COMMON_NON_COMPANY_HOSTS = {
     "linkedin.com",
     "www.linkedin.com",
@@ -164,8 +197,43 @@ def main() -> None:
     # company and reuse it for every job at that company. Saves Gemini calls and
     # guarantees the same company gets the same answer across rows. The lock keeps
     # the cache safe when rows are processed by several worker threads at once.
+    #
+    # Prime the in-run cache from the PERSISTENT cache (previous runs) so we skip
+    # Gemini for companies we already resolved within the TTL.
+    persistent_cache = _load_remote_cache(REMOTE_CACHE_PATH)
+    run_started = time.time()
+    ttl_seconds = REMOTE_CACHE_TTL_DAYS * 86400.0
+
     remote_lookup_cache: dict[str, object] = {}
+    remote_lookup_ts: dict[str, float] = {}
+    for cached_key, cached_val in persistent_cache.items():
+        if not isinstance(cached_val, dict):
+            continue
+        try:
+            cached_ts = float(cached_val.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            cached_ts = 0.0
+        if ttl_seconds > 0 and (run_started - cached_ts) > ttl_seconds:
+            continue  # stale -> allow a fresh look-up when this company appears
+        remote_lookup_cache[cached_key] = RemotePolicyResult(
+            remote_preferences=str(cached_val.get("remote_preferences", "unknown")),
+            note=str(cached_val.get("note", "")),
+            source_count=int(cached_val.get("source_count", 0) or 0),
+        )
+        remote_lookup_ts[cached_key] = cached_ts
     remote_lookup_lock = threading.Lock()
+    if gemini_enabled:
+        print(f"Remote-policy cache: {len(remote_lookup_cache)} companies primed (of {len(persistent_cache)} stored).")
+
+    # Optional free-tier guard: cap how many NEW company look-ups (grounded Google
+    # searches) this run may make. 0 = no cap. Set MAX_GEMINI_LOOKUPS to your daily
+    # free grounding allotment to avoid paid usage; capped companies are left
+    # "unknown" this run and picked up on a later run (they are NOT cached).
+    try:
+        max_gemini_lookups = int(os.getenv("MAX_GEMINI_LOOKUPS", "0") or 0)
+    except ValueError:
+        max_gemini_lookups = 0
+    gemini_lookup_count = {"n": 0}
 
     # --- Company-level pre-pass (Inactive-company T&P gate) ---
     # Group every row by company and remember each company's "List" status.
@@ -253,10 +321,28 @@ def main() -> None:
                 if cached is not None:
                     remote_result = cached
                 else:
-                    remote_result = remote_lookup.lookup(remote_row)
-                    if cache_key:
+                    # Respect the optional free-tier cap. Reserve a slot atomically
+                    # so concurrent worker threads cannot overshoot the limit.
+                    allowed = True
+                    if max_gemini_lookups > 0:
                         with remote_lookup_lock:
-                            remote_lookup_cache[cache_key] = remote_result
+                            if gemini_lookup_count["n"] >= max_gemini_lookups:
+                                allowed = False
+                            else:
+                                gemini_lookup_count["n"] += 1
+
+                    if allowed:
+                        remote_result = remote_lookup.lookup(remote_row)
+                        if cache_key:
+                            with remote_lookup_lock:
+                                remote_lookup_cache[cache_key] = remote_result
+                                remote_lookup_ts[cache_key] = time.time()
+                    else:
+                        remote_result = RemotePolicyResult(
+                            remote_preferences="unknown",
+                            note="remote_policy_lookup: skipped - free-tier cap reached (will retry next run)",
+                            source_count=0,
+                        )
 
                 gemini_remote = _normalize_remote_value(remote_result.remote_preferences)
                 gemini_note = (remote_result.note or "").strip()
@@ -347,6 +433,24 @@ def main() -> None:
             )
 
     write_output_csv(output_path, output_rows)
+
+    # Persist the company remote-policy cache for future runs. Freshly looked-up
+    # companies get the current timestamp; reused (primed) entries keep their
+    # original timestamp so the TTL still expires them eventually. Untouched
+    # entries from earlier runs are carried forward unchanged.
+    if gemini_enabled:
+        merged_cache = dict(persistent_cache)
+        with remote_lookup_lock:
+            for cache_key, res in remote_lookup_cache.items():
+                merged_cache[cache_key] = {
+                    "remote_preferences": getattr(res, "remote_preferences", "unknown"),
+                    "note": getattr(res, "note", ""),
+                    "source_count": getattr(res, "source_count", 0),
+                    "ts": remote_lookup_ts.get(cache_key, run_started),
+                }
+        _save_remote_cache(REMOTE_CACHE_PATH, merged_cache)
+        print(f"Remote-policy cache saved: {len(merged_cache)} companies.")
+
     print(f"Done. Output written to: {output_path}")
 
 
