@@ -12,6 +12,14 @@ env:
   # some Workday tenants, etc.). Fires only when the ATS API + static fetch can't
   # locate the job. Set to "0" to run ATS + static only (no Playwright).
   ENABLE_RENDER: "1"
+  # Free-tier guard for the Gemini company remote-policy lookup: max number of NEW
+  # companies to look up (grounded Google searches) per run. Companies already in
+  # the cache are free and don't count. Set this to Google's current daily free
+  # grounding allotment (VERIFY the current number) so you never pay; "0" removes
+  # the cap. Capped companies come back "unknown" this run and are retried next run.
+  MAX_GEMINI_LOOKUPS: "1400"
+  # How long a cached company remote-policy stays valid before it is re-looked-up.
+  REMOTE_CACHE_TTL_DAYS: "90"
 
 on:
   workflow_dispatch:
@@ -24,6 +32,17 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      # Restore the company remote-policy cache saved by previous runs, so we
+      # don't re-pay Gemini for companies we've already resolved. restore-keys
+      # does a prefix match to pick up the most recent previous cache.
+      - name: Restore remote-policy cache
+        uses: actions/cache/restore@v4
+        with:
+          path: remote_policy_cache.json
+          key: remote-policy-cache-${{ github.run_id }}
+          restore-keys: |
+            remote-policy-cache-
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -194,3 +213,20 @@ jobs:
           name: job-data-results-batches
           path: batch_outputs/
           if-no-files-found: error
+
+      # Keep a downloadable copy of the company cache (for transparency/inspection).
+      - name: Upload remote-policy cache artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-policy-cache
+          path: remote_policy_cache.json
+          if-no-files-found: ignore
+
+      # Persist the company remote-policy cache for the NEXT run.
+      - name: Save remote-policy cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: remote_policy_cache.json
+          key: remote-policy-cache-${{ github.run_id }}
