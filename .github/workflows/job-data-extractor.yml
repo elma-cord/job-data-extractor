@@ -19,7 +19,7 @@ env:
   # the cap. Capped companies come back "unknown" this run and are retried next run.
   MAX_GEMINI_LOOKUPS: "1400"
   # How long a cached company remote-policy stays valid before it is re-looked-up.
-  REMOTE_CACHE_TTL_DAYS: "90"
+  REMOTE_CACHE_TTL_DAYS: "120"
 
 on:
   workflow_dispatch:
